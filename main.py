@@ -5,15 +5,21 @@ import requests
 import traceback
 from flask import Flask, request, jsonify
 from supabase import create_client, Client
+from postgrest.exceptions import APIError
 from openai import OpenAI
 from groq import Groq
 from datetime import datetime
+from pythonjsonlogger import jsonlogger
 
 # ==========================================
-# OBSERVABILIDADE (Logs Estruturados para o GCP)
+# OBSERVABILIDADE: JSON Logging Estruturado para GCP
 # ==========================================
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logHandler = logging.StreamHandler()
+formatter = jsonlogger.JsonFormatter('%(asctime)s %(levelname)s %(message)s %(module)s')
+logHandler.setFormatter(formatter)
 logger = logging.getLogger(__name__)
+logger.addHandler(logHandler)
+logger.setLevel(logging.INFO)
 
 # ==========================================
 # CONFIGURAÇÕES E SEGURANÇA (AppSec)
@@ -23,33 +29,34 @@ app = Flask(__name__)
 REQUIRED_VARS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_SECRET_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY"]
 for var in REQUIRED_VARS:
     if not os.environ.get(var):
-        logger.critical(f"AppSec Fatal Error: Variável de ambiente {var} não configurada.")
+        logger.critical({"event": "startup_failed", "reason": f"Missing variable {var}"})
         raise RuntimeError(f"AppSec Fatal Error: Variável de ambiente {var} não configurada.")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 SECRET_TOKEN = os.environ.get("TELEGRAM_SECRET_TOKEN")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-logger.info("Iniciando conexão com os clientes (Supabase, Groq, DeepSeek)...")
+logger.info({"event": "startup", "message": "Iniciando conexão com os clientes (Supabase, Groq, DeepSeek)..."})
 try:
     supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
     groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
     deepseek_client = OpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
-    logger.info("Clientes iniciados com sucesso.")
+    logger.info({"event": "clients_initialized", "status": "success"})
 except Exception as e:
-    logger.critical(f"Erro fatal ao iniciar clientes: {e}")
+    logger.critical({"event": "init_error", "error": str(e), "trace": traceback.format_exc()})
     raise
 
 # ==========================================
-# FUNÇÕES DE INFRAESTRUTURA
+# FUNÇÕES DE INFRAESTRUTURA (FinOps & Resiliência)
 # ==========================================
 def enviar_mensagem_telegram(chat_id, texto):
     try:
         url = f"{TELEGRAM_API_URL}/sendMessage"
         payload = {"chat_id": chat_id, "text": texto, "parse_mode": "Markdown"}
+        # FinOps: Timeout para evitar travamento da CPU
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        logger.error(f"Falha ao enviar resposta para o Telegram: {e}")
+        logger.error({"event": "telegram_send_fail", "chat_id": chat_id, "error": str(e)})
 
 def baixar_audio_telegram(file_id):
     url_info = f"{TELEGRAM_API_URL}/getFile?file_id={file_id}"
@@ -58,10 +65,12 @@ def baixar_audio_telegram(file_id):
         return None
     file_path = resp["result"]["file_path"]
     download_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+    # FinOps: Timeout estendido para download de mídia
     return requests.get(download_url, timeout=15).content
 
 def transcrever_audio(audio_bytes):
-    tmp_path = "/tmp/audio.ogg"
+    # Concorrência Segura: Timestamp no nome do arquivo evita colisão
+    tmp_path = f"/tmp/audio_{datetime.now().timestamp()}.ogg"
     with open(tmp_path, "wb") as f:
         f.write(audio_bytes)
     
@@ -132,6 +141,10 @@ def processar_texto_com_llm(texto_usuario):
     return json.loads(response.choices[0].message.content)
 
 def inserir_no_banco(dados_extraidos):
+    # Auditoria de Dados: Dump do Payload (excluindo o raciocínio longo para poupar log)
+    payload_audit = {k: v for k, v in dados_extraidos.items() if k != "raciocinio_interno"}
+    logger.info({"event": "db_insert_attempt", "payload": payload_audit})
+
     if "raciocinio_interno" in dados_extraidos:
         del dados_extraidos["raciocinio_interno"]
 
@@ -145,9 +158,13 @@ def inserir_no_banco(dados_extraidos):
         "conta": dados_extraidos.get("conta", "Não Informada")
     }
     
-    # Se houver erro de validação (ex: natureza errada) isso lançará uma exceção que será pega no webhook
-    resposta = supabase.table("gastos").insert(registro).execute()
-    return resposta
+    try:
+        resposta = supabase.table("gastos").insert(registro).execute()
+        return resposta
+    except APIError as e:
+        # Tratamento Granular de Banco de Dados: Dump de Exceção PostgREST
+        logger.error({"event": "db_error", "code": e.code, "message": e.message, "hint": e.hint})
+        raise Exception(f"Erro no Banco de Dados (Cod: {e.code}): {e.message}")
 
 # ==========================================
 # WEBHOOK (Gateway com Tratamento de Erros)
@@ -156,7 +173,7 @@ def inserir_no_banco(dados_extraidos):
 def telegram_webhook():
     req_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if req_secret != SECRET_TOKEN:
-        logger.warning("Tentativa de acesso bloqueada: Secret Token inválido.")
+        logger.warning({"event": "unauthorized_access", "reason": "Invalid Secret Token"})
         return jsonify({"error": "Unauthorized"}), 403
 
     update = request.get_json()
@@ -170,31 +187,28 @@ def telegram_webhook():
         texto_analise = ""
         
         if "voice" in message:
-            logger.info(f"Processando áudio do chat {chat_id}")
+            logger.info({"event": "processing_voice", "chat_id": chat_id})
             enviar_mensagem_telegram(chat_id, "⏳ *Ouvindo o áudio...*")
             audio_bytes = baixar_audio_telegram(message["voice"]["file_id"])
             if not audio_bytes:
                 raise Exception("Não foi possível fazer o download do áudio no Telegram.")
             
             texto_analise = transcrever_audio(audio_bytes)
-            logger.info(f"Áudio transcrito: {texto_analise}")
+            logger.info({"event": "audio_transcribed", "text": texto_analise})
             
         elif "text" in message:
             texto_analise = message["text"]
-            logger.info(f"Processando texto: {texto_analise}")
+            logger.info({"event": "processing_text", "text": texto_analise})
         else:
             return jsonify({"status": "unsupported"}), 200
 
-        logger.info("Enviando texto ao DeepSeek para extração...")
         dados = processar_texto_com_llm(texto_analise)
         
         if dados and "valor" in dados:
             pensamento = dados.get("raciocinio_interno", "")
-            logger.info(f"Dados extraídos com sucesso: {dados}")
             
-            logger.info("Salvando no Supabase...")
             inserir_no_banco(dados)
-            logger.info("Registro salvo com sucesso.")
+            logger.info({"event": "record_saved_successfully"})
             
             msg_sucesso = (
                 f"✅ **Registro Salvo!**\n\n"
@@ -210,15 +224,13 @@ def telegram_webhook():
             raise Exception("A Inteligência Artificial não retornou dados no formato esperado.")
 
     except Exception as e:
-        # Pega qualquer erro que acontecer (Supabase, Groq, DeepSeek, ou código) e te avisa!
+        # Tratamento Global: Fail-Fast & Acknowledge (com Dump de Pilha)
         erro_detalhado = traceback.format_exc()
-        logger.error(f"Erro Crítico durante a requisição:\n{erro_detalhado}")
+        logger.error({"event": "request_failed", "error": str(e), "traceback": erro_detalhado, "input": texto_analise if 'texto_analise' in locals() else None})
         
-        # O pulo do gato do QA: Manda o erro pro seu celular.
         msg_erro = f"❌ *Falha ao registrar o gasto!*\n\n⚠️ *Motivo:* `{str(e)}`\n\n_Verifique os logs no Google Cloud para mais detalhes._"
         enviar_mensagem_telegram(chat_id, msg_erro)
 
-    # Devolvemos 200 OK para o Telegram, pois o erro já foi tratado e avisado ao usuário.
     return jsonify({"status": "ok"}), 200
 
 if __name__ == "__main__":
