@@ -9,7 +9,7 @@ from supabase import create_client, Client
 from postgrest.exceptions import APIError
 from openai import OpenAI
 from groq import Groq
-from datetime import datetime
+from datetime import datetime, timedelta
 from pythonjsonlogger import jsonlogger
 
 # ==========================================
@@ -49,6 +49,10 @@ except Exception as e:
 # ==========================================
 # FUNÇÕES DE INFRAESTRUTURA E MOTOR TEMPORAL
 # ==========================================
+def get_brasilia_time():
+    """Garante que o fuso horário seja UTC-3 (Horário de Brasília), evitando o 'Bug da Madrugada' do GCP."""
+    return datetime.utcnow() - timedelta(hours=3)
+
 def enviar_mensagem_telegram(chat_id, texto):
     try:
         url = f"{TELEGRAM_API_URL}/sendMessage"
@@ -65,7 +69,7 @@ def baixar_audio_telegram(file_id):
     return requests.get(download_url, timeout=15).content
 
 def transcrever_audio(audio_bytes):
-    tmp_path = f"/tmp/audio_{datetime.now().timestamp()}.ogg"
+    tmp_path = f"/tmp/audio_{get_brasilia_time().timestamp()}.ogg"
     with open(tmp_path, "wb") as f: f.write(audio_bytes)
     try:
         with open(tmp_path, "rb") as file:
@@ -79,7 +83,7 @@ def transcrever_audio(audio_bytes):
         if os.path.exists(tmp_path): os.remove(tmp_path)
 
 def add_months_safely(sourcedate, months):
-    """Soma meses com segurança sem quebrar no dia 31 (ex: 31 Jan -> 28 Fev)"""
+    """Soma meses com segurança matemática adaptando-se a anos bissextos e fins de mês."""
     month = sourcedate.month - 1 + months
     year = sourcedate.year + month // 12
     month = month % 12 + 1
@@ -90,9 +94,10 @@ def add_months_safely(sourcedate, months):
 # MOTOR COGNITIVO (Intent Router & Strict Enum)
 # ==========================================
 def processar_texto_com_llm(texto_usuario):
-    data_atual = datetime.now().strftime("%Y-%m-%d")
-    mes_atual = datetime.now().strftime("%m")
-    ano_atual = datetime.now().strftime("%Y")
+    hoje_bsb = get_brasilia_time()
+    data_atual = hoje_bsb.strftime("%Y-%m-%d")
+    mes_atual = hoje_bsb.strftime("%m")
+    ano_atual = hoje_bsb.strftime("%Y")
 
     system_prompt = f"""
     Você é um Copilot Financeiro autônomo. 
@@ -136,7 +141,7 @@ def processar_texto_com_llm(texto_usuario):
         "categoria": "Uma da lista estrita",
         "descricao": "Resumo em 5 palavras",
         "metodo_pagamento": "Pix" | "Cartão de Crédito" | "Cartão de Débito" | "Dinheiro" | "Outros",
-        "conta": "Instituição"
+        "conta": "Nome do banco, 'Carteira' (se dinheiro), ou OBRIGATORIAMENTE 'Não Informada' se não souber."
       }},
 
       // PREENCHA APENAS SE INTENÇÃO FOR 'consultar' OU 'excluir'
@@ -164,32 +169,41 @@ def processar_texto_com_llm(texto_usuario):
 # DATA LAYER (Banco de Dados & Matemática Pythonica)
 # ==========================================
 def aplicar_filtros_query(query_obj, filtros):
+    # Salvaguarda PostgREST: Injeta filtro semântico obrigatório para evitar '21000: DELETE requires a WHERE clause'
+    query_obj = query_obj.gte("valor", 0)
+
     if not filtros: return query_obj
+    
     if filtros.get("categoria"): query_obj = query_obj.eq("categoria", filtros["categoria"])
     if filtros.get("conta"): query_obj = query_obj.eq("conta", filtros["conta"])
     if filtros.get("mes") and filtros.get("ano"):
-        data_inicio = f"{filtros['ano']}-{filtros['mes']}-01"
-        data_fim = f"{filtros['ano']}-{filtros['mes']}-31" 
+        # Resolução Dinâmica de Datas: Evita erro '22008' de dias inexistentes (Ex: 31 de Fevereiro)
+        ano = int(filtros["ano"])
+        mes = int(filtros["mes"])
+        ultimo_dia = calendar.monthrange(ano, mes)[1]
+        
+        data_inicio = f"{ano}-{mes:02d}-01"
+        data_fim = f"{ano}-{mes:02d}-{ultimo_dia:02d}" 
         query_obj = query_obj.gte("data", data_inicio).lte("data", data_fim)
+        
     return query_obj
 
 def inserir_no_banco(dados_reg):
     payload_audit = {k: v for k, v in dados_reg.items() if k != "raciocinio_interno"}
     logger.info({"event": "db_insert_attempt", "payload": payload_audit})
     
-    # 1. Extração Segura dos Números
-    valor_total = float(dados_reg.get("valor_total", 0.0))
-    parcelas = int(dados_reg.get("parcelas", 1))
+    # Extração Segura (Curto-circuito) para evitar NoneType Error
+    valor_total = float(dados_reg.get("valor_total") or 0.0)
+    parcelas = int(dados_reg.get("parcelas") or 1)
     if parcelas < 1: parcelas = 1
     
-    # 2. Matemática Exata (Evitando sumiço de centavos)
+    # Matemática Exata (Evitando sumiço de centavos)
     valor_base = round(valor_total / parcelas, 2)
     valor_ultima = round(valor_total - (valor_base * (parcelas - 1)), 2)
     
-    data_atual = datetime.utcnow()
+    data_atual = get_brasilia_time()
     registros_em_lote = []
     
-    # 3. Geração das Linhas no Tempo
     for i in range(parcelas):
         valor_parcela = valor_ultima if i == (parcelas - 1) else valor_base
         data_parcela = add_months_safely(data_atual, i).strftime("%Y-%m-%d")
@@ -209,7 +223,6 @@ def inserir_no_banco(dados_reg):
         }
         registros_em_lote.append(registro)
         
-    # 4. Inserção em Massa Transacional
     try:
         supabase.table("gastos").insert(registros_em_lote).execute()
     except APIError as e:
@@ -235,7 +248,7 @@ def excluir_no_banco(filtros, confirmacao_massa):
         return 0, "Nenhum registro encontrado para estes filtros."
     
     if qtd_afetada > 20 and not confirmacao_massa:
-        return qtd_afetada, "⚠️ *Trava de Segurança Ativada!*\nSua ordem afeta mais de 20 registros. Para autorizar, envie o áudio novamente com a frase exata: _'Confirmo exclusão em massa'_."
+        return qtd_afetada, "⚠️ *Trava de Segurança Ativada!*\nSua ordem afeta mais de 20 registros. Para autorizar, envie a frase exata: _'Confirmo exclusão em massa'_."
     
     query_del = supabase.table("gastos").delete()
     query_del = aplicar_filtros_query(query_del, filtros)
@@ -277,8 +290,8 @@ def telegram_webhook():
             dados_reg = analise_ia.get("dados_registro", {})
             inserir_no_banco(dados_reg)
             
-            val_total = float(dados_reg.get("valor_total", 0.0))
-            parcelas = int(dados_reg.get("parcelas", 1))
+            val_total = float(dados_reg.get("valor_total") or 0.0)
+            parcelas = int(dados_reg.get("parcelas") or 1)
             val_str = f"R$ {val_total:,.2f}" + (f" (em {parcelas}x)" if parcelas > 1 else "")
             
             msg = (f"✅ **Salvo!**\n💰 {val_str} | 📊 {dados_reg.get('natureza')}\n"
@@ -304,7 +317,7 @@ def telegram_webhook():
             qtd, status_msg = excluir_no_banco(filtros, confirmado)
             
             if status_msg == "excluidos":
-                enviar_mensagem_telegram(chat_id, f"🗑️ **Exclusão Concluída**\n{qtd} registro(s) apagado(s).\n🧠 *Lógica:* _{pensamento}_")
+                enviar_mensagem_telegram(chat_id, f"🗑️ **Exclusão Concluída**\n{qtd} registro(s) apagado(s).\\n🧠 *Lógica:* _{pensamento}_")
             else:
                 enviar_mensagem_telegram(chat_id, status_msg)
         else:
