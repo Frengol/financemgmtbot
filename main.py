@@ -8,11 +8,10 @@ from groq import Groq
 from datetime import datetime
 
 # ==========================================
-# CONFIGURAÇÕES E APPS (Injeção de Dependências via Env)
+# CONFIGURAÇÕES E SEGURANÇA (AppSec)
 # ==========================================
 app = Flask(__name__)
 
-# AppSec: Falha rápida (Fail-fast) se faltarem variáveis de ambiente críticas
 REQUIRED_VARS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_SECRET_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY"]
 for var in REQUIRED_VARS:
     if not os.environ.get(var):
@@ -22,34 +21,29 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 SECRET_TOKEN = os.environ.get("TELEGRAM_SECRET_TOKEN")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# Inicialização de Clientes (Supabase, Groq, DeepSeek)
+# Inicialização de Clientes
 supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 deepseek_client = OpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
 
 # ==========================================
-# FUNÇÕES DE SERVIÇO (Business Logic)
+# FUNÇÕES DE SERVIÇO (Infraestrutura)
 # ==========================================
 def enviar_mensagem_telegram(chat_id, texto):
-    """Envia o retorno ao usuário de forma assíncrona."""
     url = f"{TELEGRAM_API_URL}/sendMessage"
     payload = {"chat_id": chat_id, "text": texto, "parse_mode": "Markdown"}
     requests.post(url, json=payload)
 
 def baixar_audio_telegram(file_id):
-    """Obtém a URL do arquivo no Telegram e faz o download na memória."""
     url_info = f"{TELEGRAM_API_URL}/getFile?file_id={file_id}"
     resp = requests.get(url_info).json()
     if not resp.get("ok"):
         return None
     file_path = resp["result"]["file_path"]
     download_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-    audio_data = requests.get(download_url).content
-    return audio_data
+    return requests.get(download_url).content
 
 def transcrever_audio(audio_bytes):
-    """Usa Groq (Whisper) para transformar voz em texto velozmente."""
-    # Salvando temporariamente em disco (necessário para a lib do Groq)
     tmp_path = "/tmp/audio.ogg"
     with open(tmp_path, "wb") as f:
         f.write(audio_bytes)
@@ -58,26 +52,52 @@ def transcrever_audio(audio_bytes):
         transcription = groq_client.audio.transcriptions.create(
             file=(tmp_path, file.read()),
             model="whisper-large-v3",
-            prompt="Transcreva este áudio em português brasileiro sobre finanças e gastos."
+            prompt="Transcreva este áudio em português brasileiro sobre finanças, fast food, contas e gastos."
         )
     os.remove(tmp_path)
     return transcription.text
 
+# ==========================================
+# MOTOR COGNITIVO E REGRAS DE NEGÓCIO (PO)
+# ==========================================
 def processar_texto_com_llm(texto_usuario):
-    """Usa DeepSeek para extrair entidades financeiras via JSON."""
     system_prompt = """
-    Você é um agente financeiro extrator de dados. Analise a entrada do usuário e extraia os dados do gasto.
-    Responda EXCLUSIVAMENTE com um JSON válido, sem formatação markdown.
-    
-    Exemplos de contexto de categorização para melhorar sua precisão:
-    - Se o usuário mencionar gastos com manutenção ou combustível do "Civic", "Civic LXL" ou "Golf", a categoria é "Transporte/Veículo".
-    - Se o usuário mencionar "Santo Antônio do Pinhal", "Socorro", "Monte Verde", "Camanducaia" ou "Florianópolis", a categoria é "Viagem/Lazer".
+    Você é um Arquiteto Financeiro autônomo de altíssima precisão. 
+    Sua missão é extrair dados financeiros, pensar logicamente usando o 'raciocinio_interno' para justificar a classificação e retornar EXCLUSIVAMENTE um objeto JSON válido.
 
-    O JSON deve conter:
-    - "valor": float (ex: 150.50. Se for entrada/salário, use positivo, se for gasto, use negativo).
-    - "categoria": string (ex: "Alimentação", "Transporte/Veículo", "Viagem/Lazer", "Diversão", "Contas Fixas").
-    - "descricao": string (resumo do gasto).
-    - "metodo_pagamento": string (ex: "Cartão de Crédito", "Pix", "Dinheiro").
+    <regras_de_classificacao>
+    NATUREZA "Essencial": Gastos de sobrevivência e rotina obrigatória.
+    - Inclui: Moradia, Alimentação BÁSICA (itens de supermercado, padaria comum, feira), Saúde, Transporte.
+    - Contexto Veicular: Combustível, manutenção, peças ou revisões de veículos (como Civic LXL e Golf Generation 1.6) são sempre "Transporte" (Essencial).
+
+    NATUREZA "Lazer": Desejos, hobbies, luxos e qualidade de vida.
+    - Inclui: Viagens, Diversão, Vestuário, e Diversão Gastronômica.
+    - Regra de Alimentação: Comidas pedidas por delivery consideradas "besteiras" (hambúrgueres, pizzas, fast food, doces, vinhos como tinto meio seco) ou refeições em restaurantes por lazer NÃO SÃO Essenciais. Classifique-as como "Lazer" -> Categoria: "Bares e Restaurantes" ou "Diversão".
+    - Contexto de Viagem: Hospedagens (Pousada Canto do Sabiá, Chalés Aconchego da Serra, Chácara Pedacinho do Céu) ou gastos turísticos em Florianópolis, Monte Verde, Socorro, Santo Antônio do Pinhal ou Camanducaia são "Viagens" (Lazer).
+    - Contexto de Diversão: Jogos de videogame (como For The King 2, Slay the Spire) são "Diversão" (Lazer).
+
+    NATUREZA "Receita": Entradas de dinheiro.
+    - Inclui: Salário, Vendas, Rendimentos, Cashback.
+    </regras_de_classificacao>
+
+    <regras_de_conta_e_pagamento>
+    - Se o usuário mencionar apelidos (ex: "roxinho" = Nubank, "laranjinha" = Itaú, "vermelhinho" = Santander).
+    - Se o pagamento for em "Dinheiro" ou "Espécie", a conta é "Carteira".
+    - Se não for citado o banco/cartão, preencha com "Não Informada".
+    </regras_de_conta_e_pagamento>
+
+    <formato_de_saida>
+    Você DEVE retornar o JSON com esta estrutura exata:
+    {
+      "raciocinio_interno": "Explique brevemente como deduziu a natureza (especialmente se for comida de lazer vs essencial), categoria e conta.",
+      "valor": float (apenas o número positivo absoluto),
+      "natureza": "Essencial" | "Lazer" | "Receita",
+      "categoria": "Nome da Categoria",
+      "descricao": "Resumo do gasto (até 5 palavras)",
+      "metodo_pagamento": "Pix" | "Cartão de Crédito" | "Cartão de Débito" | "Dinheiro" | "Outros",
+      "conta": "Nome da Instituição/Conta"
+    }
+    </formato_de_saida>
     """
     
     response = deepseek_client.chat.completions.create(
@@ -95,23 +115,28 @@ def processar_texto_com_llm(texto_usuario):
         return None
 
 def inserir_no_banco(dados_extraidos):
-    """Persiste no PostgreSQL via Supabase garantindo tipagem forte."""
+    # O banco não precisa guardar o pensamento da IA, então removemos o raciocínio.
+    if "raciocinio_interno" in dados_extraidos:
+        del dados_extraidos["raciocinio_interno"]
+
     registro = {
         "data": datetime.utcnow().strftime("%Y-%m-%d"),
         "valor": dados_extraidos["valor"],
+        "natureza": dados_extraidos["natureza"],
         "categoria": dados_extraidos["categoria"],
         "descricao": dados_extraidos["descricao"],
-        "metodo_pagamento": dados_extraidos["metodo_pagamento"]
+        "metodo_pagamento": dados_extraidos["metodo_pagamento"],
+        "conta": dados_extraidos["conta"]
     }
+    
     resposta = supabase.table("gastos").insert(registro).execute()
     return resposta
 
 # ==========================================
-# ROTAS E WEBHOOK (Gateway)
+# WEBHOOK (Gateway)
 # ==========================================
 @app.route("/", methods=["POST"])
 def telegram_webhook():
-    # AppSec: Validação do Token de Segurança (Rejeita tráfego não-Telegram)
     req_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if req_secret != SECRET_TOKEN:
         return jsonify({"error": "Unauthorized"}), 403
@@ -126,44 +151,43 @@ def telegram_webhook():
     try:
         texto_analise = ""
         
-        # Roteamento: É áudio (voz) ou texto?
         if "voice" in message:
-            enviar_mensagem_telegram(chat_id, "⏳ *Ouvindo o áudio...*")
+            enviar_mensagem_telegram(chat_id, "⏳ *Processando áudio...*")
             audio_bytes = baixar_audio_telegram(message["voice"]["file_id"])
             if not audio_bytes:
-                enviar_mensagem_telegram(chat_id, "❌ Erro ao baixar o áudio do Telegram.")
                 return jsonify({"status": "error"}), 200
             texto_analise = transcrever_audio(audio_bytes)
         elif "text" in message:
             texto_analise = message["text"]
         else:
-            return jsonify({"status": "unsupported_format"}), 200
+            return jsonify({"status": "unsupported"}), 200
 
-        # Inteligência Artificial e Banco de Dados
-        enviar_mensagem_telegram(chat_id, f"🧠 *Processando:* _{texto_analise}_")
-        dados_financeiros = processar_texto_com_llm(texto_analise)
+        dados = processar_texto_com_llm(texto_analise)
         
-        if dados_financeiros and "valor" in dados_financeiros:
-            inserir_no_banco(dados_financeiros)
+        if dados and "valor" in dados:
+            # Salvamos o raciocínio apenas para mandar no Telegram e você auditar (visão de QA)
+            pensamento = dados.get("raciocinio_interno", "")
+            
+            inserir_no_banco(dados) # Aqui o raciocínio é deletado antes de ir pro banco
+            
             msg_sucesso = (
                 f"✅ **Registro Salvo!**\n\n"
-                f"💰 Valor: R$ {abs(dados_financeiros['valor']):.2f}\n"
-                f"📂 Categoria: {dados_financeiros['categoria']}\n"
-                f"📝 Descrição: {dados_financeiros['descricao']}\n"
-                f"💳 Pagamento: {dados_financeiros['metodo_pagamento']}"
+                f"💰 Valor: R$ {dados['valor']:.2f}\n"
+                f"📊 Natureza: {dados['natureza']}\n"
+                f"📂 Categoria: {dados['categoria']}\n"
+                f"🏦 Conta: {dados['conta']} ({dados['metodo_pagamento']})\n"
+                f"📝 Descrição: {dados['descricao']}\n\n"
+                f"🧠 *Lógica:* _{pensamento}_"
             )
             enviar_mensagem_telegram(chat_id, msg_sucesso)
         else:
-             enviar_mensagem_telegram(chat_id, "⚠️ Não consegui entender os valores financeiros nesta mensagem.")
+             enviar_mensagem_telegram(chat_id, "⚠️ Não consegui entender os valores ou categorizar esta mensagem.")
 
     except Exception as e:
-        # FinOps/AppSec: Captura falhas silenciosamente para o usuário, mas previne retentativas do Telegram
-        enviar_mensagem_telegram(chat_id, "❌ Ocorreu um erro interno ao processar o gasto.")
-        print(f"Erro Crítico: {e}")
+        enviar_mensagem_telegram(chat_id, "❌ Erro interno no processamento.")
+        print(f"Erro: {e}")
 
-    # Retorna 200 OK rápido para o Telegram não re-enviar a mensagem
     return jsonify({"status": "ok"}), 200
 
 if __name__ == "__main__":
-    # FinOps: Porta dinâmica lida do ambiente gerenciado pelo Cloud Run
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
