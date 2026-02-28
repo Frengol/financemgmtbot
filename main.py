@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from pythonjsonlogger import jsonlogger
 
 # ==========================================
-# OBSERVABILIDADE: JSON Logging Estruturado para GCP
+# OBSERVABILIDADE E APPSEC: Logging e Mascaramento
 # ==========================================
 logHandler = logging.StreamHandler()
 formatter = jsonlogger.JsonFormatter('%(asctime)s %(levelname)s %(message)s %(module)s')
@@ -23,9 +23,6 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logHandler)
 logger.setLevel(logging.INFO)
 
-# ==========================================
-# CONFIGURAÇÕES E SEGURANÇA (AppSec)
-# ==========================================
 app = Flask(__name__)
 
 REQUIRED_VARS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_SECRET_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"]
@@ -38,6 +35,11 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 SECRET_TOKEN = os.environ.get("TELEGRAM_SECRET_TOKEN")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
+def mascarar_segredos(texto):
+    """AppSec: Previne vazamento de PII e tokens nos dumps de erro."""
+    if not isinstance(texto, str): return texto
+    return texto.replace(TELEGRAM_TOKEN, "[MASKED_BOT_TOKEN]").replace(SECRET_TOKEN, "[MASKED_SECRET]")
+
 try:
     supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
     groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
@@ -45,11 +47,11 @@ try:
     genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
     logger.info({"event": "clients_initialized", "status": "success"})
 except Exception as e:
-    logger.critical({"event": "init_error", "error": str(e), "trace": traceback.format_exc()})
+    logger.critical({"event": "init_error", "error": mascarar_segredos(str(e))})
     raise
 
 # ==========================================
-# FUNÇÕES DE INFRAESTRUTURA E MOTOR TEMPORAL
+# INFRAESTRUTURA E MOTOR TEMPORAL
 # ==========================================
 def get_brasilia_time():
     return datetime.utcnow() - timedelta(hours=3)
@@ -60,7 +62,7 @@ def enviar_mensagem_telegram(chat_id, texto):
         payload = {"chat_id": chat_id, "text": texto, "parse_mode": "Markdown"}
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        logger.error({"event": "telegram_send_fail", "chat_id": chat_id, "error": str(e)})
+        logger.error({"event": "telegram_send_fail", "chat_id": chat_id, "error": mascarar_segredos(str(e))})
 
 def baixar_arquivo_telegram(file_id):
     url_info = f"{TELEGRAM_API_URL}/getFile?file_id={file_id}"
@@ -86,11 +88,7 @@ def transcrever_audio(audio_bytes):
 def extrair_tabela_recibo_gemini(image_bytes):
     model = genai.GenerativeModel('gemini-2.5-flash')
     prompt_visao = "Atue como um extrator de dados. Converta os itens comprados neste recibo em uma tabela Markdown estrita com as colunas: [Nome do Produto] | [Valor Total do Item]. Ignore cabeçalhos, CNPJ, troco, descontos totais e métodos de pagamento. Retorne APENAS a tabela."
-    
-    response = model.generate_content([
-        {"mime_type": "image/jpeg", "data": image_bytes},
-        prompt_visao
-    ])
+    response = model.generate_content([{"mime_type": "image/jpeg", "data": image_bytes}, prompt_visao])
     return response.text
 
 def add_months_safely(sourcedate, months):
@@ -101,20 +99,24 @@ def add_months_safely(sourcedate, months):
     return sourcedate.replace(year=year, month=month, day=day)
 
 # ==========================================
-# MOTOR COGNITIVO (Intent Router & Strict Enum)
+# SANITIZAÇÃO E ROTEAMENTO (Data Governance)
 # ==========================================
+def sanitizar_dados(natureza, categoria):
+    """QA Guardrail: Normaliza strings e aplica o Fallback estrito para 'Outros'."""
+    cat = categoria.strip().title() if categoria and isinstance(categoria, str) else "Outros"
+    nat = natureza.strip().title() if natureza and isinstance(natureza, str) else "Outros"
+    if nat not in ["Essencial", "Lazer", "Receita", "Outros"]:
+        nat = "Outros"
+    return nat, cat
+
 def processar_texto_com_llm(texto_usuario):
     hoje_bsb = get_brasilia_time()
-    data_atual = hoje_bsb.strftime("%Y-%m-%d")
-    mes_atual = hoje_bsb.strftime("%m")
-    ano_atual = hoje_bsb.strftime("%Y")
-
+    
     system_prompt = f"""
     Você é um Copilot Financeiro autônomo. 
-    CONTEXTO TEMPORAL INJETADO: Hoje é {data_atual} (Mês: {mes_atual}, Ano: {ano_atual}).
+    CONTEXTO TEMPORAL INJETADO: Hoje é {hoje_bsb.strftime("%Y-%m-%d")} (Mês: {hoje_bsb.strftime("%m")}, Ano: {hoje_bsb.strftime("%Y")}). Use isso para deduzir termos como "este mês", "hoje", "ontem".
 
     <diretriz_de_intencao>
-    Determine se o usuário quer:
     1. "registrar" (um único gasto/receita).
     2. "registrar_lote" (uma lista de itens via cupom fiscal).
     3. "consultar" (saber quanto gastou, buscar histórico).
@@ -122,11 +124,11 @@ def processar_texto_com_llm(texto_usuario):
     </diretriz_de_intencao>
 
     <regras_de_categoria_estrita_anti_alucinacao>
-    Use EXATAMENTE UMA destas:
+    Você está PROIBIDO de inventar categorias. Use EXATAMENTE UMA destas:
     - Essencial: "Moradia", "Mercado", "Transporte", "Saúde", "Educação", "Contas Fixas"
     - Lazer: "Bares e Restaurantes", "Delivery e Fast Food", "Bebidas alcóolicas", "Viagens", "Diversão", "Vestuário", "Cuidados Pessoais"
     - Receita: "Salário", "Investimentos", "Cashback", "Entradas Diversas"
-    - Fallback: "Outros".
+    - Fallback: "Outros".  (Use APENAS se não encaixar em nada acima).
     </regras_de_categoria_estrita_anti_alucinacao>
 
     <regras_de_contexto_negocio>
@@ -142,34 +144,19 @@ def processar_texto_com_llm(texto_usuario):
     Retorne EXCLUSIVAMENTE este JSON:
     {{
       "intencao": "registrar" | "registrar_lote" | "consultar" | "excluir",
-      "raciocinio_interno": "Justifique a intenção e categorizações.",
+      "raciocinio_interno": "Justifique a intenção.",
       
-      // PREENCHA SE 'registrar'
       "dados_registro": {{
-        "valor_total": float,
-        "parcelas": int,
-        "natureza": "...",
-        "categoria": "...",
-        "descricao": "Resumo em 5 palavras",
-        "metodo_pagamento": "...",
-        "conta": "Nome do banco, 'Carteira', ou 'Não Informada'"
+        "valor_total": float, "parcelas": int, "natureza": "...", "categoria": "...",
+        "descricao": "Resumo", "metodo_pagamento": "...", "conta": "Nome do banco, 'Carteira', ou 'Não Informada'"
       }},
 
-      // PREENCHA SE 'registrar_lote' (Cupom Fiscal)
       "dados_lote": {{
-        "metodo_pagamento": "...",
-        "conta": "Nome do banco, 'Carteira', ou 'Não Informada'",
-        "itens": [
-           {{ "nome": "Nome do item na nota", "valor": float (positivo), "natureza": "...", "categoria": "..." }}
-        ]
+        "metodo_pagamento": "...", "conta": "Nome do banco, 'Carteira', ou 'Não Informada'",
+        "itens": [ {{ "nome": "Item", "valor": float, "natureza": "...", "categoria": "..." }} ]
       }},
 
-      // PREENCHA SE 'consultar' OU 'excluir'
-      "filtros_pesquisa": {{
-        "mes": "MM", "ano": "YYYY", "categoria": "...", "conta": "..."
-      }},
-      
-      // PREENCHA SE 'excluir'
+      "filtros_pesquisa": {{ "mes": "MM", "ano": "YYYY", "categoria": "...", "conta": "..." }},
       "confirmacao_massa": boolean
     }}
     </formato_de_saida>
@@ -183,73 +170,56 @@ def processar_texto_com_llm(texto_usuario):
     return json.loads(response.choices[0].message.content)
 
 # ==========================================
-# DATA LAYER & MAP-REDUCE (Agrupamento Matemático)
+# DATA LAYER & MAP-REDUCE
 # ==========================================
 def agrupar_inserir_lote(dados_lote):
-    logger.info({"event": "db_bulk_insert_map_reduce_attempt", "items_count": len(dados_lote.get("itens", []))})
-    
     itens = dados_lote.get("itens", [])
     if not itens: return 0, 0.0
     
     conta = dados_lote.get("conta", "Não Informada")
     metodo = dados_lote.get("metodo_pagamento", "Outros")
     
-    # Map-Reduce: Agrupa por Categoria
     grupos = {}
     total_geral = 0.0
+    
     for item in itens:
-        cat = item.get("categoria", "Outros")
-        nat = item.get("natureza", "Outros")
+        nat_limpa, cat_limpa = sanitizar_dados(item.get("natureza"), item.get("categoria"))
         val = float(item.get("valor") or 0.0)
         nome = item.get("nome", "Item Desconhecido")
         
-        if cat not in grupos:
-            grupos[cat] = {"valor": 0.0, "nomes": [], "natureza": nat}
+        chave_grupo = (nat_limpa, cat_limpa)
+        if chave_grupo not in grupos:
+            grupos[chave_grupo] = {"valor": 0.0, "nomes": []}
         
-        grupos[cat]["valor"] += val
-        grupos[cat]["nomes"].append(nome)
+        grupos[chave_grupo]["valor"] += val
+        grupos[chave_grupo]["nomes"].append(nome)
         total_geral += val
 
     data_atual = get_brasilia_time().strftime("%Y-%m-%d")
     registros_em_lote = []
     
-    for cat, info in grupos.items():
+    for (nat, cat), info in grupos.items():
         qtd_nomes = len(info["nomes"])
         nomes_str = ", ".join(info["nomes"][:3])
-        desc = f"{nomes_str} e mais {qtd_nomes-3} itens (Cupom)" if qtd_nomes > 3 else f"{nomes_str} (Cupom)"
+        desc = f"{nomes_str} e +{qtd_nomes-3} itens (Cupom)" if qtd_nomes > 3 else f"{nomes_str} (Cupom)"
         
         registros_em_lote.append({
-            "data": data_atual,
-            "valor": round(info["valor"], 2),
-            "natureza": info["natureza"],
-            "categoria": cat,
-            "descricao": desc[:250],
-            "metodo_pagamento": metodo,
-            "conta": conta
+            "data": data_atual, "valor": round(info["valor"], 2), "natureza": nat, "categoria": cat,
+            "descricao": desc[:250], "metodo_pagamento": metodo, "conta": conta
         })
         
     try:
         supabase.table("gastos").insert(registros_em_lote).execute()
+        # Happy Path Logging (Lean)
+        logger.info({"event": "db_bulk_insert_success", "items_grouped": len(registros_em_lote), "total_value": total_geral})
         return len(registros_em_lote), total_geral
     except APIError as e:
-        logger.error({"event": "db_error", "code": e.code, "message": e.message})
+        # Error Path Logging (Deep Dump da variável que quebrou)
+        logger.error({"event": "db_error_bulk_insert", "code": e.code, "message": e.message, "dump_payload": registros_em_lote})
         raise Exception(f"Erro no Banco (Cod: {e.code}): {e.message}")
 
-def aplicar_filtros_query(query_obj, filtros):
-    query_obj = query_obj.gte("valor", 0)
-    if not filtros: return query_obj
-    if filtros.get("categoria"): query_obj = query_obj.eq("categoria", filtros["categoria"])
-    if filtros.get("conta"): query_obj = query_obj.eq("conta", filtros["conta"])
-    if filtros.get("mes") and filtros.get("ano"):
-        ano, mes = int(filtros["ano"]), int(filtros["mes"])
-        ultimo_dia = calendar.monthrange(ano, mes)[1]
-        query_obj = query_obj.gte("data", f"{ano}-{mes:02d}-01").lte("data", f"{ano}-{mes:02d}-{ultimo_dia:02d}")
-    return query_obj
-
 def inserir_no_banco(dados_reg):
-    payload_audit = {k: v for k, v in dados_reg.items() if k != "raciocinio_interno"}
-    logger.info({"event": "db_insert_attempt", "payload": payload_audit})
-    
+    nat_limpa, cat_limpa = sanitizar_dados(dados_reg.get("natureza"), dados_reg.get("categoria"))
     valor_total = float(dados_reg.get("valor_total") or 0.0)
     parcelas = max(int(dados_reg.get("parcelas") or 1), 1)
     
@@ -262,25 +232,32 @@ def inserir_no_banco(dados_reg):
     for i in range(parcelas):
         valor_parcela = valor_ultima if i == (parcelas - 1) else valor_base
         data_parcela = add_months_safely(data_atual, i).strftime("%Y-%m-%d")
-        
         desc = dados_reg.get("descricao", "Sem descrição")
         if parcelas > 1: desc = f"{desc} [{i+1}/{parcelas}]"
             
         registros_em_lote.append({
-            "data": data_parcela,
-            "valor": valor_parcela,
-            "natureza": dados_reg.get("natureza", "Outros"),
-            "categoria": dados_reg.get("categoria", "Outros"),
-            "descricao": desc,
-            "metodo_pagamento": dados_reg.get("metodo_pagamento", "Outros"),
+            "data": data_parcela, "valor": valor_parcela, "natureza": nat_limpa, "categoria": cat_limpa,
+            "descricao": desc, "metodo_pagamento": dados_reg.get("metodo_pagamento", "Outros"),
             "conta": dados_reg.get("conta", "Não Informada")
         })
         
     try:
         supabase.table("gastos").insert(registros_em_lote).execute()
+        logger.info({"event": "db_insert_success", "installments": parcelas})
     except APIError as e:
-        logger.error({"event": "db_error", "code": e.code, "message": e.message})
+        logger.error({"event": "db_error_insert", "code": e.code, "message": e.message, "dump_payload": registros_em_lote})
         raise Exception(f"Erro no Banco: {e.message}")
+
+def aplicar_filtros_query(query_obj, filtros):
+    query_obj = query_obj.gte("valor", 0)
+    if not filtros: return query_obj
+    if filtros.get("categoria"): query_obj = query_obj.eq("categoria", filtros["categoria"])
+    if filtros.get("conta"): query_obj = query_obj.eq("conta", filtros["conta"])
+    if filtros.get("mes") and filtros.get("ano"):
+        ano, mes = int(filtros["ano"]), int(filtros["mes"])
+        ultimo_dia = calendar.monthrange(ano, mes)[1]
+        query_obj = query_obj.gte("data", f"{ano}-{mes:02d}-01").lte("data", f"{ano}-{mes:02d}-{ultimo_dia:02d}")
+    return query_obj
 
 def consultar_no_banco(filtros):
     query = supabase.table("gastos").select("valor, descricao")
@@ -315,17 +292,13 @@ def telegram_webhook():
     
     try:
         texto_analise = ""
-        # Processamento Multimodal (Pipeline de 2 Estágios)
+        # Processamento Multimodal (Pipeline 2 Estágios)
         if "photo" in message:
             enviar_mensagem_telegram(chat_id, "👁️ *Lendo cupom fiscal...*")
-            foto_id = message["photo"][-1]["file_id"] # Extrai maior resolução
-            legenda = message.get("caption", "")
-            
+            foto_id = message["photo"][-1]["file_id"]
             img_bytes = baixar_arquivo_telegram(foto_id)
             tabela_md = extrair_tabela_recibo_gemini(img_bytes)
-            
-            texto_analise = f"Contexto do usuário: {legenda}\n\nNota Fiscal Extraída:\n{tabela_md}"
-            logger.info({"event": "photo_processed", "table_extracted": True})
+            texto_analise = f"Contexto do usuário: {message.get('caption', '')}\n\nNota Fiscal:\n{tabela_md}"
             
         elif "voice" in message:
             enviar_mensagem_telegram(chat_id, "⏳ *Ouvindo...*")
@@ -337,54 +310,39 @@ def telegram_webhook():
 
         analise_ia = processar_texto_com_llm(texto_analise)
         intencao = analise_ia.get("intencao")
-        pensamento = analise_ia.get("raciocinio_interno", "")
-        logger.info({"event": "intent_routed", "intent": intencao})
-
+        
         if intencao == "registrar":
             dados_reg = analise_ia.get("dados_registro", {})
             inserir_no_banco(dados_reg)
             val_total = float(dados_reg.get("valor_total") or 0.0)
-            parcelas = int(dados_reg.get("parcelas") or 1)
-            val_str = f"R$ {val_total:,.2f}" + (f" (em {parcelas}x)" if parcelas > 1 else "")
-            
-            msg = (f"✅ **Salvo!**\n💰 {val_str} | 📊 {dados_reg.get('natureza')}\n"
-                   f"📂 Categoria: {dados_reg.get('categoria')}\n"
-                   f"🏦 {dados_reg.get('conta')} ({dados_reg.get('metodo_pagamento')})\n"
-                   f"📝 {dados_reg.get('descricao')}\n\n🧠 *Lógica:* _{pensamento}_")
+            msg = f"✅ **Salvo!**\n💰 R$ {val_total:,.2f} | 📊 {dados_reg.get('categoria')}\n🏦 {dados_reg.get('conta')}"
             enviar_mensagem_telegram(chat_id, msg)
 
         elif intencao == "registrar_lote":
             dados_lote = analise_ia.get("dados_lote", {})
             linhas_geradas, soma_total = agrupar_inserir_lote(dados_lote)
-            
-            msg = (f"🧾 **Cupom Fiscal Processado e Agrupado!**\n\n"
-                   f"📊 **Total Validado:** R$ {soma_total:,.2f}\n"
-                   f"📝 Registros Sintetizados: {linhas_geradas} categorias salvas.\n"
-                   f"🏦 {dados_lote.get('conta')} ({dados_lote.get('metodo_pagamento')})\n\n"
-                   f"🧠 *Lógica (Map-Reduce):* _{pensamento}_")
+            msg = f"🧾 **Cupom Agrupado!**\n📊 **Total:** R$ {soma_total:,.2f}\n📝 Registros: {linhas_geradas}"
             enviar_mensagem_telegram(chat_id, msg)
 
         elif intencao == "consultar":
             filtros = analise_ia.get("filtros_pesquisa", {})
             total, qtd = consultar_no_banco(filtros)
-            filtros_txt = ", ".join([f"{k}: {v}" for k,v in filtros.items() if v]) or "Todos"
-            
-            msg = (f"🔎 **Consulta Concluída**\n\n📊 **Total:** R$ {total:,.2f}\n"
-                   f"📝 Registros: {qtd}\n🎛️ Filtros: {filtros_txt}\n\n🧠 *Lógica:* _{pensamento}_")
+            msg = f"🔎 **Consulta**\n📊 **Total:** R$ {total:,.2f}\n📝 Registros: {qtd}"
             enviar_mensagem_telegram(chat_id, msg)
 
         elif intencao == "excluir":
             filtros = analise_ia.get("filtros_pesquisa", {})
             confirmado = analise_ia.get("confirmacao_massa", False)
             qtd, status_msg = excluir_no_banco(filtros, confirmado)
-            
-            if status_msg == "excluidos":
-                enviar_mensagem_telegram(chat_id, f"🗑️ **Exclusão Concluída**\n{qtd} registro(s) apagado(s).")
-            else:
-                enviar_mensagem_telegram(chat_id, status_msg)
+            msg = f"🗑️ **Exclusão**\n{qtd} apagados." if status_msg == "excluidos" else status_msg
+            enviar_mensagem_telegram(chat_id, msg)
+        else:
+            raise Exception("Intenção não reconhecida.")
 
     except Exception as e:
-        logger.error({"event": "system_failure", "error": str(e), "trace": traceback.format_exc()})
+        erro_tratado = mascarar_segredos(traceback.format_exc())
+        # Error Path Logging (Deep Dump geral)
+        logger.error({"event": "system_failure", "error": str(e), "traceback": erro_tratado})
         enviar_mensagem_telegram(chat_id, f"❌ *Falha Sistêmica*\n⚠️ `{str(e)}`")
 
     return jsonify({"status": "ok"}), 200
