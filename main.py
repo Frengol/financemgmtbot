@@ -9,6 +9,7 @@ from supabase import create_client, Client
 from postgrest.exceptions import APIError
 from openai import OpenAI
 from groq import Groq
+import google.generativeai as genai
 from datetime import datetime, timedelta
 from pythonjsonlogger import jsonlogger
 
@@ -27,7 +28,7 @@ logger.setLevel(logging.INFO)
 # ==========================================
 app = Flask(__name__)
 
-REQUIRED_VARS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_SECRET_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY"]
+REQUIRED_VARS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_SECRET_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"]
 for var in REQUIRED_VARS:
     if not os.environ.get(var):
         logger.critical({"event": "startup_failed", "reason": f"Missing variable {var}"})
@@ -41,6 +42,7 @@ try:
     supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
     groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
     deepseek_client = OpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
+    genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
     logger.info({"event": "clients_initialized", "status": "success"})
 except Exception as e:
     logger.critical({"event": "init_error", "error": str(e), "trace": traceback.format_exc()})
@@ -50,7 +52,6 @@ except Exception as e:
 # FUNÇÕES DE INFRAESTRUTURA E MOTOR TEMPORAL
 # ==========================================
 def get_brasilia_time():
-    """Garante que o fuso horário seja UTC-3 (Horário de Brasília), evitando o 'Bug da Madrugada' do GCP."""
     return datetime.utcnow() - timedelta(hours=3)
 
 def enviar_mensagem_telegram(chat_id, texto):
@@ -61,7 +62,7 @@ def enviar_mensagem_telegram(chat_id, texto):
     except Exception as e:
         logger.error({"event": "telegram_send_fail", "chat_id": chat_id, "error": str(e)})
 
-def baixar_audio_telegram(file_id):
+def baixar_arquivo_telegram(file_id):
     url_info = f"{TELEGRAM_API_URL}/getFile?file_id={file_id}"
     resp = requests.get(url_info, timeout=10).json()
     if not resp.get("ok"): return None
@@ -82,8 +83,17 @@ def transcrever_audio(audio_bytes):
     finally:
         if os.path.exists(tmp_path): os.remove(tmp_path)
 
+def extrair_tabela_recibo_gemini(image_bytes):
+    model = genai.GenerativeModel('gemini-2.5-flash')
+    prompt_visao = "Atue como um extrator de dados. Converta os itens comprados neste recibo em uma tabela Markdown estrita com as colunas: [Nome do Produto] | [Valor Total do Item]. Ignore cabeçalhos, CNPJ, troco, descontos totais e métodos de pagamento. Retorne APENAS a tabela."
+    
+    response = model.generate_content([
+        {"mime_type": "image/jpeg", "data": image_bytes},
+        prompt_visao
+    ])
+    return response.text
+
 def add_months_safely(sourcedate, months):
-    """Soma meses com segurança matemática adaptando-se a anos bissextos e fins de mês."""
     month = sourcedate.month - 1 + months
     year = sourcedate.year + month // 12
     month = month % 12 + 1
@@ -101,25 +111,26 @@ def processar_texto_com_llm(texto_usuario):
 
     system_prompt = f"""
     Você é um Copilot Financeiro autônomo. 
-    CONTEXTO TEMPORAL INJETADO: Hoje é {data_atual} (Mês: {mes_atual}, Ano: {ano_atual}). Use isso para deduzir termos como "este mês", "hoje", "ontem".
+    CONTEXTO TEMPORAL INJETADO: Hoje é {data_atual} (Mês: {mes_atual}, Ano: {ano_atual}).
 
     <diretriz_de_intencao>
     Determine se o usuário quer:
-    1. "registrar" (adicionar um novo gasto/receita).
-    2. "consultar" (saber quanto gastou, buscar histórico).
-    3. "excluir" (apagar dados incorretos).
+    1. "registrar" (um único gasto/receita).
+    2. "registrar_lote" (uma lista de itens via cupom fiscal).
+    3. "consultar" (saber quanto gastou, buscar histórico).
+    4. "excluir" (apagar dados incorretos).
     </diretriz_de_intencao>
 
     <regras_de_categoria_estrita_anti_alucinacao>
-    Você está PROIBIDO de inventar categorias. Para registros, use EXATAMENTE UMA destas:
+    Use EXATAMENTE UMA destas:
     - Essencial: "Moradia", "Mercado", "Transporte", "Saúde", "Educação", "Contas Fixas"
     - Lazer: "Bares e Restaurantes", "Delivery e Fast Food", "Bebidas alcóolicas", "Viagens", "Diversão", "Vestuário", "Cuidados Pessoais"
     - Receita: "Salário", "Investimentos", "Cashback", "Entradas Diversas"
-    - Fallback: "Outros" (Use APENAS se não encaixar em nada acima).
+    - Fallback: "Outros".
     </regras_de_categoria_estrita_anti_alucinacao>
 
     <regras_de_contexto_negocio>
-    - Civic LXL e Golf Generation 1.6 = "Transporte" (Essencial).
+    - Civic LXL e Golf Generation 2003 = "Transporte" (Essencial).
     - Ifood, hambúrgueres, doces, pizzas = "Delivery e Fast Food" (Lazer).
     - Vinho tinto meio seco, cerveja = "Bebidas alcóolicas" (Lazer).
     - Santo Antônio do Pinhal, Socorro, Monte Verde, Camanducaia = "Viagens" (Lazer).
@@ -130,30 +141,36 @@ def processar_texto_com_llm(texto_usuario):
     <formato_de_saida>
     Retorne EXCLUSIVAMENTE este JSON:
     {{
-      "intencao": "registrar" | "consultar" | "excluir",
-      "raciocinio_interno": "Justifique a intenção e, se for registro, as categorias baseando-se nas regras.",
+      "intencao": "registrar" | "registrar_lote" | "consultar" | "excluir",
+      "raciocinio_interno": "Justifique a intenção e categorizações.",
       
-      // PREENCHA APENAS SE INTENÇÃO FOR 'registrar'
+      // PREENCHA SE 'registrar'
       "dados_registro": {{
-        "valor_total": float (o valor TOTAL da compra, positivo absoluto),
-        "parcelas": int (1 para à vista, N para parcelamentos),
-        "natureza": "Essencial" | "Lazer" | "Receita",
-        "categoria": "Uma da lista estrita",
+        "valor_total": float,
+        "parcelas": int,
+        "natureza": "...",
+        "categoria": "...",
         "descricao": "Resumo em 5 palavras",
-        "metodo_pagamento": "Pix" | "Cartão de Crédito" | "Cartão de Débito" | "Dinheiro" | "Outros",
-        "conta": "Nome do banco, 'Carteira' (se dinheiro), ou OBRIGATORIAMENTE 'Não Informada' se não souber."
+        "metodo_pagamento": "...",
+        "conta": "Nome do banco, 'Carteira', ou 'Não Informada'"
       }},
 
-      // PREENCHA APENAS SE INTENÇÃO FOR 'consultar' OU 'excluir'
+      // PREENCHA SE 'registrar_lote' (Cupom Fiscal)
+      "dados_lote": {{
+        "metodo_pagamento": "...",
+        "conta": "Nome do banco, 'Carteira', ou 'Não Informada'",
+        "itens": [
+           {{ "nome": "Nome do item na nota", "valor": float (positivo), "natureza": "...", "categoria": "..." }}
+        ]
+      }},
+
+      // PREENCHA SE 'consultar' OU 'excluir'
       "filtros_pesquisa": {{
-        "mes": "MM" (ex: "02"),
-        "ano": "YYYY" (ex: "2026"),
-        "categoria": "Filtro de categoria (ou null)",
-        "conta": "Filtro de conta (ou null)"
+        "mes": "MM", "ano": "YYYY", "categoria": "...", "conta": "..."
       }},
       
-      // PREENCHA APENAS SE INTENÇÃO FOR 'excluir'
-      "confirmacao_massa": boolean (True APENAS se o usuário disse explicitamente "Confirmo exclusão em massa" ou "Confirmar exclusão")
+      // PREENCHA SE 'excluir'
+      "confirmacao_massa": boolean
     }}
     </formato_de_saida>
     """
@@ -166,38 +183,76 @@ def processar_texto_com_llm(texto_usuario):
     return json.loads(response.choices[0].message.content)
 
 # ==========================================
-# DATA LAYER (Banco de Dados & Matemática Pythonica)
+# DATA LAYER & MAP-REDUCE (Agrupamento Matemático)
 # ==========================================
-def aplicar_filtros_query(query_obj, filtros):
-    # Salvaguarda PostgREST: Injeta filtro semântico obrigatório para evitar '21000: DELETE requires a WHERE clause'
-    query_obj = query_obj.gte("valor", 0)
-
-    if not filtros: return query_obj
+def agrupar_inserir_lote(dados_lote):
+    logger.info({"event": "db_bulk_insert_map_reduce_attempt", "items_count": len(dados_lote.get("itens", []))})
     
+    itens = dados_lote.get("itens", [])
+    if not itens: return 0, 0.0
+    
+    conta = dados_lote.get("conta", "Não Informada")
+    metodo = dados_lote.get("metodo_pagamento", "Outros")
+    
+    # Map-Reduce: Agrupa por Categoria
+    grupos = {}
+    total_geral = 0.0
+    for item in itens:
+        cat = item.get("categoria", "Outros")
+        nat = item.get("natureza", "Outros")
+        val = float(item.get("valor") or 0.0)
+        nome = item.get("nome", "Item Desconhecido")
+        
+        if cat not in grupos:
+            grupos[cat] = {"valor": 0.0, "nomes": [], "natureza": nat}
+        
+        grupos[cat]["valor"] += val
+        grupos[cat]["nomes"].append(nome)
+        total_geral += val
+
+    data_atual = get_brasilia_time().strftime("%Y-%m-%d")
+    registros_em_lote = []
+    
+    for cat, info in grupos.items():
+        qtd_nomes = len(info["nomes"])
+        nomes_str = ", ".join(info["nomes"][:3])
+        desc = f"{nomes_str} e mais {qtd_nomes-3} itens (Cupom)" if qtd_nomes > 3 else f"{nomes_str} (Cupom)"
+        
+        registros_em_lote.append({
+            "data": data_atual,
+            "valor": round(info["valor"], 2),
+            "natureza": info["natureza"],
+            "categoria": cat,
+            "descricao": desc[:250],
+            "metodo_pagamento": metodo,
+            "conta": conta
+        })
+        
+    try:
+        supabase.table("gastos").insert(registros_em_lote).execute()
+        return len(registros_em_lote), total_geral
+    except APIError as e:
+        logger.error({"event": "db_error", "code": e.code, "message": e.message})
+        raise Exception(f"Erro no Banco (Cod: {e.code}): {e.message}")
+
+def aplicar_filtros_query(query_obj, filtros):
+    query_obj = query_obj.gte("valor", 0)
+    if not filtros: return query_obj
     if filtros.get("categoria"): query_obj = query_obj.eq("categoria", filtros["categoria"])
     if filtros.get("conta"): query_obj = query_obj.eq("conta", filtros["conta"])
     if filtros.get("mes") and filtros.get("ano"):
-        # Resolução Dinâmica de Datas: Evita erro '22008' de dias inexistentes (Ex: 31 de Fevereiro)
-        ano = int(filtros["ano"])
-        mes = int(filtros["mes"])
+        ano, mes = int(filtros["ano"]), int(filtros["mes"])
         ultimo_dia = calendar.monthrange(ano, mes)[1]
-        
-        data_inicio = f"{ano}-{mes:02d}-01"
-        data_fim = f"{ano}-{mes:02d}-{ultimo_dia:02d}" 
-        query_obj = query_obj.gte("data", data_inicio).lte("data", data_fim)
-        
+        query_obj = query_obj.gte("data", f"{ano}-{mes:02d}-01").lte("data", f"{ano}-{mes:02d}-{ultimo_dia:02d}")
     return query_obj
 
 def inserir_no_banco(dados_reg):
     payload_audit = {k: v for k, v in dados_reg.items() if k != "raciocinio_interno"}
     logger.info({"event": "db_insert_attempt", "payload": payload_audit})
     
-    # Extração Segura (Curto-circuito) para evitar NoneType Error
     valor_total = float(dados_reg.get("valor_total") or 0.0)
-    parcelas = int(dados_reg.get("parcelas") or 1)
-    if parcelas < 1: parcelas = 1
+    parcelas = max(int(dados_reg.get("parcelas") or 1), 1)
     
-    # Matemática Exata (Evitando sumiço de centavos)
     valor_base = round(valor_total / parcelas, 2)
     valor_ultima = round(valor_total - (valor_base * (parcelas - 1)), 2)
     
@@ -209,10 +264,9 @@ def inserir_no_banco(dados_reg):
         data_parcela = add_months_safely(data_atual, i).strftime("%Y-%m-%d")
         
         desc = dados_reg.get("descricao", "Sem descrição")
-        if parcelas > 1:
-            desc = f"{desc} [{i+1}/{parcelas}]"
+        if parcelas > 1: desc = f"{desc} [{i+1}/{parcelas}]"
             
-        registro = {
+        registros_em_lote.append({
             "data": data_parcela,
             "valor": valor_parcela,
             "natureza": dados_reg.get("natureza", "Outros"),
@@ -220,39 +274,29 @@ def inserir_no_banco(dados_reg):
             "descricao": desc,
             "metodo_pagamento": dados_reg.get("metodo_pagamento", "Outros"),
             "conta": dados_reg.get("conta", "Não Informada")
-        }
-        registros_em_lote.append(registro)
+        })
         
     try:
         supabase.table("gastos").insert(registros_em_lote).execute()
     except APIError as e:
         logger.error({"event": "db_error", "code": e.code, "message": e.message})
-        raise Exception(f"Erro no Banco (Cod: {e.code}): {e.message}")
+        raise Exception(f"Erro no Banco: {e.message}")
 
 def consultar_no_banco(filtros):
-    logger.info({"event": "db_select", "filters": filtros})
     query = supabase.table("gastos").select("valor, descricao")
-    query = aplicar_filtros_query(query, filtros)
-    resposta = query.execute()
-    total = sum(item["valor"] for item in resposta.data)
-    return total, len(resposta.data)
+    resposta = aplicar_filtros_query(query, filtros).execute()
+    return sum(item["valor"] for item in resposta.data), len(resposta.data)
 
 def excluir_no_banco(filtros, confirmacao_massa):
-    logger.info({"event": "db_delete_attempt", "filters": filtros, "confirmed": confirmacao_massa})
-    
     query_check = supabase.table("gastos").select("id", count="exact")
-    query_check = aplicar_filtros_query(query_check, filtros)
-    qtd_afetada = query_check.execute().count
+    qtd_afetada = aplicar_filtros_query(query_check, filtros).execute().count
     
-    if qtd_afetada == 0:
-        return 0, "Nenhum registro encontrado para estes filtros."
-    
+    if qtd_afetada == 0: return 0, "Nenhum registro encontrado."
     if qtd_afetada > 20 and not confirmacao_massa:
-        return qtd_afetada, "⚠️ *Trava de Segurança Ativada!*\nSua ordem afeta mais de 20 registros. Para autorizar, envie a frase exata: _'Confirmo exclusão em massa'_."
+        return qtd_afetada, "⚠️ *Trava de Segurança Ativada!*\nMais de 20 registros. Confirme com: _'Confirmo exclusão em massa'_."
     
     query_del = supabase.table("gastos").delete()
-    query_del = aplicar_filtros_query(query_del, filtros)
-    query_del.execute()
+    aplicar_filtros_query(query_del, filtros).execute()
     return qtd_afetada, "excluidos"
 
 # ==========================================
@@ -271,10 +315,21 @@ def telegram_webhook():
     
     try:
         texto_analise = ""
-        if "voice" in message:
-            enviar_mensagem_telegram(chat_id, "⏳ *Analisando sua solicitação...*")
-            audio_bytes = baixar_audio_telegram(message["voice"]["file_id"])
-            texto_analise = transcrever_audio(audio_bytes)
+        # Processamento Multimodal (Pipeline de 2 Estágios)
+        if "photo" in message:
+            enviar_mensagem_telegram(chat_id, "👁️ *Lendo cupom fiscal...*")
+            foto_id = message["photo"][-1]["file_id"] # Extrai maior resolução
+            legenda = message.get("caption", "")
+            
+            img_bytes = baixar_arquivo_telegram(foto_id)
+            tabela_md = extrair_tabela_recibo_gemini(img_bytes)
+            
+            texto_analise = f"Contexto do usuário: {legenda}\n\nNota Fiscal Extraída:\n{tabela_md}"
+            logger.info({"event": "photo_processed", "table_extracted": True})
+            
+        elif "voice" in message:
+            enviar_mensagem_telegram(chat_id, "⏳ *Ouvindo...*")
+            texto_analise = transcrever_audio(baixar_arquivo_telegram(message["voice"]["file_id"]))
         elif "text" in message:
             texto_analise = message["text"]
         else:
@@ -285,11 +340,9 @@ def telegram_webhook():
         pensamento = analise_ia.get("raciocinio_interno", "")
         logger.info({"event": "intent_routed", "intent": intencao})
 
-        # FLUXO 1: REGISTRAR (C/ Lógica de Parcelamento)
         if intencao == "registrar":
             dados_reg = analise_ia.get("dados_registro", {})
             inserir_no_banco(dados_reg)
-            
             val_total = float(dados_reg.get("valor_total") or 0.0)
             parcelas = int(dados_reg.get("parcelas") or 1)
             val_str = f"R$ {val_total:,.2f}" + (f" (em {parcelas}x)" if parcelas > 1 else "")
@@ -300,28 +353,35 @@ def telegram_webhook():
                    f"📝 {dados_reg.get('descricao')}\n\n🧠 *Lógica:* _{pensamento}_")
             enviar_mensagem_telegram(chat_id, msg)
 
-        # FLUXO 2: CONSULTAR
+        elif intencao == "registrar_lote":
+            dados_lote = analise_ia.get("dados_lote", {})
+            linhas_geradas, soma_total = agrupar_inserir_lote(dados_lote)
+            
+            msg = (f"🧾 **Cupom Fiscal Processado e Agrupado!**\n\n"
+                   f"📊 **Total Validado:** R$ {soma_total:,.2f}\n"
+                   f"📝 Registros Sintetizados: {linhas_geradas} categorias salvas.\n"
+                   f"🏦 {dados_lote.get('conta')} ({dados_lote.get('metodo_pagamento')})\n\n"
+                   f"🧠 *Lógica (Map-Reduce):* _{pensamento}_")
+            enviar_mensagem_telegram(chat_id, msg)
+
         elif intencao == "consultar":
             filtros = analise_ia.get("filtros_pesquisa", {})
             total, qtd = consultar_no_banco(filtros)
             filtros_txt = ", ".join([f"{k}: {v}" for k,v in filtros.items() if v]) or "Todos"
             
-            msg = (f"🔎 **Consulta Concluída**\n\n📊 **Total Gasto:** R$ {total:,.2f}\n"
-                   f"📝 Registros: {qtd}\n🎛️ Filtros IA: {filtros_txt}\n\n🧠 *Lógica:* _{pensamento}_")
+            msg = (f"🔎 **Consulta Concluída**\n\n📊 **Total:** R$ {total:,.2f}\n"
+                   f"📝 Registros: {qtd}\n🎛️ Filtros: {filtros_txt}\n\n🧠 *Lógica:* _{pensamento}_")
             enviar_mensagem_telegram(chat_id, msg)
 
-        # FLUXO 3: EXCLUIR
         elif intencao == "excluir":
             filtros = analise_ia.get("filtros_pesquisa", {})
             confirmado = analise_ia.get("confirmacao_massa", False)
             qtd, status_msg = excluir_no_banco(filtros, confirmado)
             
             if status_msg == "excluidos":
-                enviar_mensagem_telegram(chat_id, f"🗑️ **Exclusão Concluída**\n{qtd} registro(s) apagado(s).\\n🧠 *Lógica:* _{pensamento}_")
+                enviar_mensagem_telegram(chat_id, f"🗑️ **Exclusão Concluída**\n{qtd} registro(s) apagado(s).")
             else:
                 enviar_mensagem_telegram(chat_id, status_msg)
-        else:
-            raise Exception("Intenção não reconhecida pela IA.")
 
     except Exception as e:
         logger.error({"event": "system_failure", "error": str(e), "trace": traceback.format_exc()})
