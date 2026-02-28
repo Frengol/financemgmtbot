@@ -1,11 +1,19 @@
 import os
 import json
+import logging
 import requests
+import traceback
 from flask import Flask, request, jsonify
 from supabase import create_client, Client
 from openai import OpenAI
 from groq import Groq
 from datetime import datetime
+
+# ==========================================
+# OBSERVABILIDADE (Logs Estruturados para o GCP)
+# ==========================================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # ==========================================
 # CONFIGURAÇÕES E SEGURANÇA (AppSec)
@@ -15,47 +23,59 @@ app = Flask(__name__)
 REQUIRED_VARS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_SECRET_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY"]
 for var in REQUIRED_VARS:
     if not os.environ.get(var):
+        logger.critical(f"AppSec Fatal Error: Variável de ambiente {var} não configurada.")
         raise RuntimeError(f"AppSec Fatal Error: Variável de ambiente {var} não configurada.")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 SECRET_TOKEN = os.environ.get("TELEGRAM_SECRET_TOKEN")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# Inicialização de Clientes
-supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
-groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-deepseek_client = OpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
+logger.info("Iniciando conexão com os clientes (Supabase, Groq, DeepSeek)...")
+try:
+    supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
+    groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+    deepseek_client = OpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
+    logger.info("Clientes iniciados com sucesso.")
+except Exception as e:
+    logger.critical(f"Erro fatal ao iniciar clientes: {e}")
+    raise
 
 # ==========================================
-# FUNÇÕES DE SERVIÇO (Infraestrutura)
+# FUNÇÕES DE INFRAESTRUTURA
 # ==========================================
 def enviar_mensagem_telegram(chat_id, texto):
-    url = f"{TELEGRAM_API_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": texto, "parse_mode": "Markdown"}
-    requests.post(url, json=payload)
+    try:
+        url = f"{TELEGRAM_API_URL}/sendMessage"
+        payload = {"chat_id": chat_id, "text": texto, "parse_mode": "Markdown"}
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        logger.error(f"Falha ao enviar resposta para o Telegram: {e}")
 
 def baixar_audio_telegram(file_id):
     url_info = f"{TELEGRAM_API_URL}/getFile?file_id={file_id}"
-    resp = requests.get(url_info).json()
+    resp = requests.get(url_info, timeout=10).json()
     if not resp.get("ok"):
         return None
     file_path = resp["result"]["file_path"]
     download_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-    return requests.get(download_url).content
+    return requests.get(download_url, timeout=15).content
 
 def transcrever_audio(audio_bytes):
     tmp_path = "/tmp/audio.ogg"
     with open(tmp_path, "wb") as f:
         f.write(audio_bytes)
     
-    with open(tmp_path, "rb") as file:
-        transcription = groq_client.audio.transcriptions.create(
-            file=(tmp_path, file.read()),
-            model="whisper-large-v3",
-            prompt="Transcreva este áudio em português brasileiro sobre finanças, fast food, contas e gastos."
-        )
-    os.remove(tmp_path)
-    return transcription.text
+    try:
+        with open(tmp_path, "rb") as file:
+            transcription = groq_client.audio.transcriptions.create(
+                file=(tmp_path, file.read()),
+                model="whisper-large-v3",
+                prompt="Transcreva este áudio em português brasileiro sobre finanças, fast food, contas e gastos."
+            )
+        return transcription.text
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 # ==========================================
 # MOTOR COGNITIVO E REGRAS DE NEGÓCIO (PO)
@@ -89,7 +109,7 @@ def processar_texto_com_llm(texto_usuario):
     <formato_de_saida>
     Você DEVE retornar o JSON com esta estrutura exata:
     {
-      "raciocinio_interno": "Explique brevemente como deduziu a natureza (especialmente se for comida de lazer vs essencial), categoria e conta.",
+      "raciocinio_interno": "Explique brevemente como deduziu a natureza, categoria e conta.",
       "valor": float (apenas o número positivo absoluto),
       "natureza": "Essencial" | "Lazer" | "Receita",
       "categoria": "Nome da Categoria",
@@ -109,36 +129,34 @@ def processar_texto_com_llm(texto_usuario):
         response_format={"type": "json_object"}
     )
     
-    try:
-        return json.loads(response.choices[0].message.content)
-    except:
-        return None
+    return json.loads(response.choices[0].message.content)
 
 def inserir_no_banco(dados_extraidos):
-    # O banco não precisa guardar o pensamento da IA, então removemos o raciocínio.
     if "raciocinio_interno" in dados_extraidos:
         del dados_extraidos["raciocinio_interno"]
 
     registro = {
         "data": datetime.utcnow().strftime("%Y-%m-%d"),
-        "valor": dados_extraidos["valor"],
-        "natureza": dados_extraidos["natureza"],
-        "categoria": dados_extraidos["categoria"],
-        "descricao": dados_extraidos["descricao"],
-        "metodo_pagamento": dados_extraidos["metodo_pagamento"],
-        "conta": dados_extraidos["conta"]
+        "valor": dados_extraidos.get("valor", 0.0),
+        "natureza": dados_extraidos.get("natureza", "Outros"),
+        "categoria": dados_extraidos.get("categoria", "Outros"),
+        "descricao": dados_extraidos.get("descricao", ""),
+        "metodo_pagamento": dados_extraidos.get("metodo_pagamento", "Outros"),
+        "conta": dados_extraidos.get("conta", "Não Informada")
     }
     
+    # Se houver erro de validação (ex: natureza errada) isso lançará uma exceção que será pega no webhook
     resposta = supabase.table("gastos").insert(registro).execute()
     return resposta
 
 # ==========================================
-# WEBHOOK (Gateway)
+# WEBHOOK (Gateway com Tratamento de Erros)
 # ==========================================
 @app.route("/", methods=["POST"])
 def telegram_webhook():
     req_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     if req_secret != SECRET_TOKEN:
+        logger.warning("Tentativa de acesso bloqueada: Secret Token inválido.")
         return jsonify({"error": "Unauthorized"}), 403
 
     update = request.get_json()
@@ -152,23 +170,31 @@ def telegram_webhook():
         texto_analise = ""
         
         if "voice" in message:
-            enviar_mensagem_telegram(chat_id, "⏳ *Processando áudio...*")
+            logger.info(f"Processando áudio do chat {chat_id}")
+            enviar_mensagem_telegram(chat_id, "⏳ *Ouvindo o áudio...*")
             audio_bytes = baixar_audio_telegram(message["voice"]["file_id"])
             if not audio_bytes:
-                return jsonify({"status": "error"}), 200
+                raise Exception("Não foi possível fazer o download do áudio no Telegram.")
+            
             texto_analise = transcrever_audio(audio_bytes)
+            logger.info(f"Áudio transcrito: {texto_analise}")
+            
         elif "text" in message:
             texto_analise = message["text"]
+            logger.info(f"Processando texto: {texto_analise}")
         else:
             return jsonify({"status": "unsupported"}), 200
 
+        logger.info("Enviando texto ao DeepSeek para extração...")
         dados = processar_texto_com_llm(texto_analise)
         
         if dados and "valor" in dados:
-            # Salvamos o raciocínio apenas para mandar no Telegram e você auditar (visão de QA)
             pensamento = dados.get("raciocinio_interno", "")
+            logger.info(f"Dados extraídos com sucesso: {dados}")
             
-            inserir_no_banco(dados) # Aqui o raciocínio é deletado antes de ir pro banco
+            logger.info("Salvando no Supabase...")
+            inserir_no_banco(dados)
+            logger.info("Registro salvo com sucesso.")
             
             msg_sucesso = (
                 f"✅ **Registro Salvo!**\n\n"
@@ -181,12 +207,18 @@ def telegram_webhook():
             )
             enviar_mensagem_telegram(chat_id, msg_sucesso)
         else:
-             enviar_mensagem_telegram(chat_id, "⚠️ Não consegui entender os valores ou categorizar esta mensagem.")
+            raise Exception("A Inteligência Artificial não retornou dados no formato esperado.")
 
     except Exception as e:
-        enviar_mensagem_telegram(chat_id, "❌ Erro interno no processamento.")
-        print(f"Erro: {e}")
+        # Pega qualquer erro que acontecer (Supabase, Groq, DeepSeek, ou código) e te avisa!
+        erro_detalhado = traceback.format_exc()
+        logger.error(f"Erro Crítico durante a requisição:\n{erro_detalhado}")
+        
+        # O pulo do gato do QA: Manda o erro pro seu celular.
+        msg_erro = f"❌ *Falha ao registrar o gasto!*\n\n⚠️ *Motivo:* `{str(e)}`\n\n_Verifique os logs no Google Cloud para mais detalhes._"
+        enviar_mensagem_telegram(chat_id, msg_erro)
 
+    # Devolvemos 200 OK para o Telegram, pois o erro já foi tratado e avisado ao usuário.
     return jsonify({"status": "ok"}), 200
 
 if __name__ == "__main__":
