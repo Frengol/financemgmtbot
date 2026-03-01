@@ -162,6 +162,7 @@ def processar_texto_com_llm(texto_usuario):
     <regras_de_contexto_negocio>
     - Civic LXL e Golf Generation 2003 = "Transporte".
     - Ifood, hambúrgueres, doces, pizzas = "Delivery e Fast Food".
+    - Mesmo se comprados num supermercado, guloseimas e itens de indulgência (Cookies, Tortas, Chocolates, Sorvetes, Salgadinhos, Doces) DEVEM ser classificados isoladamente como "Delivery e Fast Food" e NUNCA como "Mercado".
     - Vinho tinto meio seco, cerveja = "Bebidas alcóolicas".
     - Santo Antônio do Pinhal, Socorro, Monte Verde, Camanducaia = "Viagens".
     - Steam, For The King 2, Slay the Spire = "Diversão".
@@ -419,15 +420,22 @@ def telegram_webhook():
         chat_id = message["chat"]["id"]
         texto_analise = ""
 
+        # --- TELEMETRIA: Webhook ---
+        logger.info({"event": "webhook_received", "type": "photo" if "photo" in message else "voice" if "voice" in message else "text"})
+
         if "photo" in message:
             enviar_mensagem_telegram(chat_id, "👁️ *A Ler o cupom fiscal (Smart OCR)...*")
             foto_id = message["photo"][-1]["file_id"]
             img_bytes = baixar_arquivo_telegram(foto_id)
             tabela_md = extrair_tabela_recibo_gemini(img_bytes)
             texto_analise = f"Contexto: {message.get('caption', '')}\n\nNota Fiscal Extratada:\n{tabela_md}"
+            # --- TELEMETRIA: OCR ---
+            logger.info({"event": "ocr_completed", "model": "gemini-2.5-flash"})
         elif "voice" in message:
             enviar_mensagem_telegram(chat_id, "⏳ *A Ouvir...*")
             texto_analise = transcrever_audio(baixar_arquivo_telegram(message["voice"]["file_id"]))
+            # --- TELEMETRIA: STT ---
+            logger.info({"event": "stt_completed", "model": "whisper-large-v3"})
         elif "text" in message:
             texto_analise = message["text"]
         else:
@@ -437,12 +445,21 @@ def telegram_webhook():
         analise_ia = processar_texto_com_llm(texto_analise)
         intencao = analise_ia.get("intencao")
 
+        # --- TELEMETRIA: Cérebro Lógico ---
+        logger.info({"event": "llm_routed", "intent": intencao})
+
         if intencao == "registrar_lote_pendente":
             dados_lote = analise_ia.get("dados_lote", {})
+            # --- TELEMETRIA: Lote Detectado ---
+            logger.info({"event": "items_extracted", "items_count": len(dados_lote.get("itens", []))})
+            
             grupos, total_final, desc_global = aplicar_map_reduce(dados_lote)
             
             cache_id = "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
             supabase.table("cache_aprovacao").insert({"id": cache_id, "payload": dados_lote}).execute()
+            
+            # --- TELEMETRIA: Rascunho na Memória ---
+            logger.info({"event": "cache_created", "cache_id": cache_id})
             
             texto_resumo = gerar_mensagem_resumo(cache_id, dados_lote, grupos, total_final, desc_global)
             teclado = {
