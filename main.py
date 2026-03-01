@@ -84,7 +84,6 @@ def inferir_natureza(categoria):
         return "Outros", "Outros"
     chave_busca = categoria.strip().lower()
     if chave_busca not in CATEGORIA_MAP:
-        # Fallback mantendo o .title() apenas para categorias não mapeadas (se existissem)
         return "Outros", categoria.strip().title()
     return CATEGORIA_MAP[chave_busca]
 
@@ -180,8 +179,14 @@ def processar_texto_com_llm(texto_usuario):
     - Santo Antônio do Pinhal, Socorro, Monte Verde, Camanducaia = "Viagens".
     - Steam, For The King 2, Slay the Spire = "Diversão".
     - Apelidos de banco: "roxinho" = Nubank, "laranjinha" = Itaú.
-    - Siglas de cupom fiscal mercado: "SH" = Shampoo, "ESP" = Esponja.
+    - Siglas de mercado: "SH" = Shampoo, "ESP" = Esponja.
     </regras_de_contexto_negocio>
+    
+    <regra_de_fluxo_de_caixa>
+    Se o usuário perguntar por "gastos", "despesas" ou "saídas", o `tipo_transacao` é "saida".
+    Se perguntar por "ganhos", "entradas", "lucros" ou "recebimentos", o `tipo_transacao` é "entrada".
+    Se não ficar claro, deixe null.
+    </regra_de_fluxo_de_caixa>
 
     <formato_de_saida>
     Retorne EXCLUSIVAMENTE este JSON (Não tente deduzir a 'natureza' no registro, o sistema fará isso via Categoria):
@@ -202,7 +207,12 @@ def processar_texto_com_llm(texto_usuario):
         ]
       }},
 
-      "filtros_pesquisa": {{ "mes": "MM" (somente se pedido expresso), "ano": "YYYY" (somente se pedido expresso), "natureza": "...", "categoria": "...", "conta": "..." }},
+      "filtros_pesquisa": {{ 
+         "mes": "MM" (somente se pedido expresso), 
+         "ano": "YYYY" (somente se pedido expresso), 
+         "natureza": "...", "categoria": "...", "conta": "...",
+         "tipo_transacao": "entrada" | "saida" | null
+      }},
       "confirmacao_massa": boolean
     }}
     </formato_de_saida>
@@ -242,7 +252,6 @@ def aplicar_map_reduce(dados_lote):
 
     desc_global = float(dados_lote.get("desconto_global") or 0.0)
     
-    # QA Guardrail Matemático e Consistência de Estado (State Match)
     if desc_global > 0 and abs(soma_descontos_itens - desc_global) <= 0.05:
         logger.info({"event": "guardrail_discount_neutralized", "saved_value": desc_global})
         desc_global = 0.0 
@@ -350,13 +359,12 @@ def aplicar_filtros_query(query_obj, filtros):
     query_obj = query_obj.gte("valor", 0)
     if not filtros: return query_obj
     
-    # QA Alfândega de Consultas (Defensive Programming)
-    # 1. Trava da Vírgula (Impede o LLM de estragar a query concatenando categorias)
+    # 1. Trava da Vírgula (Anti-arraying)
     raw_cat = filtros.get("categoria")
     if raw_cat and "," in raw_cat:
         raw_cat = None
         
-    # 2. Sanitização Estrita de Natureza (Impede buscas por "Gasto" ou "Despesa")
+    # 2. Sanitização Estrita de Natureza
     raw_nat = filtros.get("natureza")
     if raw_nat:
         nat_title = raw_nat.strip().title()
@@ -369,12 +377,19 @@ def aplicar_filtros_query(query_obj, filtros):
         query_obj = query_obj.eq("natureza", raw_nat)
         
     if raw_cat: 
-        # Forçamos o uso do Dicionário Canónico para a consulta também!
         _, cat_canonica = inferir_natureza(raw_cat)
         query_obj = query_obj.eq("categoria", cat_canonica)
         
     if filtros.get("conta"): 
         query_obj = query_obj.eq("conta", filtros["conta"])
+        
+    # 3. Roteador de Fluxo de Caixa (Cashflow Logic)
+    tipo_tx = filtros.get("tipo_transacao")
+    if tipo_tx == "saida" and not raw_nat:
+        # Se pediu saídas e não especificou natureza exata, exclui Receita
+        query_obj = query_obj.neq("natureza", "Receita")
+    elif tipo_tx == "entrada" and not raw_nat:
+        query_obj = query_obj.eq("natureza", "Receita")
         
     if filtros.get("mes") and filtros.get("ano"):
         try:
@@ -548,15 +563,24 @@ def telegram_webhook():
                 
             f_cat = filtros.get("categoria")
             f_nat = filtros.get("natureza")
+            f_tipo = filtros.get("tipo_transacao")
             
-            msg = f"📊 **Total:** R$ {total:,.2f}\n📝 Registros: {qtd}\n🎛️ Filtros: {str_data}\n"
+            # UX Aprimorada de Fluxo de Caixa
+            if f_tipo == "saida" and not f_nat:
+                msg_total = f"📊 **Total de Gastos (Saídas):** R$ {total:,.2f}\n"
+            elif f_tipo == "entrada" and not f_nat:
+                msg_total = f"📊 **Total de Ganhos (Entradas):** R$ {total:,.2f}\n"
+            else:
+                msg_total = f"📊 **Total:** R$ {total:,.2f}\n"
+                
+            msg = msg_total + f"📝 Registros: {qtd}\n🎛️ Filtros: {str_data}\n"
             
-            if f_cat and not (f_cat and "," in f_cat): # Respeita a Trava da Vírgula na UX
+            if f_cat and not (f_cat and "," in f_cat): 
                 nat_inferred, cat_clean = inferir_natureza(f_cat)
                 msg += f"🗂️ Categoria: {cat_clean} ({nat_inferred})"
             elif f_nat:
                 nat_title = f_nat.strip().title()
-                if nat_title in ["Essencial", "Lazer", "Receita"]: # Respeita a Sanitização na UX
+                if nat_title in ["Essencial", "Lazer", "Receita"]: 
                     msg += f"🗂️ Natureza: {nat_title}"
                 else:
                      msg += f"🗂️ Natureza: Todas"
