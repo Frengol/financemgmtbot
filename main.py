@@ -168,6 +168,7 @@ def processar_texto_com_llm(texto_usuario):
     - Santo Antônio do Pinhal, Socorro, Monte Verde, Camanducaia = "Viagens".
     - Steam, For The King 2, Slay the Spire = "Diversão".
     - Apelidos de banco: "roxinho" = Nubank, "laranjinha" = Itaú.
+    - Siglas de mercado: "SH" = Shampoo, "ESP" = Esponja.
     </regras_de_contexto_negocio>
 
     <formato_de_saida>
