@@ -15,6 +15,7 @@ from groq import Groq
 import google.generativeai as genai
 from datetime import datetime, timedelta
 from pythonjsonlogger import jsonlogger
+from collections import defaultdict
 
 # ==========================================
 # OBSERVABILIDADE E APPSEC: Logging e Mascaramento
@@ -102,10 +103,11 @@ def enviar_mensagem_telegram(chat_id, texto, reply_markup=None):
     except Exception as e:
         logger.error({"event": "telegram_send_fail", "error": mascarar_segredos(str(e))})
 
-def editar_mensagem_telegram(chat_id, message_id, texto):
+def editar_mensagem_telegram(chat_id, message_id, texto, reply_markup=None):
     try:
         url = f"{TELEGRAM_API_URL}/editMessageText"
         payload = {"chat_id": chat_id, "message_id": message_id, "text": texto, "parse_mode": "Markdown"}
+        if reply_markup: payload["reply_markup"] = reply_markup
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
         logger.error({"event": "telegram_edit_fail", "error": mascarar_segredos(str(e))})
@@ -160,7 +162,7 @@ def processar_texto_com_llm(texto_usuario):
     2. "registrar_lote_pendente" (uma lista de itens via cupom fiscal, requer aprovação).
     3. "salvar_edicao_cupom" (se o texto do usuário iniciar com "--CUPOM_EDIT--", salva direto).
     4. "consultar" (saber quanto gastou, buscar histórico por natureza ou categoria). NÃO deduza mês ou ano a menos que explicitamente pedido.
-    5. "excluir" (apagar dados incorretos).
+    5. "excluir" (apagar dados incorretos ou em massa). Se o usuário pedir para apagar, tente preencher `filtros_exclusao` com o MÁXIMO de detalhes que ele der.
     </diretriz_de_intencao>
 
     <regras_de_categoria_estrita_anti_alucinacao>
@@ -213,7 +215,11 @@ def processar_texto_com_llm(texto_usuario):
          "natureza": "...", "categoria": "...", "conta": "...",
          "tipo_transacao": "entrada" | "saida" | null
       }},
-      "confirmacao_massa": boolean
+      
+      "filtros_exclusao": {{
+         "mes": "MM", "ano": "YYYY", "natureza": "...", "categoria": "...", "conta": "...",
+         "valor_exato": float, "metodo_pagamento": "..."
+      }}
     }}
     </formato_de_saida>
     """
@@ -383,10 +389,16 @@ def aplicar_filtros_query(query_obj, filtros):
     if filtros.get("conta"): 
         query_obj = query_obj.eq("conta", filtros["conta"])
         
+    if filtros.get("valor_exato"):
+        query_obj = query_obj.eq("valor", float(filtros["valor_exato"]))
+        
+    if filtros.get("metodo_pagamento"):
+        # match insensível (ilike) para métodos de pagamento para dar margem de manobra (ex: "pix" vs "Pix")
+        query_obj = query_obj.ilike("metodo_pagamento", f"%{filtros['metodo_pagamento']}%")
+        
     # 3. Roteador de Fluxo de Caixa (Cashflow Logic)
     tipo_tx = filtros.get("tipo_transacao")
     if tipo_tx == "saida" and not raw_nat:
-        # Se pediu saídas e não especificou natureza exata, exclui Receita
         query_obj = query_obj.neq("natureza", "Receita")
     elif tipo_tx == "entrada" and not raw_nat:
         query_obj = query_obj.eq("natureza", "Receita")
@@ -412,17 +424,75 @@ def consultar_no_banco(filtros):
     resposta = aplicar_filtros_query(query, filtros).execute()
     return sum(item["valor"] for item in resposta.data), len(resposta.data)
 
-def excluir_no_banco(filtros, confirmacao_massa):
-    query_check = supabase.table("gastos").select("id", count="exact")
-    qtd_afetada = aplicar_filtros_query(query_check, filtros).execute().count
+def formatar_relatorio_exclusao(registros):
+    total_regs = len(registros)
+    if total_regs == 0:
+        return "❌ Nenhum registro encontrado com esses critérios para exclusão."
+        
+    msg = f"⚠️ **ATENÇÃO: EXCLUSÃO DE DADOS**\n"
+    msg += f"Encontrei {total_regs} registro(s) correspondente(s):\n\n"
     
-    if qtd_afetada == 0: return 0, "Nenhum registro encontrado."
-    if qtd_afetada > 20 and not confirmacao_massa:
-        return qtd_afetada, "⚠️ *Trava de Segurança Ativada!*\nMais de 20 registros. Confirme com: _'Confirmo exclusão em massa'_."
+    if total_regs <= 10:
+        # Relatório Completo (Detailed)
+        for r in registros:
+            data_formatada = r.get("data", "Sem data")
+            msg += f"▫️ *{data_formatada}* | R$ {r['valor']:.2f}\n"
+            msg += f"   {r['natureza']} > {r['categoria']}\n"
+            msg += f"   💳 {r.get('metodo_pagamento','?')} ({r.get('conta', '?')})\n"
+            msg += f"   📝 {r.get('descricao', 'Sem descrição')[:30]}...\n\n"
+    else:
+        # Relatório Agrupado (Grouped by Date)
+        agrupamento = defaultdict(list)
+        for r in registros:
+            agrupamento[r.get("data", "Sem data")].append(r)
+            
+        for data, itens in list(agrupamento.items())[:5]: # Mostra max 5 datas diferentes para não explodir msg
+            msg += f"📅 **{data}** ({len(itens)} itens)\n"
+            for r in itens[:3]: # Mostra max 3 exemplos por data
+                msg += f"   ▫️ {r['natureza']} > {r['categoria']} | R$ {r['valor']:.2f}\n"
+            if len(itens) > 3:
+                msg += f"   ... e mais {len(itens)-3} itens.\n"
+            msg += "\n"
+        if len(agrupamento) > 5:
+            msg += f"*(E itens em outras {len(agrupamento)-5} datas...)*\n"
+            
+    msg += "\n🛑 **Tem a certeza absoluta que deseja APAGAR isto permanentemente?**"
+    return msg
+
+def iniciar_fluxo_exclusao(chat_id, filtros_exclusao):
+    # 1. Trava de Filtro Vazio (Zero-Trust)
+    # Remove valores nulos, strings vazias ou zero (mas aceita 0 de valor_exato se for intencional, porem improvavel)
+    filtros_validos = {k: v for k, v in filtros_exclusao.items() if v}
+    if not filtros_validos:
+        enviar_mensagem_telegram(chat_id, "⚠️ **Operação Recusada.**\nNão posso apagar a base inteira sem filtros! Diga-me o valor exato, a data, a categoria ou o método de pagamento da transação que deseja excluir.")
+        return
+
+    # 2. Busca Prévia (Dry-Run Select)
+    query_select = supabase.table("gastos").select("id, data, valor, natureza, categoria, descricao, metodo_pagamento, conta")
+    resposta = aplicar_filtros_query(query_select, filtros_exclusao).execute()
     
-    query_del = supabase.table("gastos").delete()
-    aplicar_filtros_query(query_del, filtros).execute()
-    return qtd_afetada, "excluidos"
+    registros = resposta.data
+    if not registros:
+        enviar_mensagem_telegram(chat_id, "🔎 Não encontrei nenhum gasto com essas características para apagar.")
+        return
+        
+    ids_para_apagar = [r["id"] for r in registros]
+    
+    # 3. Cache Stateless
+    cache_id = "DEL_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
+    supabase.table("cache_aprovacao").insert({"id": cache_id, "payload": {"ids": ids_para_apagar}}).execute()
+    
+    # 4. Formatação Dinâmica de UX
+    msg_alerta = formatar_relatorio_exclusao(registros)
+    
+    teclado = {
+        "inline_keyboard": [
+            [{"text": "✅ Sim, Apagar", "callback_data": f"confirmdel_{cache_id}"}],
+            [{"text": "❌ Cancelar", "callback_data": f"cancelar_{cache_id}"}]
+        ]
+    }
+    enviar_mensagem_telegram(chat_id, msg_alerta, teclado)
+
 
 # ==========================================
 # WEBHOOK CONTROLLER (Gateway Principal)
@@ -450,7 +520,14 @@ def telegram_webhook():
             cb = update["callback_query"]
             chat_id = cb["message"]["chat"]["id"]
             msg_id = cb["message"]["message_id"]
-            acao, cache_id = cb["data"].split("_")
+            acao_bruta = cb["data"]
+            
+            # Tratamento de Botões Padrão vs Exclusão
+            if acao_bruta.startswith("confirmdel_"):
+                acao = "confirmdel"
+                cache_id = acao_bruta.split("_")[1]
+            else:
+                acao, cache_id = acao_bruta.split("_")
             
             requests.post(f"{TELEGRAM_API_URL}/answerCallbackQuery", json={"callback_query_id": cb["id"]})
             
@@ -459,21 +536,28 @@ def telegram_webhook():
                 editar_mensagem_telegram(chat_id, msg_id, "❌ Rascunho expirado ou já processado.")
                 return jsonify({"status": "ok"}), 200
                 
-            dados_lote = resp.data[0]["payload"]
+            payload_cache = resp.data[0]["payload"]
             
             if acao == "aprovar":
-                gravar_lote_no_banco(dados_lote)
+                gravar_lote_no_banco(payload_cache)
                 supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
                 editar_mensagem_telegram(chat_id, msg_id, "✅ **Cupom Aprovado e Salvo!**")
                 
             elif acao == "editar":
-                texto_edit = gerar_texto_edicao(dados_lote)
+                texto_edit = gerar_texto_edicao(payload_cache)
                 supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
                 editar_mensagem_telegram(chat_id, msg_id, f"📝 **MODO EDIÇÃO**\nCopie, altere as categorias/valores e envie:\n\n`{texto_edit}`")
                 
+            elif acao == "confirmdel":
+                ids = payload_cache.get("ids", [])
+                # Hard Delete utilizando array de IDs exatos garantindo que nada fora do escopo seja apagado
+                supabase.table("gastos").delete().in_("id", ids).execute()
+                supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
+                editar_mensagem_telegram(chat_id, msg_id, f"🗑️ **Exclusão Efetuada!** ({len(ids)} registros apagados).")
+                
             elif acao == "cancelar":
                 supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
-                editar_mensagem_telegram(chat_id, msg_id, "❌ **Operação Cancelada.**")
+                editar_mensagem_telegram(chat_id, msg_id, "❌ **Operação Cancelada.** A base de dados não foi alterada.")
                 
             return jsonify({"status": "ok"}), 200
 
@@ -565,7 +649,6 @@ def telegram_webhook():
             f_nat = filtros.get("natureza")
             f_tipo = filtros.get("tipo_transacao")
             
-            # UX Aprimorada de Fluxo de Caixa
             if f_tipo == "saida" and not f_nat:
                 msg_total = f"📊 **Total de Gastos (Saídas):** R$ {total:,.2f}\n"
             elif f_tipo == "entrada" and not f_nat:
@@ -590,11 +673,9 @@ def telegram_webhook():
             enviar_mensagem_telegram(chat_id, msg)
 
         elif intencao == "excluir":
-            filtros = analise_ia.get("filtros_pesquisa", {})
-            confirmado = analise_ia.get("confirmacao_massa", False)
-            qtd, status_msg = excluir_no_banco(filtros, confirmado)
-            msg = f"🗑️ **Exclusão**\n{qtd} apagados." if status_msg == "excluidos" else status_msg
-            enviar_mensagem_telegram(chat_id, msg)
+            # Nova UX Interativa de Segurança (Interactive Delete)
+            filtros_exc = analise_ia.get("filtros_exclusao", {})
+            iniciar_fluxo_exclusao(chat_id, filtros_exc)
             
         else:
             raise Exception("Intenção não reconhecida.")
