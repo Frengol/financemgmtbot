@@ -59,10 +59,11 @@ CATEGORIA_NATUREZA_MAP = {
     # Essencial
     "moradia": "Essencial", "mercado": "Essencial", "transporte": "Essencial",
     "saúde": "Essencial", "educação": "Essencial", "contas fixas": "Essencial",
+    "cuidados pessoais": "Essencial",
     # Lazer
     "bares e restaurantes": "Lazer", "delivery e fast food": "Lazer", 
-    "bebidas alcóolicas": "Lazer", "viagens": "Lazer", "diversão": "Lazer", 
-    "vestuário": "Lazer", "cuidados pessoais": "Lazer",
+    "bebidas alcoólicas": "Lazer", "viagens": "Lazer", "diversão": "Lazer", 
+    "vestuário": "Lazer",
     # Receita
     "salário": "Receita", "investimentos": "Receita", 
     "cashback": "Receita", "entradas diversas": "Receita"
@@ -147,14 +148,14 @@ def processar_texto_com_llm(texto_usuario):
     1. "registrar" (um único gasto/receita manual).
     2. "registrar_lote_pendente" (uma lista de itens via cupom fiscal, requer aprovação).
     3. "salvar_edicao_cupom" (se o texto do usuário iniciar com "--CUPOM_EDIT--", salva direto).
-    4. "consultar" (saber quanto gastou, buscar histórico).
+    4. "consultar" (saber quanto gastou, buscar histórico por natureza ou categoria).
     5. "excluir" (apagar dados incorretos).
     </diretriz_de_intencao>
 
     <regras_de_categoria_estrita_anti_alucinacao>
     Você está PROIBIDO de inventar categorias. Use EXATAMENTE UMA destas:
-    - Essencial: "Moradia", "Mercado", "Transporte", "Saúde", "Educação", "Contas Fixas"
-    - Lazer: "Bares e Restaurantes", "Delivery e Fast Food", "Bebidas alcóolicas", "Viagens", "Diversão", "Vestuário", "Cuidados Pessoais"
+    - Essencial: "Moradia", "Mercado", "Transporte", "Saúde", "Educação", "Contas Fixas", "Cuidados Pessoais"
+    - Lazer: "Bares e Restaurantes", "Delivery e Fast Food", "Bebidas Alcoólicas", "Viagens", "Diversão", "Vestuário"
     - Receita: "Salário", "Investimentos", "Cashback", "Entradas Diversas"
     - Fallback: "Outros". (Use APENAS se não encaixar em nada acima).
     </regras_de_categoria_estrita_anti_alucinacao>
@@ -163,15 +164,14 @@ def processar_texto_com_llm(texto_usuario):
     - Civic LXL e Golf Generation 2003 = "Transporte".
     - Ifood, hambúrgueres, doces, pizzas = "Delivery e Fast Food".
     - Mesmo se comprados num supermercado, guloseimas e itens de indulgência (Cookies, Tortas, Chocolates, Sorvetes, Salgadinhos, Doces) DEVEM ser classificados isoladamente como "Delivery e Fast Food" e NUNCA como "Mercado".
-    - Vinho tinto meio seco, cerveja = "Bebidas alcóolicas".
+    - Vinho tinto meio seco, cerveja = "Bebidas Alcoólicas".
     - Santo Antônio do Pinhal, Socorro, Monte Verde, Camanducaia = "Viagens".
     - Steam, For The King 2, Slay the Spire = "Diversão".
     - Apelidos de banco: "roxinho" = Nubank, "laranjinha" = Itaú.
-    - Siglas mercado: SBT (Sabonete), ESP (Esponja), SH (Shampoo)
     </regras_de_contexto_negocio>
 
     <formato_de_saida>
-    Retorne EXCLUSIVAMENTE este JSON (Não tente deduzir a 'natureza', o sistema fará isso via Categoria):
+    Retorne EXCLUSIVAMENTE este JSON (Não tente deduzir a 'natureza' no registro, o sistema fará isso via Categoria):
     {{
       "intencao": "registrar" | "registrar_lote_pendente" | "salvar_edicao_cupom" | "consultar" | "excluir",
       "raciocinio_interno": "Justifique a intenção.",
@@ -189,7 +189,7 @@ def processar_texto_com_llm(texto_usuario):
         ]
       }},
 
-      "filtros_pesquisa": {{ "mes": "MM", "ano": "YYYY", "categoria": "...", "conta": "..." }},
+      "filtros_pesquisa": {{ "mes": "MM", "ano": "YYYY", "natureza": "...", "categoria": "...", "conta": "..." }},
       "confirmacao_massa": boolean
     }}
     </formato_de_saida>
@@ -231,10 +231,8 @@ def aplicar_map_reduce(dados_lote):
     
     # QA Guardrail Matemático e Consistência de Estado (State Match)
     if desc_global > 0 and abs(soma_descontos_itens - desc_global) <= 0.05:
-        # Ponto 1: Telemetria silenciosa do evento (sem exibir ao usuário)
         logger.info({"event": "guardrail_discount_neutralized", "saved_value": desc_global})
         desc_global = 0.0 
-        # Ponto 3: Modifica o dicionário raiz para propagar o estado correto ao Cache e ao Modo Edição
         dados_lote["desconto_global"] = 0.0 
 
     if desc_global > 0 and grupos:
@@ -248,7 +246,7 @@ def gerar_mensagem_resumo(cache_id, dados_lote, grupos, total_final, desc_global
     pagamento = dados_lote.get("metodo_pagamento", "Não Informado")
     conta = dados_lote.get("conta", "Não Informada")
     
-    msg = f"🧾 **Resumo do Cupom (ID: {cache_id})**\n"
+    msg = f"🧾 **Resumo do Cupom**\n"
     msg += f"💳 Pagamento: {pagamento} ({conta})\n"
     if desc_global > 0: msg += f"📉 Desconto Global Aplicado: R$ {desc_global:.2f} (Rateado no grupo maior)\n"
     msg += "\n"
@@ -265,11 +263,9 @@ def gerar_mensagem_resumo(cache_id, dados_lote, grupos, total_final, desc_global
 def gerar_texto_edicao(dados_lote):
     linhas = ["--CUPOM_EDIT--", f"Pagamento: {dados_lote.get('metodo_pagamento', 'Não Informado')}"]
     linhas.append(f"Conta: {dados_lote.get('conta', 'Não Informada')}")
-    # O desconto global gerado aqui agora reflete o Guardrail (State Mismatch Resolvido)
     linhas.append(f"Desconto Global: {dados_lote.get('desconto_global', 0.0)}\n")
     for item in dados_lote.get("itens", []):
         cat = item.get("categoria", "Outros")
-        # Ocultamos a natureza no modo edição para segurança de UX
         linhas.append(f"[{cat}] {item.get('nome')} : Bruto={item.get('valor_bruto', 0.0)} | Desconto={item.get('desconto_item', 0.0)}")
     return "\n".join(linhas)
 
@@ -340,12 +336,28 @@ def inserir_no_banco(dados_reg):
 def aplicar_filtros_query(query_obj, filtros):
     query_obj = query_obj.gte("valor", 0)
     if not filtros: return query_obj
-    if filtros.get("categoria"): query_obj = query_obj.eq("categoria", filtros["categoria"])
-    if filtros.get("conta"): query_obj = query_obj.eq("conta", filtros["conta"])
+    
+    if filtros.get("natureza"): 
+        query_obj = query_obj.eq("natureza", filtros["natureza"].strip().title())
+    if filtros.get("categoria"): 
+        query_obj = query_obj.eq("categoria", filtros["categoria"].strip().title())
+    if filtros.get("conta"): 
+        query_obj = query_obj.eq("conta", filtros["conta"])
+        
     if filtros.get("mes") and filtros.get("ano"):
-        ano, mes = int(filtros["ano"]), int(filtros["mes"])
-        ultimo_dia = calendar.monthrange(ano, mes)[1]
-        query_obj = query_obj.gte("data", f"{ano}-{mes:02d}-01").lte("data", f"{ano}-{mes:02d}-{ultimo_dia:02d}")
+        try:
+            ano, mes = int(filtros["ano"]), int(filtros["mes"])
+            ultimo_dia = calendar.monthrange(ano, mes)[1]
+            query_obj = query_obj.gte("data", f"{ano}-{mes:02d}-01").lte("data", f"{ano}-{mes:02d}-{ultimo_dia:02d}")
+        except ValueError:
+            pass # Ignora formatação incorreta do LLM
+    elif filtros.get("ano"):
+        try:
+            ano = int(filtros["ano"])
+            query_obj = query_obj.gte("data", f"{ano}-01-01").lte("data", f"{ano}-12-31")
+        except ValueError:
+            pass
+            
     return query_obj
 
 def consultar_no_banco(filtros):
@@ -376,7 +388,6 @@ def telegram_webhook():
     update = request.get_json()
     if not update: return jsonify({"status": "ignored"}), 200
 
-    # Idempotência: Proteção contra Retry Storms do Telegram
     update_id = update.get("update_id")
     if update_id:
         try:
@@ -426,21 +437,18 @@ def telegram_webhook():
         chat_id = message["chat"]["id"]
         texto_analise = ""
 
-        # --- TELEMETRIA: Webhook ---
         logger.info({"event": "webhook_received", "type": "photo" if "photo" in message else "voice" if "voice" in message else "text"})
 
         if "photo" in message:
-            enviar_mensagem_telegram(chat_id, "👀 *Lendo o cupom fiscal...*")
+            enviar_mensagem_telegram(chat_id, "👁️ *A Ler o cupom fiscal (Smart OCR)...*")
             foto_id = message["photo"][-1]["file_id"]
             img_bytes = baixar_arquivo_telegram(foto_id)
             tabela_md = extrair_tabela_recibo_gemini(img_bytes)
             texto_analise = f"Contexto: {message.get('caption', '')}\n\nNota Fiscal Extratada:\n{tabela_md}"
-            # --- TELEMETRIA: OCR ---
             logger.info({"event": "ocr_completed", "model": "gemini-2.5-flash"})
         elif "voice" in message:
-            enviar_mensagem_telegram(chat_id, "⏳ *Ouvindo mensagem de áudio...*")
+            enviar_mensagem_telegram(chat_id, "⏳ *A Ouvir...*")
             texto_analise = transcrever_audio(baixar_arquivo_telegram(message["voice"]["file_id"]))
-            # --- TELEMETRIA: STT ---
             logger.info({"event": "stt_completed", "model": "whisper-large-v3"})
         elif "text" in message:
             texto_analise = message["text"]
@@ -451,12 +459,10 @@ def telegram_webhook():
         analise_ia = processar_texto_com_llm(texto_analise)
         intencao = analise_ia.get("intencao")
 
-        # --- TELEMETRIA: Cérebro Lógico ---
         logger.info({"event": "llm_routed", "intent": intencao})
 
         if intencao == "registrar_lote_pendente":
             dados_lote = analise_ia.get("dados_lote", {})
-            # --- TELEMETRIA: Lote Detectado ---
             logger.info({"event": "items_extracted", "items_count": len(dados_lote.get("itens", []))})
             
             grupos, total_final, desc_global = aplicar_map_reduce(dados_lote)
@@ -464,7 +470,6 @@ def telegram_webhook():
             cache_id = "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
             supabase.table("cache_aprovacao").insert({"id": cache_id, "payload": dados_lote}).execute()
             
-            # --- TELEMETRIA: Rascunho na Memória ---
             logger.info({"event": "cache_created", "cache_id": cache_id})
             
             texto_resumo = gerar_mensagem_resumo(cache_id, dados_lote, grupos, total_final, desc_global)
@@ -498,8 +503,32 @@ def telegram_webhook():
         elif intencao == "consultar":
             filtros = analise_ia.get("filtros_pesquisa", {})
             total, qtd = consultar_no_banco(filtros)
-            filtros_txt = ", ".join([f"{k}: {v}" for k,v in filtros.items() if v]) or "Todos"
-            msg = f"🔎 **Consulta Concluída**\n\n📊 **Total:** R$ {total:,.2f}\n📝 Registros: {qtd}\n🎛️ Filtros: {filtros_txt}"
+            
+            # Formatador Dinâmico de Relatórios Financeiros
+            f_mes = filtros.get("mes")
+            f_ano = filtros.get("ano")
+            
+            if f_mes and f_ano:
+                try:
+                    str_data = f"{int(f_mes):02d}/{int(f_ano)}"
+                except ValueError:
+                    str_data = f"{f_mes}/{f_ano}"
+            elif f_ano:
+                str_data = str(f_ano)
+            else:
+                str_data = "Nenhum"
+                
+            f_cat = filtros.get("categoria")
+            f_nat = filtros.get("natureza")
+            
+            msg = f"📊 **Total:** R$ {total:,.2f}\n📝 Registros: {qtd}\n🎛️ Filtros: {str_data}\n"
+            
+            if f_cat:
+                nat_inferred, cat_clean = inferir_natureza(f_cat)
+                msg += f"🗂️ Categoria: {cat_clean} ({nat_inferred})"
+            elif f_nat:
+                msg += f"🗂️ Natureza: {f_nat.strip().title()}"
+                
             enviar_mensagem_telegram(chat_id, msg)
 
         elif intencao == "excluir":
