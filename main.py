@@ -167,6 +167,7 @@ def processar_texto_com_llm(texto_usuario):
     - Santo Antônio do Pinhal, Socorro, Monte Verde, Camanducaia = "Viagens".
     - Steam, For The King 2, Slay the Spire = "Diversão".
     - Apelidos de banco: "roxinho" = Nubank, "laranjinha" = Itaú.
+    - Siglas mercado: SBT (Sabonete), ESP (Esponja), SH (Shampoo)
     </regras_de_contexto_negocio>
 
     <formato_de_saida>
@@ -228,9 +229,13 @@ def aplicar_map_reduce(dados_lote):
 
     desc_global = float(dados_lote.get("desconto_global") or 0.0)
     
-    # QA Guardrail Matemático: Prova Real de Descontos Duplicados
-    if abs(soma_descontos_itens - desc_global) <= 0.05:
-        desc_global = 0.0 # O desconto global era apenas a legenda do somatório, ignorar dupla dedução.
+    # QA Guardrail Matemático e Consistência de Estado (State Match)
+    if desc_global > 0 and abs(soma_descontos_itens - desc_global) <= 0.05:
+        # Ponto 1: Telemetria silenciosa do evento (sem exibir ao usuário)
+        logger.info({"event": "guardrail_discount_neutralized", "saved_value": desc_global})
+        desc_global = 0.0 
+        # Ponto 3: Modifica o dicionário raiz para propagar o estado correto ao Cache e ao Modo Edição
+        dados_lote["desconto_global"] = 0.0 
 
     if desc_global > 0 and grupos:
         chave_maior = max(grupos, key=lambda k: grupos[k]["valor"])
@@ -260,6 +265,7 @@ def gerar_mensagem_resumo(cache_id, dados_lote, grupos, total_final, desc_global
 def gerar_texto_edicao(dados_lote):
     linhas = ["--CUPOM_EDIT--", f"Pagamento: {dados_lote.get('metodo_pagamento', 'Não Informado')}"]
     linhas.append(f"Conta: {dados_lote.get('conta', 'Não Informada')}")
+    # O desconto global gerado aqui agora reflete o Guardrail (State Mismatch Resolvido)
     linhas.append(f"Desconto Global: {dados_lote.get('desconto_global', 0.0)}\n")
     for item in dados_lote.get("itens", []):
         cat = item.get("categoria", "Outros")
@@ -424,7 +430,7 @@ def telegram_webhook():
         logger.info({"event": "webhook_received", "type": "photo" if "photo" in message else "voice" if "voice" in message else "text"})
 
         if "photo" in message:
-            enviar_mensagem_telegram(chat_id, "👁️ *A Ler o cupom fiscal (Smart OCR)...*")
+            enviar_mensagem_telegram(chat_id, "👀 *Lendo o cupom fiscal...*")
             foto_id = message["photo"][-1]["file_id"]
             img_bytes = baixar_arquivo_telegram(foto_id)
             tabela_md = extrair_tabela_recibo_gemini(img_bytes)
@@ -432,7 +438,7 @@ def telegram_webhook():
             # --- TELEMETRIA: OCR ---
             logger.info({"event": "ocr_completed", "model": "gemini-2.5-flash"})
         elif "voice" in message:
-            enviar_mensagem_telegram(chat_id, "⏳ *A Ouvir...*")
+            enviar_mensagem_telegram(chat_id, "⏳ *Ouvindo mensagem de áudio...*")
             texto_analise = transcrever_audio(baixar_arquivo_telegram(message["voice"]["file_id"]))
             # --- TELEMETRIA: STT ---
             logger.info({"event": "stt_completed", "model": "whisper-large-v3"})
