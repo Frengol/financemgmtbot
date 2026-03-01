@@ -92,7 +92,6 @@ def inferir_natureza(categoria):
     
     chave_busca = categoria.strip().lower()
     if chave_busca not in CATEGORIA_MAP:
-        # Zero-Trust Category Enforcement: Fim da criação de categorias não oficiais
         return "Outros", "Outros"
         
     return CATEGORIA_MAP[chave_busca]
@@ -192,6 +191,7 @@ def processar_texto_com_llm(texto_usuario):
     - Apelidos de banco: "roxinho" = Nubank, "laranjinha" = Itaú.
     - Siglas de mercado: "SH" = Shampoo, "ESP" = Esponja.
     - Transcrições de áudio como "piques", "pics" ou "pis" SIGNIFICAM o método de pagamento "Pix".
+    - Cronologia: Se o usuário citar datas retroativas ("ontem", "anteontem", "dia 15"), CALCULE a data exata (YYYY-MM-DD) usando o CONTEXTO TEMPORAL INJETADO. Se omitido, use a data de hoje.
     </regras_de_contexto_negocio>
     
     <regra_de_fluxo_de_caixa>
@@ -207,6 +207,7 @@ def processar_texto_com_llm(texto_usuario):
       "raciocinio_interno": "Justifique a intenção.",
       
       "dados_registro": {{
+        "data": "YYYY-MM-DD",
         "valor_total": float, "parcelas": int, "categoria": "...",
         "descricao": "Resumo em 5 palavras", "metodo_pagamento": "...", "conta": "Nome do banco, 'Carteira' ou 'Não Informada'"
       }},
@@ -349,12 +350,21 @@ def inserir_no_banco(dados_reg):
     valor_base = round(valor_total / parcelas, 2)
     valor_ultima = round(valor_total - (valor_base * (parcelas - 1)), 2)
     
-    data_atual = get_brasilia_time()
+    # QA Roteador de Cronologia Semântica (Fato Gerador)
+    data_informada = dados_reg.get("data")
+    if data_informada:
+        try:
+            data_base_dt = datetime.strptime(data_informada, "%Y-%m-%d")
+        except (ValueError, TypeError):
+            data_base_dt = get_brasilia_time()
+    else:
+        data_base_dt = get_brasilia_time()
+        
     registros_em_lote = []
     
     for i in range(parcelas):
         valor_parcela = valor_ultima if i == (parcelas - 1) else valor_base
-        data_parcela = add_months_safely(data_atual, i).strftime("%Y-%m-%d")
+        data_parcela = add_months_safely(data_base_dt, i).strftime("%Y-%m-%d")
         desc = dados_reg.get("descricao", "Sem descrição")
         if parcelas > 1: desc = f"{desc} [{i+1}/{parcelas}]"
             
@@ -375,12 +385,10 @@ def aplicar_filtros_query(query_obj, filtros):
     query_obj = query_obj.gte("valor", 0)
     if not filtros: return query_obj
     
-    # 1. Trava da Vírgula (Anti-arraying)
     raw_cat = filtros.get("categoria")
     if raw_cat and "," in raw_cat:
         raw_cat = None
         
-    # 2. Sanitização Estrita de Natureza
     raw_nat = filtros.get("natureza")
     if raw_nat:
         nat_title = raw_nat.strip().title()
@@ -405,7 +413,6 @@ def aplicar_filtros_query(query_obj, filtros):
     if filtros.get("metodo_pagamento"):
         query_obj = query_obj.ilike("metodo_pagamento", f"%{filtros['metodo_pagamento']}%")
         
-    # 3. Roteador de Fluxo de Caixa (Cashflow Logic)
     tipo_tx = filtros.get("tipo_transacao")
     if tipo_tx == "saida" and not raw_nat:
         query_obj = query_obj.neq("natureza", "Receita")
@@ -524,7 +531,6 @@ def telegram_webhook():
             msg_id = cb["message"]["message_id"]
             acao_bruta = cb["data"]
             
-            # Bug Correção Crítica UX: Limite de cortes na extração do Cache ID
             if "_" in acao_bruta:
                 acao, cache_id = acao_bruta.split("_", 1)
             else:
@@ -626,8 +632,13 @@ def telegram_webhook():
             val_str = f"R$ {val_total:,.2f}" + (f" (em {parcelas}x)" if parcelas > 1 else "")
             
             nat_inf, cat_inf = inferir_natureza(dados_reg.get('categoria'))
+            
+            data_str = dados_reg.get('data')
+            data_txt = f"🗓️ Data: {data_str}\n" if data_str else ""
+            
             msg = (f"✅ **Salvo!**\n💰 {val_str} | 📊 {nat_inf}\n"
                    f"📂 Categoria: {cat_inf}\n"
+                   f"{data_txt}"
                    f"🏦 {dados_reg.get('conta')} ({dados_reg.get('metodo_pagamento')})\n"
                    f"📝 {dados_reg.get('descricao')}")
             enviar_mensagem_telegram(chat_id, msg)
