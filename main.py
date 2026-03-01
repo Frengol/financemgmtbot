@@ -6,6 +6,7 @@ import traceback
 import calendar
 import random
 import string
+import math
 from flask import Flask, request, jsonify
 from supabase import create_client, Client
 from postgrest.exceptions import APIError
@@ -50,6 +51,29 @@ try:
 except Exception as e:
     logger.critical({"event": "init_error", "error": mascarar_segredos(str(e))})
     raise
+
+# ==========================================
+# MAPEAMENTO DETERMINÍSTICO (Fim do Hardcode e Alucinações)
+# ==========================================
+CATEGORIA_NATUREZA_MAP = {
+    # Essencial
+    "moradia": "Essencial", "mercado": "Essencial", "transporte": "Essencial",
+    "saúde": "Essencial", "educação": "Essencial", "contas fixas": "Essencial",
+    # Lazer
+    "bares e restaurantes": "Lazer", "delivery e fast food": "Lazer", 
+    "bebidas alcóolicas": "Lazer", "viagens": "Lazer", "diversão": "Lazer", 
+    "vestuário": "Lazer", "cuidados pessoais": "Lazer",
+    # Receita
+    "salário": "Receita", "investimentos": "Receita", 
+    "cashback": "Receita", "entradas diversas": "Receita"
+}
+
+def inferir_natureza(categoria):
+    """Garante 100% de precisão cruzando Categoria -> Natureza via dicionário."""
+    cat_limpa = categoria.strip().title() if categoria and isinstance(categoria, str) else "Outros"
+    chave_busca = cat_limpa.lower()
+    nat = CATEGORIA_NATUREZA_MAP.get(chave_busca, "Outros")
+    return nat, cat_limpa
 
 # ==========================================
 # INFRAESTRUTURA E COMUNICAÇÃO
@@ -112,12 +136,6 @@ def extrair_tabela_recibo_gemini(image_bytes):
     response = model.generate_content([{"mime_type": "image/jpeg", "data": image_bytes}, prompt_visao])
     return response.text
 
-def sanitizar_dados(natureza, categoria):
-    cat = categoria.strip().title() if categoria and isinstance(categoria, str) else "Outros"
-    nat = natureza.strip().title() if natureza and isinstance(natureza, str) else "Outros"
-    if nat not in ["Essencial", "Lazer", "Receita", "Outros"]: nat = "Outros"
-    return nat, cat
-
 def processar_texto_com_llm(texto_usuario):
     hoje_bsb = get_brasilia_time()
     
@@ -142,22 +160,22 @@ def processar_texto_com_llm(texto_usuario):
     </regras_de_categoria_estrita_anti_alucinacao>
 
     <regras_de_contexto_negocio>
-    - Civic LXL e Golf Generation 2003 = "Transporte" (Essencial).
-    - Ifood, hambúrgueres, doces, pizzas = "Delivery e Fast Food" (Lazer).
-    - Vinho tinto meio seco, cerveja = "Bebidas alcóolicas" (Lazer).
-    - Santo Antônio do Pinhal, Socorro, Monte Verde, Camanducaia = "Viagens" (Lazer).
-    - Steam, For The King 2, Slay the Spire = "Diversão" (Lazer).
+    - Civic LXL e Golf Generation 2003 = "Transporte".
+    - Ifood, hambúrgueres, doces, pizzas = "Delivery e Fast Food".
+    - Vinho tinto meio seco, cerveja = "Bebidas alcóolicas".
+    - Santo Antônio do Pinhal, Socorro, Monte Verde, Camanducaia = "Viagens".
+    - Steam, For The King 2, Slay the Spire = "Diversão".
     - Apelidos de banco: "roxinho" = Nubank, "laranjinha" = Itaú.
     </regras_de_contexto_negocio>
 
     <formato_de_saida>
-    Retorne EXCLUSIVAMENTE este JSON:
+    Retorne EXCLUSIVAMENTE este JSON (Não tente deduzir a 'natureza', o sistema fará isso via Categoria):
     {{
       "intencao": "registrar" | "registrar_lote_pendente" | "salvar_edicao_cupom" | "consultar" | "excluir",
-      "raciocinio_interno": "Justifique a intenção e categorizações.",
+      "raciocinio_interno": "Justifique a intenção.",
       
       "dados_registro": {{
-        "valor_total": float, "parcelas": int, "natureza": "...", "categoria": "...",
+        "valor_total": float, "parcelas": int, "categoria": "...",
         "descricao": "Resumo em 5 palavras", "metodo_pagamento": "...", "conta": "Nome do banco, 'Carteira' ou 'Não Informada'"
       }},
 
@@ -165,7 +183,7 @@ def processar_texto_com_llm(texto_usuario):
         "metodo_pagamento": "...", "conta": "Nome do banco, 'Carteira' ou 'Não Informada'",
         "desconto_global": float (0.0 se não houver),
         "itens": [ 
-           {{ "nome": "Item", "valor_bruto": float, "desconto_item": float (0.0 se não houver), "natureza": "...", "categoria": "..." }}
+           {{ "nome": "Item", "valor_bruto": float, "desconto_item": float (0.0 se não houver), "categoria": "..." }}
         ]
       }},
 
@@ -190,9 +208,15 @@ def aplicar_map_reduce(dados_lote):
     if not itens: return {}, 0.0, 0.0
 
     grupos = {}
+    soma_descontos_itens = 0.0
+
     for item in itens:
-        nat, cat = sanitizar_dados(item.get("natureza"), item.get("categoria"))
-        val_liquido = max(0.0, float(item.get("valor_bruto", 0.0)) - float(item.get("desconto_item", 0.0)))
+        nat, cat = inferir_natureza(item.get("categoria"))
+        bruto = float(item.get("valor_bruto") or 0.0)
+        desc_item = float(item.get("desconto_item") or 0.0)
+        
+        soma_descontos_itens += desc_item
+        val_liquido = max(0.0, bruto - desc_item)
         nome = item.get("nome", "Item")
         
         chave = (nat, cat)
@@ -201,7 +225,12 @@ def aplicar_map_reduce(dados_lote):
         grupos[chave]["valor"] += val_liquido
         grupos[chave]["itens_desc"].append(f"▫️ {nome} (R$ {val_liquido:.2f})")
 
-    desc_global = float(dados_lote.get("desconto_global", 0.0))
+    desc_global = float(dados_lote.get("desconto_global") or 0.0)
+    
+    # QA Guardrail Matemático: Prova Real de Descontos Duplicados
+    if abs(soma_descontos_itens - desc_global) <= 0.05:
+        desc_global = 0.0 # O desconto global era apenas a legenda do somatório, ignorar dupla dedução.
+
     if desc_global > 0 and grupos:
         chave_maior = max(grupos, key=lambda k: grupos[k]["valor"])
         grupos[chave_maior]["valor"] = max(0.0, grupos[chave_maior]["valor"] - desc_global)
@@ -233,8 +262,8 @@ def gerar_texto_edicao(dados_lote):
     linhas.append(f"Desconto Global: {dados_lote.get('desconto_global', 0.0)}\n")
     for item in dados_lote.get("itens", []):
         cat = item.get("categoria", "Outros")
-        nat = item.get("natureza", "Outros")
-        linhas.append(f"[{cat} | {nat}] {item.get('nome')} : Bruto={item.get('valor_bruto', 0.0)} | Desconto={item.get('desconto_item', 0.0)}")
+        # Ocultamos a natureza no modo edição para segurança de UX
+        linhas.append(f"[{cat}] {item.get('nome')} : Bruto={item.get('valor_bruto', 0.0)} | Desconto={item.get('desconto_item', 0.0)}")
     return "\n".join(linhas)
 
 def gravar_lote_no_banco(dados_lote):
@@ -272,7 +301,7 @@ def add_months_safely(sourcedate, months):
     return sourcedate.replace(year=year, month=month, day=day)
 
 def inserir_no_banco(dados_reg):
-    nat_limpa, cat_limpa = sanitizar_dados(dados_reg.get("natureza"), dados_reg.get("categoria"))
+    nat_limpa, cat_limpa = inferir_natureza(dados_reg.get("categoria"))
     valor_total = float(dados_reg.get("valor_total") or 0.0)
     parcelas = max(int(dados_reg.get("parcelas") or 1), 1)
     
@@ -340,8 +369,19 @@ def telegram_webhook():
     update = request.get_json()
     if not update: return jsonify({"status": "ignored"}), 200
 
+    # Idempotência: Proteção contra Retry Storms do Telegram
+    update_id = update.get("update_id")
+    if update_id:
+        try:
+            resp_idem = supabase.table("webhook_idempotencia").select("update_id").eq("update_id", update_id).execute()
+            if resp_idem.data:
+                return jsonify({"status": "ignored", "reason": "duplicate"}), 200
+            supabase.table("webhook_idempotencia").insert({"update_id": update_id}).execute()
+        except Exception as e:
+            logger.warning({"event": "idempotency_check_failed", "error": str(e)})
+
     try:
-        # Tratamento de Callback Queries (Cliques nos Botões)
+        # Tratamento de Callback Queries (Botões)
         if "callback_query" in update:
             cb = update["callback_query"]
             chat_id = cb["message"]["chat"]["id"]
@@ -360,16 +400,16 @@ def telegram_webhook():
             if acao == "aprovar":
                 gravar_lote_no_banco(dados_lote)
                 supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
-                editar_mensagem_telegram(chat_id, msg_id, "✅ **Cupom Aprovado e Salvo com Sucesso!**")
+                editar_mensagem_telegram(chat_id, msg_id, "✅ **Cupom Aprovado e Salvo!**")
                 
             elif acao == "editar":
                 texto_edit = gerar_texto_edicao(dados_lote)
                 supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
-                editar_mensagem_telegram(chat_id, msg_id, f"📝 **MODO EDIÇÃO**\nCopie o texto abaixo, altere os valores ou categorias e me envie de volta:\n\n`{texto_edit}`")
+                editar_mensagem_telegram(chat_id, msg_id, f"📝 **MODO EDIÇÃO**\nCopie, altere as categorias/valores e envie:\n\n`{texto_edit}`")
                 
             elif acao == "cancelar":
                 supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
-                editar_mensagem_telegram(chat_id, msg_id, "❌ **Operação Cancelada.** Nenhum registo foi guardado.")
+                editar_mensagem_telegram(chat_id, msg_id, "❌ **Operação Cancelada.**")
                 
             return jsonify({"status": "ok"}), 200
 
@@ -386,7 +426,7 @@ def telegram_webhook():
             tabela_md = extrair_tabela_recibo_gemini(img_bytes)
             texto_analise = f"Contexto: {message.get('caption', '')}\n\nNota Fiscal Extratada:\n{tabela_md}"
         elif "voice" in message:
-            enviar_mensagem_telegram(chat_id, "⏳ *Ouvindo...*")
+            enviar_mensagem_telegram(chat_id, "⏳ *A Ouvir...*")
             texto_analise = transcrever_audio(baixar_arquivo_telegram(message["voice"]["file_id"]))
         elif "text" in message:
             texto_analise = message["text"]
@@ -416,7 +456,7 @@ def telegram_webhook():
         elif intencao == "salvar_edicao_cupom":
             dados_lote = analise_ia.get("dados_lote", {})
             linhas, soma = gravar_lote_no_banco(dados_lote)
-            enviar_mensagem_telegram(chat_id, f"✅ **Edição Salva!**\n📊 **Total Líquido:** R$ {soma:,.2f}\n📝 Registos: {linhas}")
+            enviar_mensagem_telegram(chat_id, f"✅ **Edição Salva!**\n📊 **Total:** R$ {soma:,.2f}\n📝 Registos: {linhas}")
 
         elif intencao == "registrar":
             dados_reg = analise_ia.get("dados_registro", {})
@@ -425,8 +465,9 @@ def telegram_webhook():
             parcelas = int(dados_reg.get("parcelas") or 1)
             val_str = f"R$ {val_total:,.2f}" + (f" (em {parcelas}x)" if parcelas > 1 else "")
             
-            msg = (f"✅ **Salvo!**\n💰 {val_str} | 📊 {dados_reg.get('natureza')}\n"
-                   f"📂 Categoria: {dados_reg.get('categoria')}\n"
+            nat_inf, cat_inf = inferir_natureza(dados_reg.get('categoria'))
+            msg = (f"✅ **Salvo!**\n💰 {val_str} | 📊 {nat_inf}\n"
+                   f"📂 Categoria: {cat_inf}\n"
                    f"🏦 {dados_reg.get('conta')} ({dados_reg.get('metodo_pagamento')})\n"
                    f"📝 {dados_reg.get('descricao')}")
             enviar_mensagem_telegram(chat_id, msg)
@@ -442,7 +483,7 @@ def telegram_webhook():
             filtros = analise_ia.get("filtros_pesquisa", {})
             confirmado = analise_ia.get("confirmacao_massa", False)
             qtd, status_msg = excluir_no_banco(filtros, confirmado)
-            msg = f"🗑️ **Exclusão Concluída**\n{qtd} apagados." if status_msg == "excluidos" else status_msg
+            msg = f"🗑️ **Exclusão**\n{qtd} apagados." if status_msg == "excluidos" else status_msg
             enviar_mensagem_telegram(chat_id, msg)
             
         else:
