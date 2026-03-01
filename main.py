@@ -441,14 +441,14 @@ def telegram_webhook():
         logger.info({"event": "webhook_received", "type": "photo" if "photo" in message else "voice" if "voice" in message else "text"})
 
         if "photo" in message:
-            enviar_mensagem_telegram(chat_id, "👁️ *A Ler o cupom fiscal (Smart OCR)...*")
+            enviar_mensagem_telegram(chat_id, "👀 *Lendo cupom fiscal...*")
             foto_id = message["photo"][-1]["file_id"]
             img_bytes = baixar_arquivo_telegram(foto_id)
             tabela_md = extrair_tabela_recibo_gemini(img_bytes)
             texto_analise = f"Contexto: {message.get('caption', '')}\n\nNota Fiscal Extratada:\n{tabela_md}"
             logger.info({"event": "ocr_completed", "model": "gemini-2.5-flash"})
         elif "voice" in message:
-            enviar_mensagem_telegram(chat_id, "⏳ *A Ouvir...*")
+            enviar_mensagem_telegram(chat_id, "⏳ *Ouvindo...*")
             texto_analise = transcrever_audio(baixar_arquivo_telegram(message["voice"]["file_id"]))
             logger.info({"event": "stt_completed", "model": "whisper-large-v3"})
         elif "text" in message:
