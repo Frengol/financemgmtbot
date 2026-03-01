@@ -53,7 +53,7 @@ except Exception as e:
     raise
 
 # ==========================================
-# MAPEAMENTO DETERMINÍSTICO (Fim do Hardcode e Alucinações)
+# MAPEAMENTO DETERMINÍSTICO E CANÓNICO (Golden Source)
 # ==========================================
 CATEGORIA_MAP = {
     # Essencial
@@ -84,6 +84,7 @@ def inferir_natureza(categoria):
         return "Outros", "Outros"
     chave_busca = categoria.strip().lower()
     if chave_busca not in CATEGORIA_MAP:
+        # Fallback mantendo o .title() apenas para categorias não mapeadas (se existissem)
         return "Outros", categoria.strip().title()
     return CATEGORIA_MAP[chave_busca]
 
@@ -179,7 +180,7 @@ def processar_texto_com_llm(texto_usuario):
     - Santo Antônio do Pinhal, Socorro, Monte Verde, Camanducaia = "Viagens".
     - Steam, For The King 2, Slay the Spire = "Diversão".
     - Apelidos de banco: "roxinho" = Nubank, "laranjinha" = Itaú.
-    - Siglas de mercado: "SH" = Shampoo, "ESP" = Esponja.
+    - Siglas de cupom fiscal mercado: "SH" = Shampoo, "ESP" = Esponja.
     </regras_de_contexto_negocio>
 
     <formato_de_saida>
@@ -349,10 +350,29 @@ def aplicar_filtros_query(query_obj, filtros):
     query_obj = query_obj.gte("valor", 0)
     if not filtros: return query_obj
     
-    if filtros.get("natureza"): 
-        query_obj = query_obj.eq("natureza", filtros["natureza"].strip().title())
-    if filtros.get("categoria"): 
-        query_obj = query_obj.eq("categoria", filtros["categoria"].strip().title())
+    # QA Alfândega de Consultas (Defensive Programming)
+    # 1. Trava da Vírgula (Impede o LLM de estragar a query concatenando categorias)
+    raw_cat = filtros.get("categoria")
+    if raw_cat and "," in raw_cat:
+        raw_cat = None
+        
+    # 2. Sanitização Estrita de Natureza (Impede buscas por "Gasto" ou "Despesa")
+    raw_nat = filtros.get("natureza")
+    if raw_nat:
+        nat_title = raw_nat.strip().title()
+        if nat_title not in ["Essencial", "Lazer", "Receita"]:
+            raw_nat = None
+        else:
+            raw_nat = nat_title
+            
+    if raw_nat: 
+        query_obj = query_obj.eq("natureza", raw_nat)
+        
+    if raw_cat: 
+        # Forçamos o uso do Dicionário Canónico para a consulta também!
+        _, cat_canonica = inferir_natureza(raw_cat)
+        query_obj = query_obj.eq("categoria", cat_canonica)
+        
     if filtros.get("conta"): 
         query_obj = query_obj.eq("conta", filtros["conta"])
         
@@ -468,7 +488,6 @@ def telegram_webhook():
         analise_ia = processar_texto_com_llm(texto_analise)
         intencao = analise_ia.get("intencao")
 
-        # Injeção de Visibilidade: O Ponto Cego Resolvido (Guardando o payload inteiro)
         logger.info({"event": "llm_routed", "intent": intencao, "payload_ia": analise_ia})
 
         if intencao == "registrar_lote_pendente":
@@ -532,11 +551,17 @@ def telegram_webhook():
             
             msg = f"📊 **Total:** R$ {total:,.2f}\n📝 Registros: {qtd}\n🎛️ Filtros: {str_data}\n"
             
-            if f_cat:
+            if f_cat and not (f_cat and "," in f_cat): # Respeita a Trava da Vírgula na UX
                 nat_inferred, cat_clean = inferir_natureza(f_cat)
                 msg += f"🗂️ Categoria: {cat_clean} ({nat_inferred})"
             elif f_nat:
-                msg += f"🗂️ Natureza: {f_nat.strip().title()}"
+                nat_title = f_nat.strip().title()
+                if nat_title in ["Essencial", "Lazer", "Receita"]: # Respeita a Sanitização na UX
+                    msg += f"🗂️ Natureza: {nat_title}"
+                else:
+                     msg += f"🗂️ Natureza: Todas"
+            else:
+                msg += f"🗂️ Busca Global"
                 
             enviar_mensagem_telegram(chat_id, msg)
 
