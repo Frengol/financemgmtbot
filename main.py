@@ -76,16 +76,25 @@ CATEGORIA_MAP = {
     "salário": ("Receita", "Salário"), 
     "investimentos": ("Receita", "Investimentos"), 
     "cashback": ("Receita", "Cashback"), 
-    "entradas diversas": ("Receita", "Entradas Diversas")
+    "entradas diversas": ("Receita", "Entradas Diversas"),
+    # Defesa Semântica (Amortecedores de Queda para Alucinações da IA)
+    "receita": ("Receita", "Entradas Diversas"),
+    "ganho": ("Receita", "Entradas Diversas"),
+    "gasto": ("Outros", "Outros"),
+    "despesa": ("Outros", "Outros")
 }
 
 def inferir_natureza(categoria):
-    """Garante 100% de precisão cruzando e formatando Categoria -> Natureza via dicionário Canônico."""
+    """Garante 100% de precisão cruzando e formatando Categoria -> Natureza via dicionário Canônico.
+    Aplica política Zero-Trust: categorias inventadas caem diretamente em Outros > Outros."""
     if not categoria or not isinstance(categoria, str):
         return "Outros", "Outros"
+    
     chave_busca = categoria.strip().lower()
     if chave_busca not in CATEGORIA_MAP:
-        return "Outros", categoria.strip().title()
+        # Zero-Trust Category Enforcement: Fim da criação de categorias não oficiais
+        return "Outros", "Outros"
+        
     return CATEGORIA_MAP[chave_busca]
 
 # ==========================================
@@ -182,6 +191,7 @@ def processar_texto_com_llm(texto_usuario):
     - Steam, For The King 2, Slay the Spire = "Diversão".
     - Apelidos de banco: "roxinho" = Nubank, "laranjinha" = Itaú.
     - Siglas de mercado: "SH" = Shampoo, "ESP" = Esponja.
+    - Transcrições de áudio como "piques", "pics" ou "pis" SIGNIFICAM o método de pagamento "Pix".
     </regras_de_contexto_negocio>
     
     <regra_de_fluxo_de_caixa>
@@ -393,7 +403,6 @@ def aplicar_filtros_query(query_obj, filtros):
         query_obj = query_obj.eq("valor", float(filtros["valor_exato"]))
         
     if filtros.get("metodo_pagamento"):
-        # match insensível (ilike) para métodos de pagamento para dar margem de manobra (ex: "pix" vs "Pix")
         query_obj = query_obj.ilike("metodo_pagamento", f"%{filtros['metodo_pagamento']}%")
         
     # 3. Roteador de Fluxo de Caixa (Cashflow Logic)
@@ -433,7 +442,6 @@ def formatar_relatorio_exclusao(registros):
     msg += f"Encontrei {total_regs} registro(s) correspondente(s):\n\n"
     
     if total_regs <= 10:
-        # Relatório Completo (Detailed)
         for r in registros:
             data_formatada = r.get("data", "Sem data")
             msg += f"▫️ *{data_formatada}* | R$ {r['valor']:.2f}\n"
@@ -441,14 +449,13 @@ def formatar_relatorio_exclusao(registros):
             msg += f"   💳 {r.get('metodo_pagamento','?')} ({r.get('conta', '?')})\n"
             msg += f"   📝 {r.get('descricao', 'Sem descrição')[:30]}...\n\n"
     else:
-        # Relatório Agrupado (Grouped by Date)
         agrupamento = defaultdict(list)
         for r in registros:
             agrupamento[r.get("data", "Sem data")].append(r)
             
-        for data, itens in list(agrupamento.items())[:5]: # Mostra max 5 datas diferentes para não explodir msg
+        for data, itens in list(agrupamento.items())[:5]:
             msg += f"📅 **{data}** ({len(itens)} itens)\n"
-            for r in itens[:3]: # Mostra max 3 exemplos por data
+            for r in itens[:3]:
                 msg += f"   ▫️ {r['natureza']} > {r['categoria']} | R$ {r['valor']:.2f}\n"
             if len(itens) > 3:
                 msg += f"   ... e mais {len(itens)-3} itens.\n"
@@ -460,14 +467,11 @@ def formatar_relatorio_exclusao(registros):
     return msg
 
 def iniciar_fluxo_exclusao(chat_id, filtros_exclusao):
-    # 1. Trava de Filtro Vazio (Zero-Trust)
-    # Remove valores nulos, strings vazias ou zero (mas aceita 0 de valor_exato se for intencional, porem improvavel)
     filtros_validos = {k: v for k, v in filtros_exclusao.items() if v}
     if not filtros_validos:
         enviar_mensagem_telegram(chat_id, "⚠️ **Operação Recusada.**\nNão posso apagar a base inteira sem filtros! Diga-me o valor exato, a data, a categoria ou o método de pagamento da transação que deseja excluir.")
         return
 
-    # 2. Busca Prévia (Dry-Run Select)
     query_select = supabase.table("gastos").select("id, data, valor, natureza, categoria, descricao, metodo_pagamento, conta")
     resposta = aplicar_filtros_query(query_select, filtros_exclusao).execute()
     
@@ -478,11 +482,9 @@ def iniciar_fluxo_exclusao(chat_id, filtros_exclusao):
         
     ids_para_apagar = [r["id"] for r in registros]
     
-    # 3. Cache Stateless
     cache_id = "DEL_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
     supabase.table("cache_aprovacao").insert({"id": cache_id, "payload": {"ids": ids_para_apagar}}).execute()
     
-    # 4. Formatação Dinâmica de UX
     msg_alerta = formatar_relatorio_exclusao(registros)
     
     teclado = {
@@ -522,15 +524,18 @@ def telegram_webhook():
             msg_id = cb["message"]["message_id"]
             acao_bruta = cb["data"]
             
-            # Tratamento de Botões Padrão vs Exclusão
-            if acao_bruta.startswith("confirmdel_"):
-                acao = "confirmdel"
-                cache_id = acao_bruta.split("_")[1]
+            # Bug Correção Crítica UX: Limite de cortes na extração do Cache ID
+            if "_" in acao_bruta:
+                acao, cache_id = acao_bruta.split("_", 1)
             else:
-                acao, cache_id = acao_bruta.split("_")
+                acao = acao_bruta
+                cache_id = None
             
             requests.post(f"{TELEGRAM_API_URL}/answerCallbackQuery", json={"callback_query_id": cb["id"]})
             
+            if not cache_id:
+                return jsonify({"status": "ok"}), 200
+                
             resp = supabase.table("cache_aprovacao").select("payload").eq("id", cache_id).execute()
             if not resp.data:
                 editar_mensagem_telegram(chat_id, msg_id, "❌ Rascunho expirado ou já processado.")
@@ -550,7 +555,6 @@ def telegram_webhook():
                 
             elif acao == "confirmdel":
                 ids = payload_cache.get("ids", [])
-                # Hard Delete utilizando array de IDs exatos garantindo que nada fora do escopo seja apagado
                 supabase.table("gastos").delete().in_("id", ids).execute()
                 supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
                 editar_mensagem_telegram(chat_id, msg_id, f"🗑️ **Exclusão Efetuada!** ({len(ids)} registros apagados).")
@@ -673,7 +677,6 @@ def telegram_webhook():
             enviar_mensagem_telegram(chat_id, msg)
 
         elif intencao == "excluir":
-            # Nova UX Interativa de Segurança (Interactive Delete)
             filtros_exc = analise_ia.get("filtros_exclusao", {})
             iniciar_fluxo_exclusao(chat_id, filtros_exc)
             
