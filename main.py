@@ -55,26 +55,37 @@ except Exception as e:
 # ==========================================
 # MAPEAMENTO DETERMINÍSTICO (Fim do Hardcode e Alucinações)
 # ==========================================
-CATEGORIA_NATUREZA_MAP = {
+CATEGORIA_MAP = {
     # Essencial
-    "moradia": "Essencial", "mercado": "Essencial", "transporte": "Essencial",
-    "saúde": "Essencial", "educação": "Essencial", "contas fixas": "Essencial",
-    "cuidados pessoais": "Essencial",
+    "moradia": ("Essencial", "Moradia"), 
+    "mercado": ("Essencial", "Mercado"), 
+    "transporte": ("Essencial", "Transporte"),
+    "saúde": ("Essencial", "Saúde"), 
+    "educação": ("Essencial", "Educação"), 
+    "contas fixas": ("Essencial", "Contas Fixas"),
+    "cuidados pessoais": ("Essencial", "Cuidados Pessoais"),
     # Lazer
-    "bares e restaurantes": "Lazer", "delivery e fast food": "Lazer", 
-    "bebidas alcoólicas": "Lazer", "viagens": "Lazer", "diversão": "Lazer", 
-    "vestuário": "Lazer",
+    "bares e restaurantes": ("Lazer", "Bares e Restaurantes"), 
+    "delivery e fast food": ("Lazer", "Delivery e Fast Food"), 
+    "bebidas alcoólicas": ("Lazer", "Bebidas Alcoólicas"), 
+    "viagens": ("Lazer", "Viagens"), 
+    "diversão": ("Lazer", "Diversão"), 
+    "vestuário": ("Lazer", "Vestuário"),
     # Receita
-    "salário": "Receita", "investimentos": "Receita", 
-    "cashback": "Receita", "entradas diversas": "Receita"
+    "salário": ("Receita", "Salário"), 
+    "investimentos": ("Receita", "Investimentos"), 
+    "cashback": ("Receita", "Cashback"), 
+    "entradas diversas": ("Receita", "Entradas Diversas")
 }
 
 def inferir_natureza(categoria):
-    """Garante 100% de precisão cruzando Categoria -> Natureza via dicionário."""
-    cat_limpa = categoria.strip().title() if categoria and isinstance(categoria, str) else "Outros"
-    chave_busca = cat_limpa.lower()
-    nat = CATEGORIA_NATUREZA_MAP.get(chave_busca, "Outros")
-    return nat, cat_limpa
+    """Garante 100% de precisão cruzando e formatando Categoria -> Natureza via dicionário Canônico."""
+    if not categoria or not isinstance(categoria, str):
+        return "Outros", "Outros"
+    chave_busca = categoria.strip().lower()
+    if chave_busca not in CATEGORIA_MAP:
+        return "Outros", categoria.strip().title()
+    return CATEGORIA_MAP[chave_busca]
 
 # ==========================================
 # INFRAESTRUTURA E COMUNICAÇÃO
@@ -148,7 +159,7 @@ def processar_texto_com_llm(texto_usuario):
     1. "registrar" (um único gasto/receita manual).
     2. "registrar_lote_pendente" (uma lista de itens via cupom fiscal, requer aprovação).
     3. "salvar_edicao_cupom" (se o texto do usuário iniciar com "--CUPOM_EDIT--", salva direto).
-    4. "consultar" (saber quanto gastou, buscar histórico por natureza ou categoria).
+    4. "consultar" (saber quanto gastou, buscar histórico por natureza ou categoria). NÃO deduza mês ou ano a menos que explicitamente pedido.
     5. "excluir" (apagar dados incorretos).
     </diretriz_de_intencao>
 
@@ -190,7 +201,7 @@ def processar_texto_com_llm(texto_usuario):
         ]
       }},
 
-      "filtros_pesquisa": {{ "mes": "MM", "ano": "YYYY", "natureza": "...", "categoria": "...", "conta": "..." }},
+      "filtros_pesquisa": {{ "mes": "MM" (somente se pedido expresso), "ano": "YYYY" (somente se pedido expresso), "natureza": "...", "categoria": "...", "conta": "..." }},
       "confirmacao_massa": boolean
     }}
     </formato_de_saida>
@@ -351,7 +362,7 @@ def aplicar_filtros_query(query_obj, filtros):
             ultimo_dia = calendar.monthrange(ano, mes)[1]
             query_obj = query_obj.gte("data", f"{ano}-{mes:02d}-01").lte("data", f"{ano}-{mes:02d}-{ultimo_dia:02d}")
         except ValueError:
-            pass # Ignora formatação incorreta do LLM
+            pass
     elif filtros.get("ano"):
         try:
             ano = int(filtros["ano"])
@@ -400,7 +411,6 @@ def telegram_webhook():
             logger.warning({"event": "idempotency_check_failed", "error": str(e)})
 
     try:
-        # Tratamento de Callback Queries (Botões)
         if "callback_query" in update:
             cb = update["callback_query"]
             chat_id = cb["message"]["chat"]["id"]
@@ -432,7 +442,6 @@ def telegram_webhook():
                 
             return jsonify({"status": "ok"}), 200
 
-        # Tratamento de Mensagens Normais
         if "message" not in update: return jsonify({"status": "ignored"}), 200
         message = update["message"]
         chat_id = message["chat"]["id"]
@@ -456,11 +465,11 @@ def telegram_webhook():
         else:
             return jsonify({"status": "ok"}), 200
 
-        # Roteamento Cognitivo (DeepSeek)
         analise_ia = processar_texto_com_llm(texto_analise)
         intencao = analise_ia.get("intencao")
 
-        logger.info({"event": "llm_routed", "intent": intencao})
+        # Injeção de Visibilidade: O Ponto Cego Resolvido (Guardando o payload inteiro)
+        logger.info({"event": "llm_routed", "intent": intencao, "payload_ia": analise_ia})
 
         if intencao == "registrar_lote_pendente":
             dados_lote = analise_ia.get("dados_lote", {})
@@ -505,7 +514,6 @@ def telegram_webhook():
             filtros = analise_ia.get("filtros_pesquisa", {})
             total, qtd = consultar_no_banco(filtros)
             
-            # Formatador Dinâmico de Relatórios Financeiros
             f_mes = filtros.get("mes")
             f_ano = filtros.get("ano")
             
