@@ -556,13 +556,19 @@ async def iniciar_fluxo_exclusao(chat_id, filtros_exclusao):
 async def telegram_webhook():
     if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != SECRET_TOKEN:
         return jsonify({"error": "Unauthorized"}), 403
-
-    update = await request.get_json()
-    if not update: return jsonify({"status": "ignored"}), 200
-
-    # Dispatch da tarefa pesada para background vinculado ao evento
-    current_app.add_background_task(processar_update_assincrono, update)
-    return jsonify({"status": "ok"}), 200
+    
+    try:
+        request_body = await request.get_json()
+        logger.info({"event": "webhook_received_raw", "module": "main"})
+        
+        # Em Cloud Run Serverless (Scale-to-Zero), Background Tasks sofrem CPU Throttling (0% clock)
+        # O processamento deve ser await síncrono para manter o CPU Boost 100% alocado na Box
+        await processar_update_assincrono(request_body)
+        
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        logger.error({"event": "webhook_processing_error", "error": str(e)})
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 async def processar_update_assincrono(update):
     chat_id = None

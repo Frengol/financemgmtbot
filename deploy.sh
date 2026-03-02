@@ -19,7 +19,7 @@ gcloud builds submit --tag gcr.io/$PROJECT_ID/$SERVICE_NAME
 # Regras de FinOps aplicadas:
 # --max-instances=1: Limita a um único container vivo. Se houver DDoS ou Crash Loop, ele nunca tentará criar dezenas de instâncias
 # --concurrency=80: Uma única instância ASGI consegue tratar 80 requisições simultâneas tranquilamente.
-# --cpu-boost: Desativado, economizando centavos preciosos na inicialização.
+# --cpu-boost: ATIVADO. Aloca um burst temporário de CPU nativo para zerar o P99 de Cold Start sem custos exorbitantes na fatura.
 
 echo "--- Passo 2: Publicando no Google Cloud Run ---"
 gcloud run deploy $SERVICE_NAME \
@@ -27,6 +27,7 @@ gcloud run deploy $SERVICE_NAME \
     --region $REGION \
     --max-instances=1 \
     --concurrency=80 \
+    --cpu-boost \
     --allow-unauthenticated \
     --cpu=1 \
     --memory=512Mi \
