@@ -1,3 +1,9 @@
 __pycache__/
 *.pyc
 .env
+
+# Arquivos de uso local (Não Comittar)
+.agents/
+analyze_logs.py
+pyright_output.txt
+ARCHITECTURE.MD
