@@ -9,7 +9,9 @@ import math
 import httpx
 import asyncio
 import tempfile
-from quart import Quart, request, jsonify, current_app, BackgroundTask
+import itertools
+from typing import Dict, List, Any
+from quart import Quart, request, jsonify, current_app
 from supabase import create_client, Client
 from postgrest.exceptions import APIError
 from openai import AsyncOpenAI
@@ -194,7 +196,7 @@ async def extrair_tabela_recibo_gemini(image_bytes):
     )
     return response.text
 
-async def processar_texto_com_llm(texto_usuario):
+async def processar_texto_com_llm(texto_usuario) -> Dict[str, Any]:
     hoje_bsb = get_brasilia_time()
     
     system_prompt = f"""
@@ -492,11 +494,13 @@ def formatar_relatorio_exclusao(registros):
             msg += f"   💳 {r.get('metodo_pagamento','?')} ({r.get('conta', '?')})\n"
             msg += f"   📝 {r.get('descricao', 'Sem descrição')[:30]}...\n\n"
     else:
-        agrupamento = defaultdict(list)
+        agrupamento: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for r in registros:
             agrupamento[r.get("data", "Sem data")].append(r)
             
-        for data, itens in list(agrupamento.items())[:5]:
+        chaves_top5 = list(agrupamento.keys())[:5]
+        for data in chaves_top5:
+            itens = agrupamento[data]
             msg += f"📅 **{data}** ({len(itens)} itens)\n"
             for r in itens[:3]:
                 msg += f"   ▫️ {r['natureza']} > {r['categoria']} | R$ {r['valor']:.2f}\n"

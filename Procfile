@@ -1,1 +1,1 @@
-web: gunicorn --bind :$PORT --workers 1 --threads 4 --timeout 0 main:app
+web: hypercorn main:app --bind 0.0.0.0:$PORT
