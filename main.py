@@ -66,10 +66,12 @@ def mascarar_segredos(texto):
     return texto
 
 try:
-    supabase: Client = create_client(os.environ.get("SUPABASE_URL", ""), os.environ.get("SUPABASE_KEY", ""))
-    groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY", ""))
-    deepseek_client = AsyncOpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY", ""), base_url="https://api.deepseek.com")
-    genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
+    supa_url = os.environ.get("SUPABASE_URL") or ""
+    supa_key = os.environ.get("SUPABASE_KEY") or ""
+    supabase: Client = create_client(supa_url, supa_key)
+    groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY") or "")
+    deepseek_client = AsyncOpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY") or "", base_url="https://api.deepseek.com")
+    genai.configure(api_key=os.environ.get("GEMINI_API_KEY") or "")
     logger.info({"event": "clients_initialized", "status": "success"})
 except Exception:
     logger.critical({"event": "init_error", "error": mascarar_segredos(traceback.format_exc())})
@@ -278,7 +280,8 @@ async def processar_texto_com_llm(texto_usuario) -> Dict[str, Any]:
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": texto_usuario}],
         response_format={"type": "json_object"}
     )
-    return json.loads(response.choices[0].message.content or "{}")
+    texto_resposta = response.choices[0].message.content
+    return json.loads(str(texto_resposta) if texto_resposta else "{}")
 
 # ==========================================
 # LÓGICA DE NEGÓCIO: Map-Reduce e Operações DB
@@ -745,13 +748,13 @@ async def processar_update_assincrono(update):
             filtros_exc = analise_ia.get("filtros_exclusao", {})
             await iniciar_fluxo_exclusao(chat_id, filtros_exc)
             
-        else:
             raise Exception("Intenção não reconhecida.")
 
     except Exception as e:
         erro_tratado = mascarar_segredos(traceback.format_exc())
         logger.error({"event": "system_failure", "error": str(e), "traceback": erro_tratado})
-        if chat_id:
+        # Verificamos se chat_id efetivamente existe e não é nulo antes de tentar usá-lo na exception
+        if 'chat_id' in locals() and chat_id:
             await enviar_mensagem_telegram(chat_id, f"❌ *Falha Sistémica*\n⚠️ `{str(e)}`")
 
 if __name__ == "__main__":

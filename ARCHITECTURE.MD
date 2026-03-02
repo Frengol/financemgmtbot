@@ -10,6 +10,8 @@ O sistema é um Agente Financeiro Autônomo Multimodal, Interativo e Multidireci
 
 * **Gateway & Interface:** Telegram Webhook API (suporte a Text, Voice, Photo e Callback Queries / Teclados Inline).
 * **Computação Ponto-a-Ponto:** Google Cloud Run (Autoscaling de 0 a 1 instância, Serverless Lifecycle c/ CPU Zero-Cost em ociosidade).
+  * **Conteinerização Explícita (AppSec/FinOps):** Deploy **estrito via Dockerfile**. Proibido depender de Cloud Native Buildpacks com Gunicorn para prevenir colapso de ambiente ASGI. Imagem base minimalista (`python:3.11-slim`), usuário não-root, e CMD forçado para `hypercorn`.
+  * **Segurança de Limitação de Escala (FinOps Anti-Crash):** O serviço deve operar imutavelmente sob as regras `--max-instances=1` e `--concurrency=80`. Esta contenção blinda o Cloud Run Billing Free Tier contra falhas de boot sob estresse de milhões de *httpRequest* defeituosos.
 * **Framework Core (ASGI):** `Quart` (Servidor Web Assíncrono Nativo) em tandem com `Hypercorn` ASGI Server, abolindo o legado do `Flask` + `Gunicorn`.
 * **Pooling & I/O Network:** Cliente HTTPX Assíncrono (`httpx.AsyncClient`) gerenciado pelo Lifespan `@app.before_serving` com terminação de conexões atômicas.
 * **Camadas de Persistência no Supabase (PostgreSQL):**
