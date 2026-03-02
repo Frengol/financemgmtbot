@@ -1,7 +1,3 @@
 __pycache__/
 *.pyc
 .env
-
-# Arquivos de uso local
-.agents/
-.dev/
