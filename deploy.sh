@@ -5,7 +5,7 @@
 
 PROJECT_ID="financemgmtbot"
 SERVICE_NAME="financemgmtbot-git"
-REGION="southamerica-east1"
+REGION="us-central1"
 
 echo "====================================================="
 echo "🚀 Iniciando Build & Deploy Finanças Copilot Autônomo"
