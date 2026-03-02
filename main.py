@@ -71,8 +71,8 @@ try:
     deepseek_client = AsyncOpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY", ""), base_url="https://api.deepseek.com")
     genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
     logger.info({"event": "clients_initialized", "status": "success"})
-except Exception as e:
-    logger.critical({"event": "init_error", "error": mascarar_segredos(str(e))})
+except Exception:
+    logger.critical({"event": "init_error", "error": mascarar_segredos(traceback.format_exc())})
     raise
 
 # ==========================================
@@ -355,13 +355,15 @@ def gravar_lote_no_banco(dados_lote):
     
     for (nat, cat), info in grupos.items():
         qtd = len(info["itens_desc"])
-        nomes_limpos = [i.replace("▫️ ", "").split(" (")[0] for i in info["itens_desc"]]
-        nomes_str = ", ".join(nomes_limpos[:3])
-        desc = f"{nomes_str} e +{qtd-3} itens (Cupom)" if qtd > 3 else f"{nomes_str} (Cupom)"
+        nomes_limpos = [str(i).replace("▫️ ", "").split(" (")[0] for i in info["itens_desc"]]
+        nomes_top3 = [n for idx, n in enumerate(nomes_limpos) if idx < 3]
+        nomes_str = ", ".join(nomes_top3)
+        desc: str = f"{nomes_str} e +{qtd-3} itens (Cupom)" if qtd > 3 else f"{nomes_str} (Cupom)"
+        desc_limitada = "".join([c for idx, c in enumerate(str(desc)) if idx < 250])
         
         registros.append({
-            "data": data_atual, "valor": round(info["valor"], 2), "natureza": nat, "categoria": cat,
-            "descricao": desc[:250], "metodo_pagamento": dados_lote.get("metodo_pagamento", "Outros"),
+            "data": data_atual, "valor": float(f"{info['valor']:.2f}"), "natureza": nat, "categoria": cat,
+            "descricao": desc_limitada, "metodo_pagamento": dados_lote.get("metodo_pagamento", "Outros"),
             "conta": dados_lote.get("conta", "Não Informada")
         })
         
@@ -385,8 +387,8 @@ def inserir_no_banco(dados_reg):
     valor_total = float(dados_reg.get("valor_total") or 0.0)
     parcelas = max(int(dados_reg.get("parcelas") or 1), 1)
     
-    valor_base = round(valor_total / parcelas, 2)
-    valor_ultima = round(valor_total - (valor_base * (parcelas - 1)), 2)
+    valor_base = float(f"{(valor_total / parcelas):.2f}")
+    valor_ultima = float(f"{(valor_total - (valor_base * (parcelas - 1))):.2f}")
     
     # QA Roteador de Cronologia Semântica (Fato Gerador)
     data_informada = dados_reg.get("data")
@@ -478,7 +480,7 @@ def consultar_no_banco(filtros):
     resposta = aplicar_filtros_query(query, filtros).execute()
     return sum(item["valor"] for item in resposta.data), len(resposta.data)
 
-def formatar_relatorio_exclusao(registros):
+def formatar_relatorio_exclusao(registros: List[Dict[str, Any]]):
     total_regs = len(registros)
     if total_regs == 0:
         return "❌ Nenhum registro encontrado com esses critérios para exclusão."
