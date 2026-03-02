@@ -1,17 +1,19 @@
 import os
 import json
 import logging
-import requests
 import traceback
 import calendar
 import random
 import string
 import math
-from flask import Flask, request, jsonify
+import httpx
+import asyncio
+import tempfile
+from quart import Quart, request, jsonify, current_app, BackgroundTask
 from supabase import create_client, Client
 from postgrest.exceptions import APIError
-from openai import OpenAI
-from groq import Groq
+from openai import AsyncOpenAI
+from groq import AsyncGroq
 import google.generativeai as genai
 from datetime import datetime, timedelta
 from pythonjsonlogger import jsonlogger
@@ -27,7 +29,7 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logHandler)
 logger.setLevel(logging.INFO)
 
-app = Flask(__name__)
+app = Quart(__name__)
 
 REQUIRED_VARS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_SECRET_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"]
 for var in REQUIRED_VARS:
@@ -39,14 +41,32 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 SECRET_TOKEN = os.environ.get("TELEGRAM_SECRET_TOKEN")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
+# Instância global do Client HTTP Assíncrono para File Descriptors Management
+http_client = None
+
+@app.before_serving
+async def startup():
+    global http_client
+    http_client = httpx.AsyncClient(timeout=30.0)
+    
+@app.after_serving
+async def shutdown():
+    global http_client
+    if http_client:
+        await http_client.aclose()
+
 def mascarar_segredos(texto):
     if not isinstance(texto, str): return texto
-    return texto.replace(TELEGRAM_TOKEN, "[MASKED_BOT_TOKEN]").replace(SECRET_TOKEN, "[MASKED_SECRET]")
+    for var_name in REQUIRED_VARS:
+        val = os.environ.get(var_name)
+        if val and len(val) > 4:
+            texto = texto.replace(val, f"[MASKED_{var_name}]")
+    return texto
 
 try:
     supabase: Client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
-    groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-    deepseek_client = OpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
+    groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
+    deepseek_client = AsyncOpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
     genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
     logger.info({"event": "clients_initialized", "status": "success"})
 except Exception as e:
@@ -102,38 +122,50 @@ def inferir_natureza(categoria):
 def get_brasilia_time():
     return datetime.utcnow() - timedelta(hours=3)
 
-def enviar_mensagem_telegram(chat_id, texto, reply_markup=None):
+async def enviar_acao_telegram(chat_id, action="typing"):
+    if not http_client: return
+    try:
+        url = f"{TELEGRAM_API_URL}/sendChatAction"
+        await http_client.post(url, json={"chat_id": chat_id, "action": action})
+    except Exception as e:
+        logger.error({"event": "telegram_chat_action_fail", "error": mascarar_segredos(str(e))})
+
+async def enviar_mensagem_telegram(chat_id, texto, reply_markup=None):
+    if not http_client: return
     try:
         url = f"{TELEGRAM_API_URL}/sendMessage"
         payload = {"chat_id": chat_id, "text": texto, "parse_mode": "Markdown"}
         if reply_markup: payload["reply_markup"] = reply_markup
-        requests.post(url, json=payload, timeout=10)
+        await http_client.post(url, json=payload)
     except Exception as e:
         logger.error({"event": "telegram_send_fail", "error": mascarar_segredos(str(e))})
 
-def editar_mensagem_telegram(chat_id, message_id, texto, reply_markup=None):
+async def editar_mensagem_telegram(chat_id, message_id, texto, reply_markup=None):
+    if not http_client: return
     try:
         url = f"{TELEGRAM_API_URL}/editMessageText"
         payload = {"chat_id": chat_id, "message_id": message_id, "text": texto, "parse_mode": "Markdown"}
         if reply_markup: payload["reply_markup"] = reply_markup
-        requests.post(url, json=payload, timeout=10)
+        await http_client.post(url, json=payload)
     except Exception as e:
         logger.error({"event": "telegram_edit_fail", "error": mascarar_segredos(str(e))})
 
-def baixar_arquivo_telegram(file_id):
+async def baixar_arquivo_telegram(file_id):
+    if not http_client: return None
     url_info = f"{TELEGRAM_API_URL}/getFile?file_id={file_id}"
-    resp = requests.get(url_info, timeout=10).json()
+    resp = (await http_client.get(url_info)).json()
     if not resp.get("ok"): return None
     download_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{resp['result']['file_path']}"
-    return requests.get(download_url, timeout=15).content
+    return (await http_client.get(download_url)).content
 
-def transcrever_audio(audio_bytes):
-    tmp_path = f"/tmp/audio_{get_brasilia_time().timestamp()}.ogg"
-    with open(tmp_path, "wb") as f: f.write(audio_bytes)
+async def transcrever_audio(audio_bytes):
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp_file:
+        tmp_path = tmp_file.name
+        tmp_file.write(audio_bytes)
     try:
-        with open(tmp_path, "rb") as file:
-            transcription = groq_client.audio.transcriptions.create(
-                file=(tmp_path, file.read()),
+        with open(tmp_path, "rb") as file_to_read:
+            transcription = await groq_client.audio.transcriptions.create(
+                file=(tmp_path, file_to_read.read()),
                 model="whisper-large-v3",
                 prompt="Transcreva este áudio em português sobre finanças, fast food, mercado, faturas e parcelamentos."
             )
@@ -144,7 +176,7 @@ def transcrever_audio(audio_bytes):
 # ==========================================
 # MOTORES DE IA (VISÃO E LÓGICA)
 # ==========================================
-def extrair_tabela_recibo_gemini(image_bytes):
+async def extrair_tabela_recibo_gemini(image_bytes):
     model = genai.GenerativeModel('gemini-2.5-flash')
     prompt_visao = """
     Atue como um extrator de dados. Extraia a tabela de itens comprados. 
@@ -155,10 +187,14 @@ def extrair_tabela_recibo_gemini(image_bytes):
     Desconto Global: [Apenas o valor numérico do desconto final da nota. Diferencie de subtotais! Subtotal NÃO é desconto. Procure palavras como "Desconto", "Desconto total". Se não houver, escreva 0.00]
     Pagamento: [Infira o método lendo a nota inteira: Pix, Crédito, Débito, Dinheiro, Vale Alimentação. Se impossível saber, escreva Não Informado]
     """
-    response = model.generate_content([{"mime_type": "image/jpeg", "data": image_bytes}, prompt_visao])
+    # A lib do genai ainda é síncrona/blockante nativamente em algumas versões, porting via asyncio
+    response = await asyncio.to_thread(
+        model.generate_content, 
+        [{"mime_type": "image/jpeg", "data": image_bytes}, prompt_visao]
+    )
     return response.text
 
-def processar_texto_com_llm(texto_usuario):
+async def processar_texto_com_llm(texto_usuario):
     hoje_bsb = get_brasilia_time()
     
     system_prompt = f"""
@@ -235,7 +271,7 @@ def processar_texto_com_llm(texto_usuario):
     </formato_de_saida>
     """
     
-    response = deepseek_client.chat.completions.create(
+    response = await deepseek_client.chat.completions.create(
         model="deepseek-chat",
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": texto_usuario}],
         response_format={"type": "json_object"}
@@ -473,21 +509,21 @@ def formatar_relatorio_exclusao(registros):
     msg += "\n🛑 **Tem a certeza absoluta que deseja APAGAR isto permanentemente?**"
     return msg
 
-def iniciar_fluxo_exclusao(chat_id, filtros_exclusao):
+async def iniciar_fluxo_exclusao(chat_id, filtros_exclusao):
     filtros_validos = {k: v for k, v in filtros_exclusao.items() if v}
     if not filtros_validos:
-        enviar_mensagem_telegram(chat_id, "⚠️ **Operação Recusada.**\nNão posso apagar a base inteira sem filtros! Diga-me o valor exato, a data, a categoria ou o método de pagamento da transação que deseja excluir.")
+        await enviar_mensagem_telegram(chat_id, "⚠️ **Operação Recusada.**\nNão posso apagar a base inteira sem filtros! Diga-me o valor exato, a data, a categoria ou o método de pagamento da transação que deseja excluir.")
         return
 
     query_select = supabase.table("gastos").select("id, data, valor, natureza, categoria, descricao, metodo_pagamento, conta")
     resposta = aplicar_filtros_query(query_select, filtros_exclusao).execute()
     
     registros = resposta.data
-    if not registros:
-        enviar_mensagem_telegram(chat_id, "🔎 Não encontrei nenhum gasto com essas características para apagar.")
+    if not isinstance(registros, list) or not registros:
+        await enviar_mensagem_telegram(chat_id, "🔎 Não encontrei nenhum gasto com essas características para apagar.")
         return
         
-    ids_para_apagar = [r["id"] for r in registros]
+    ids_para_apagar = [dict(r).get("id") for r in registros if isinstance(r, dict) and "id" in r]
     
     cache_id = "DEL_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
     supabase.table("cache_aprovacao").insert({"id": cache_id, "payload": {"ids": ids_para_apagar}}).execute()
@@ -500,29 +536,35 @@ def iniciar_fluxo_exclusao(chat_id, filtros_exclusao):
             [{"text": "❌ Cancelar", "callback_data": f"cancelar_{cache_id}"}]
         ]
     }
-    enviar_mensagem_telegram(chat_id, msg_alerta, teclado)
+    await enviar_mensagem_telegram(chat_id, msg_alerta, teclado)
 
 
 # ==========================================
 # WEBHOOK CONTROLLER (Gateway Principal)
 # ==========================================
 @app.route("/", methods=["POST"])
-def telegram_webhook():
+async def telegram_webhook():
     if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != SECRET_TOKEN:
         return jsonify({"error": "Unauthorized"}), 403
 
-    update = request.get_json()
+    update = await request.get_json()
     if not update: return jsonify({"status": "ignored"}), 200
 
+    # Dispatch da tarefa pesada para background vinculado ao evento
+    current_app.add_background_task(processar_update_assincrono, update)
+    return jsonify({"status": "ok"}), 200
+
+async def processar_update_assincrono(update):
     update_id = update.get("update_id")
     if update_id:
         try:
-            resp_idem = supabase.table("webhook_idempotencia").select("update_id").eq("update_id", update_id).execute()
-            if resp_idem.data:
-                return jsonify({"status": "ignored", "reason": "duplicate"}), 200
+            # Idempotência de custo zero: Inserção direta no Supabase. O postgres cuidará da Unique Constraint.
             supabase.table("webhook_idempotencia").insert({"update_id": update_id}).execute()
-        except Exception as e:
-            logger.warning({"event": "idempotency_check_failed", "error": str(e)})
+        except APIError as e:
+            if "23505" in getattr(e, "code", "") or "duplicate key" in getattr(e, "message", "").lower():
+                logger.warning({"event": "idempotency_duplicate_intercepted", "update_id": update_id})
+                return
+            logger.error({"event": "idempotency_insert_failed", "error": str(e)})
 
     try:
         if "callback_query" in update:
@@ -537,41 +579,42 @@ def telegram_webhook():
                 acao = acao_bruta
                 cache_id = None
             
-            requests.post(f"{TELEGRAM_API_URL}/answerCallbackQuery", json={"callback_query_id": cb["id"]})
+            if http_client:
+                await http_client.post(f"{TELEGRAM_API_URL}/answerCallbackQuery", json={"callback_query_id": cb["id"]})
             
             if not cache_id:
-                return jsonify({"status": "ok"}), 200
+                return
                 
             resp = supabase.table("cache_aprovacao").select("payload").eq("id", cache_id).execute()
             if not resp.data:
-                editar_mensagem_telegram(chat_id, msg_id, "❌ Rascunho expirado ou já processado.")
-                return jsonify({"status": "ok"}), 200
+                await editar_mensagem_telegram(chat_id, msg_id, "❌ Rascunho expirado ou já processado.")
+                return
                 
             payload_cache = resp.data[0]["payload"]
             
             if acao == "aprovar":
                 gravar_lote_no_banco(payload_cache)
                 supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
-                editar_mensagem_telegram(chat_id, msg_id, "✅ **Cupom Aprovado e Salvo!**")
+                await editar_mensagem_telegram(chat_id, msg_id, "✅ **Cupom Aprovado e Salvo!**")
                 
             elif acao == "editar":
                 texto_edit = gerar_texto_edicao(payload_cache)
                 supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
-                editar_mensagem_telegram(chat_id, msg_id, f"📝 **MODO EDIÇÃO**\nCopie, altere as categorias/valores e envie:\n\n`{texto_edit}`")
+                await editar_mensagem_telegram(chat_id, msg_id, f"📝 **MODO EDIÇÃO**\nCopie, altere as categorias/valores e envie:\n\n`{texto_edit}`")
                 
             elif acao == "confirmdel":
                 ids = payload_cache.get("ids", [])
                 supabase.table("gastos").delete().in_("id", ids).execute()
                 supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
-                editar_mensagem_telegram(chat_id, msg_id, f"🗑️ **Exclusão Efetuada!** ({len(ids)} registros apagados).")
+                await editar_mensagem_telegram(chat_id, msg_id, f"🗑️ **Exclusão Efetuada!** ({len(ids)} registros apagados).")
                 
             elif acao == "cancelar":
                 supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
-                editar_mensagem_telegram(chat_id, msg_id, "❌ **Operação Cancelada.** A base de dados não foi alterada.")
+                await editar_mensagem_telegram(chat_id, msg_id, "❌ **Operação Cancelada.** A base de dados não foi alterada.")
                 
-            return jsonify({"status": "ok"}), 200
+            return
 
-        if "message" not in update: return jsonify({"status": "ignored"}), 200
+        if "message" not in update: return
         message = update["message"]
         chat_id = message["chat"]["id"]
         texto_analise = ""
@@ -579,22 +622,25 @@ def telegram_webhook():
         logger.info({"event": "webhook_received", "type": "photo" if "photo" in message else "voice" if "voice" in message else "text"})
 
         if "photo" in message:
-            enviar_mensagem_telegram(chat_id, "👀 *Lendo cupom fiscal...*")
+            await enviar_acao_telegram(chat_id, "upload_photo")
+            await enviar_mensagem_telegram(chat_id, "👀 *Lendo cupom fiscal...*")
             foto_id = message["photo"][-1]["file_id"]
-            img_bytes = baixar_arquivo_telegram(foto_id)
-            tabela_md = extrair_tabela_recibo_gemini(img_bytes)
+            img_bytes = await baixar_arquivo_telegram(foto_id)
+            tabela_md = await extrair_tabela_recibo_gemini(img_bytes)
             texto_analise = f"Contexto: {message.get('caption', '')}\n\nNota Fiscal Extratada:\n{tabela_md}"
             logger.info({"event": "ocr_completed", "model": "gemini-2.5-flash"})
         elif "voice" in message:
-            enviar_mensagem_telegram(chat_id, "⏳ *Ouvindo...*")
-            texto_analise = transcrever_audio(baixar_arquivo_telegram(message["voice"]["file_id"]))
+            await enviar_acao_telegram(chat_id, "record_voice")
+            await enviar_mensagem_telegram(chat_id, "⏳ *Ouvindo...*")
+            audio_bytes = await baixar_arquivo_telegram(message["voice"]["file_id"])
+            texto_analise = await transcrever_audio(audio_bytes)
             logger.info({"event": "stt_completed", "model": "whisper-large-v3"})
         elif "text" in message:
+            await enviar_acao_telegram(chat_id, "typing")
             texto_analise = message["text"]
         else:
-            return jsonify({"status": "ok"}), 200
-
-        analise_ia = processar_texto_com_llm(texto_analise)
+            return
+        analise_ia = await processar_texto_com_llm(texto_analise)
         intencao = analise_ia.get("intencao")
 
         logger.info({"event": "llm_routed", "intent": intencao, "payload_ia": analise_ia})
@@ -617,12 +663,12 @@ def telegram_webhook():
                     [{"text": "✏️ Editar", "callback_data": f"editar_{cache_id}"}, {"text": "❌ Cancelar", "callback_data": f"cancelar_{cache_id}"}]
                 ]
             }
-            enviar_mensagem_telegram(chat_id, texto_resumo, teclado)
+            await enviar_mensagem_telegram(chat_id, texto_resumo, teclado)
 
         elif intencao == "salvar_edicao_cupom":
             dados_lote = analise_ia.get("dados_lote", {})
             linhas, soma = gravar_lote_no_banco(dados_lote)
-            enviar_mensagem_telegram(chat_id, f"✅ **Edição Salva!**\n📊 **Total:** R$ {soma:,.2f}\n📝 Registos: {linhas}")
+            await enviar_mensagem_telegram(chat_id, f"✅ **Edição Salva!**\n📊 **Total:** R$ {soma:,.2f}\n📝 Registos: {linhas}")
 
         elif intencao == "registrar":
             dados_reg = analise_ia.get("dados_registro", {})
@@ -641,7 +687,7 @@ def telegram_webhook():
                    f"{data_txt}"
                    f"🏦 {dados_reg.get('conta')} ({dados_reg.get('metodo_pagamento')})\n"
                    f"📝 {dados_reg.get('descricao')}")
-            enviar_mensagem_telegram(chat_id, msg)
+            await enviar_mensagem_telegram(chat_id, msg)
 
         elif intencao == "consultar":
             filtros = analise_ia.get("filtros_pesquisa", {})
@@ -685,11 +731,11 @@ def telegram_webhook():
             else:
                 msg += f"🗂️ Busca Global"
                 
-            enviar_mensagem_telegram(chat_id, msg)
+            await enviar_mensagem_telegram(chat_id, msg)
 
         elif intencao == "excluir":
             filtros_exc = analise_ia.get("filtros_exclusao", {})
-            iniciar_fluxo_exclusao(chat_id, filtros_exc)
+            await iniciar_fluxo_exclusao(chat_id, filtros_exc)
             
         else:
             raise Exception("Intenção não reconhecida.")
@@ -697,9 +743,7 @@ def telegram_webhook():
     except Exception as e:
         erro_tratado = mascarar_segredos(traceback.format_exc())
         logger.error({"event": "system_failure", "error": str(e), "traceback": erro_tratado})
-        enviar_mensagem_telegram(chat_id, f"❌ *Falha Sistémica*\n⚠️ `{str(e)}`")
-
-    return jsonify({"status": "ok"}), 200
+        await enviar_mensagem_telegram(chat_id, f"❌ *Falha Sistémica*\n⚠️ `{str(e)}`")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
