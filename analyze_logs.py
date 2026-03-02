@@ -1,48 +1,27 @@
 import json
-from datetime import datetime
+import sys
+from collections import Counter
 
-log_file = 'c:/Users/freng/OneDrive/Área de Trabalho/BOTS/financemgmtbot/financemgmtbot/logs/downloaded-logs-20260302-085657.json'
+log_file = 'c:/Users/freng/OneDrive/Área de Trabalho/BOTS/financemgmtbot/financemgmtbot/downloaded-logs-20260302-124934.json'
 
 with open(log_file, 'r', encoding='utf-8') as f:
     data = json.load(f)
 
 print(f"Total de linhas de log analisadas: {len(data)}")
 
-requests = []
-instances = set()
-timestamps = []
-
+errors = []
 for entry in data:
-    if 'timestamp' in entry:
-        try:
-            # Handle standard format: 2026-03-02T11:10:28.672258Z
-            ts = datetime.strptime(entry['timestamp'][:26] + 'Z', "%Y-%m-%dT%H:%M:%S.%fZ")
-            timestamps.append(ts)
-        except ValueError:
-            pass
-            
-    if 'httpRequest' in entry:
-        requests.append(entry['httpRequest'])
-        
-    labels = entry.get('labels', {})
-    if 'instanceId' in labels:
-        instances.add(labels['instanceId'])
-        
-if timestamps:
-    timestamps.sort()
-    inicio = timestamps[0]
-    fim = timestamps[-1]
-    duracao = fim - inicio
-    print(f"Período dos Logs: {inicio} até {fim} (Duração total: {duracao})")
-else:
-    print("Não foi possível extrair timestamps.")
+    text_payload = entry.get('textPayload', '')
+    if 'Traceback' in text_payload or 'ERROR' in text_payload or 'Exception' in text_payload or 'Error' in text_payload:
+        errors.append(text_payload)
 
-print(f"Total de Requisições HTTP (httpRequest): {len(requests)}")
+print(f"Mostrando os últimos erros únicos ou relevantes...")
+shown = set()
+for err in errors:
+    # Mostra apenas um trecho para não estourar o console, mas captura erro diferente
+    short_err = err[:300]
+    if short_err not in shown:
+        print("-------------")
+        print(err)
+        shown.add(short_err)
 
-status_counts = {}
-for req in requests:
-    st = str(req.get('status', 'Unknown'))
-    status_counts[st] = status_counts.get(st, 0) + 1
-    
-print(f"Distribuição de Status HTTP: {status_counts}")
-print(f"Total de Instâncias Únicas Inicializadas: {len(instances)}")
