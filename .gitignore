@@ -1,3 +1,52 @@
+# ==================================
+# Python
+# ==================================
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ==================================
+# Segredos e credenciais
+# ==================================
 .env
+.env.*
+*.env
+secrets/
+*.key
+*.pem
+*.json
+!requirements.json
+
+# ==================================
+# Logs exportados (contêm IPs, IDs de instância, traces internos)
+# ==================================
+*.csv
+downloaded-logs-*
+*.log
+
+# ==================================
+# Deploy scripts (expõem Project ID e infraestrutura GCP)
+# ==================================
+deploy.sh
+
+# ==================================
+# IDE e sistema
+# ==================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ==================================
+# Testes (artefatos temporários)
+# ==================================
+.pytest_cache/
+htmlcov/
+.coverage
