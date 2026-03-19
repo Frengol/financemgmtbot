@@ -156,6 +156,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `BASE_URL=/financemgmtbot/`
   - chamadas administrativas apontam para o Cloud Run público
   - login oficial via Magic Link do Supabase
+* Em telas mobile, o layout principal expõe um acionador discreto no canto superior esquerdo que abre um drawer lateral esquerdo com a navegação entre Dashboard, Aprovações e Histórico, preservando o menu fixo em desktop.
 * O Dashboard usa widgets com seletor de mês compacto por card, evitando um filtro global único e permitindo leitura contextual do período.
 * O Histórico usa tabela filtrável com edição e exclusão seguras via backend.
 * O modal de transações centraliza criação e edição manual com normalização server-side.
