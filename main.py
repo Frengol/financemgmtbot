@@ -1,6 +1,14 @@
 import os
 from quart import Quart, request, jsonify
-from admin_api import aprovar_cache_admin, deletar_gasto_admin, rejeitar_cache_admin
+from admin_api import (
+    aprovar_cache_admin,
+    atualizar_gasto_admin,
+    criar_gasto_admin,
+    deletar_gasto_admin,
+    listar_cache_admin,
+    listar_gastos_admin,
+    rejeitar_cache_admin,
+)
 from config import FRONTEND_ALLOWED_ORIGINS, SECRET_TOKEN, logger, mascarar_segredos
 from telegram_service import init_http_client, close_http_client
 from handlers import processar_update_assincrono
@@ -22,7 +30,7 @@ async def add_cors_headers(response):
     if origin and (origin in FRONTEND_ALLOWED_ORIGINS or "*" in FRONTEND_ALLOWED_ORIGINS):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
         response.headers["Vary"] = "Origin"
     return response
 
@@ -43,11 +51,31 @@ async def telegram_webhook():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@app.route("/api/admin/gastos/<gasto_id>", methods=["DELETE", "OPTIONS"])
-async def admin_delete_gasto(gasto_id):
+@app.route("/api/admin/gastos", methods=["GET", "POST", "OPTIONS"])
+async def admin_gastos():
     if request.method == "OPTIONS":
         return "", 204
+    if request.method == "GET":
+        return listar_gastos_admin()
+    payload = await request.get_json(silent=True)
+    return criar_gasto_admin(payload)
+
+
+@app.route("/api/admin/gastos/<gasto_id>", methods=["DELETE", "PATCH", "OPTIONS"])
+async def admin_manage_gasto(gasto_id):
+    if request.method == "OPTIONS":
+        return "", 204
+    if request.method == "PATCH":
+        payload = await request.get_json(silent=True)
+        return atualizar_gasto_admin(gasto_id, payload)
     return deletar_gasto_admin(gasto_id)
+
+
+@app.route("/api/admin/cache-aprovacao", methods=["GET", "OPTIONS"])
+async def admin_list_cache():
+    if request.method == "OPTIONS":
+        return "", 204
+    return listar_cache_admin()
 
 
 @app.route("/api/admin/cache-aprovacao/<cache_id>/approve", methods=["POST", "OPTIONS"])

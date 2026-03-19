@@ -1236,6 +1236,99 @@ class TestAdminRoutes:
         assert resp.status_code == 403
 
     @pytest.mark.asyncio
+    async def test_admin_create_transaction_success(self):
+        self._mock_admin_user()
+
+        mock_gastos = MagicMock()
+        mock_gastos.insert.return_value.execute.return_value = MagicMock(data=[{
+            "id": "tx-2",
+            "data": "2026-03-19",
+            "valor": 99.9,
+            "natureza": "Essencial",
+            "categoria": "Mercado",
+            "descricao": "Compra manual",
+            "metodo_pagamento": "Pix",
+            "conta": "Nubank",
+        }])
+
+        mock_audit = MagicMock()
+        mock_audit.insert.return_value.execute.return_value = MagicMock()
+
+        def table_switch(name):
+            if name == "gastos":
+                return mock_gastos
+            if name == "auditoria_admin":
+                return mock_audit
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            resp = await client.post(
+                "/api/admin/gastos",
+                headers={"Authorization": "Bearer token"},
+                json={
+                    "data": "2026-03-19",
+                    "valor": 99.9,
+                    "categoria": "Mercado",
+                    "descricao": "Compra manual",
+                    "metodo_pagamento": "Pix",
+                    "conta": "Nubank",
+                },
+            )
+
+        assert resp.status_code == 201
+        mock_gastos.insert.assert_called_once()
+        mock_audit.insert.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_admin_update_transaction_success(self):
+        self._mock_admin_user()
+
+        mock_gastos = MagicMock()
+        mock_gastos.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[{"id": "tx-3"}])
+        mock_gastos.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[{
+            "id": "tx-3",
+            "data": "2026-03-19",
+            "valor": 150.0,
+            "natureza": "Lazer",
+            "categoria": "Diversao",
+            "descricao": "Cinema",
+            "metodo_pagamento": "Pix",
+            "conta": "Nubank",
+        }])
+
+        mock_audit = MagicMock()
+        mock_audit.insert.return_value.execute.return_value = MagicMock()
+
+        def table_switch(name):
+            if name == "gastos":
+                return mock_gastos
+            if name == "auditoria_admin":
+                return mock_audit
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            resp = await client.patch(
+                "/api/admin/gastos/tx-3",
+                headers={"Authorization": "Bearer token"},
+                json={
+                    "data": "2026-03-19",
+                    "valor": 150,
+                    "categoria": "Diversao",
+                    "descricao": "Cinema",
+                    "metodo_pagamento": "Pix",
+                    "conta": "Nubank",
+                },
+            )
+
+        assert resp.status_code == 200
+        mock_gastos.update.assert_called_once()
+        mock_audit.insert.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_admin_approve_pending_receipt_success(self):
         self._mock_admin_user()
 

@@ -1,50 +1,72 @@
 import { useEffect, useState, useMemo } from "react";
-import { supabase } from "@/lib/supabase";
-import { deleteTransaction } from "@/lib/adminApi";
+import { deleteTransaction, getTransactions } from "@/lib/adminApi";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable, getFilteredRowModel, getPaginationRowModel } from '@tanstack/react-table';
 import { useAuth } from "@/hooks/useAuth";
-import { Edit, Trash2, Search } from "lucide-react";
+import { useTransactionComposer } from "@/hooks/useTransactionComposer";
+import { Edit, Loader2, Search, Trash2 } from "lucide-react";
+import { normalizeNatureLabel, type TransactionRecord } from "@/lib/transactions";
 
-type Gasto = {
-  id: string;
-  data: string;
-  natureza: string;
-  categoria: string;
-  descricao: string;
-  valor: number;
-  conta: string;
-};
+type Gasto = TransactionRecord;
 
 const columnHelper = createColumnHelper<Gasto>();
 
 export default function Historico() {
-  const { accessToken } = useAuth();
+  const { accessToken, loading, localBypass } = useAuth();
+  const { openEdit } = useTransactionComposer();
   const [data, setData] = useState<Gasto[]>([]);
   const [globalFilter, setGlobalFilter] = useState("");
   const [error, setError] = useState("");
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [fetching, setFetching] = useState(true);
 
   const fetchGastos = async () => {
-    const { data: gastos } = await supabase.from('gastos').select('*').order('data', { ascending: false });
-    if (gastos) setData(gastos);
+    setFetching(true);
+    try {
+      const { transactions: gastos } = await getTransactions(accessToken || '');
+      setData((gastos || []).map((item) => ({
+        ...item,
+        natureza: normalizeNatureLabel(item.natureza),
+        metodo_pagamento: item.metodo_pagamento || 'Outros',
+        conta: item.conta || 'Nao Informada',
+      })));
+      setError("");
+    } catch {
+      setError("Nao foi possivel carregar o historico agora.");
+    }
+    setFetching(false);
   };
 
   useEffect(() => {
-    fetchGastos();
-  }, []);
+    void fetchGastos();
+  }, [accessToken]);
+
+  useEffect(() => {
+    const refresh = () => {
+      void fetchGastos();
+    };
+
+    window.addEventListener('transactions:changed', refresh);
+    return () => window.removeEventListener('transactions:changed', refresh);
+  }, [accessToken]);
 
   const handleDelete = async (id: string) => {
     if (confirm("Deseja mesmo excluir este registro? A ação não pode ser desfeita.")) {
-      if (!accessToken) {
-        setError("Sua sessão expirou. Faça login novamente.");
+      if (loading) {
+        setError("Sua autenticacao ainda esta sendo carregada. Tente novamente em alguns segundos.");
+        return;
+      }
+
+      if (!accessToken && !localBypass) {
+        setError("Nao foi possivel validar sua sessao. Entre novamente.");
         return;
       }
 
       try {
         setPendingDeleteId(id);
         setError("");
-        await deleteTransaction(accessToken, id);
+        await deleteTransaction(accessToken || '', id);
         setData((current) => current.filter((item) => item.id !== id));
+        window.dispatchEvent(new CustomEvent('transactions:changed'));
       } catch (deleteError) {
         setError(deleteError instanceof Error ? deleteError.message : "Nao foi possivel excluir o registro.");
       } finally {
@@ -74,11 +96,21 @@ export default function Historico() {
       header: 'Valor',
       cell: info => <span className="font-semibold">R$ {Number(info.getValue()).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>,
     }),
+    columnHelper.accessor('conta', {
+      header: 'Conta',
+      cell: info => <span>{info.getValue() || 'Nao Informada'}</span>,
+    }),
     columnHelper.display({
       id: 'actions',
       cell: (props) => (
         <div className="flex justify-end gap-3 text-slate-400">
-           <button title="Editar" className="hover:text-blue-600 transition"><Edit className="h-4 w-4" /></button>
+           <button
+             title="Editar"
+             onClick={() => openEdit(props.row.original)}
+             className="hover:text-blue-600 transition"
+           >
+             <Edit className="h-4 w-4" />
+           </button>
            <button
              onClick={() => handleDelete(props.row.original.id)}
              title="Excluir"
@@ -86,11 +118,11 @@ export default function Historico() {
              className="hover:text-rose-600 transition disabled:opacity-50"
            >
              <Trash2 className="h-4 w-4" />
-           </button>
+          </button>
         </div>
       ),
     })
-  ], [pendingDeleteId]);
+  ], [openEdit, pendingDeleteId, accessToken, loading, localBypass]);
 
   const table = useReactTable({
     data,
@@ -128,6 +160,12 @@ export default function Historico() {
       </div>
       
       <div className="overflow-x-auto">
+        {fetching ? (
+          <div className="flex min-h-52 items-center justify-center text-slate-500">
+            <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+            Carregando historico...
+          </div>
+        ) : (
         <table className="w-full text-sm text-left">
           <thead className="bg-slate-50 text-slate-500 font-medium border-b">
             {table.getHeaderGroups().map(headerGroup => (
@@ -152,6 +190,7 @@ export default function Historico() {
             ))}
           </tbody>
         </table>
+        )}
       </div>
       
       <div className="p-4 border-t flex justify-between items-center bg-slate-50/50 rounded-b-xl">

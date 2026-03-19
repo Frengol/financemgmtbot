@@ -5,23 +5,31 @@ import Aprovacoes from "./pages/Aprovacoes";
 import Historico from "./pages/Historico";
 import Login from "./pages/Login";
 import ProtectedRoute from "./components/ProtectedRoute";
+import TransactionModal from "./components/TransactionModal";
+import { AuthProvider } from "./hooks/useAuth";
+import { TransactionComposerProvider } from "./hooks/useTransactionComposer";
 
 export default function App() {
   const basename = import.meta.env.BASE_URL === "/" ? "/" : import.meta.env.BASE_URL.replace(/\/$/, "");
 
   return (
-    <BrowserRouter basename={basename}>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        
-        <Route element={<ProtectedRoute />}>
-          <Route path="/" element={<MainLayout />}>
-            <Route index element={<Dashboard />} />
-            <Route path="aprovacoes" element={<Aprovacoes />} />
-            <Route path="historico" element={<Historico />} />
-          </Route>
-        </Route>
-      </Routes>
-    </BrowserRouter>
+    <AuthProvider>
+      <TransactionComposerProvider>
+        <BrowserRouter basename={basename}>
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<MainLayout />}>
+                <Route index element={<Dashboard />} />
+                <Route path="aprovacoes" element={<Aprovacoes />} />
+                <Route path="historico" element={<Historico />} />
+              </Route>
+            </Route>
+          </Routes>
+          <TransactionModal />
+        </BrowserRouter>
+      </TransactionComposerProvider>
+    </AuthProvider>
   );
 }

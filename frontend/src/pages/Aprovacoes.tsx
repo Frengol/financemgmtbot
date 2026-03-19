@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-import { supabase } from "@/lib/supabase";
-import { approvePendingReceipt, rejectPendingReceipt } from "@/lib/adminApi";
+import { approvePendingReceipt, getPendingReceipts, rejectPendingReceipt } from "@/lib/adminApi";
 import { useAuth } from "@/hooks/useAuth";
 import { Check, X, CreditCard, ListMinus } from "lucide-react";
 
@@ -11,22 +10,37 @@ type CacheItem = {
 };
 
 export default function Aprovacoes() {
-  const { accessToken } = useAuth();
+  const { accessToken, localBypass } = useAuth();
   const [items, setItems] = useState<CacheItem[]>([]);
   const [error, setError] = useState("");
   const [pendingId, setPendingId] = useState<string | null>(null);
 
   const fetchCache = async () => {
-    const { data } = await supabase.from('cache_aprovacao').select('*').order('created_at', { ascending: false });
-    if (data) setItems(data);
+    try {
+      const { items: data } = await getPendingReceipts(accessToken || '');
+      if (data) {
+        setItems(data as CacheItem[]);
+      }
+    } catch {
+      setError("Nao foi possivel carregar as aprovacoes agora.");
+    }
   };
 
   useEffect(() => {
-    fetchCache();
-  }, []);
+    void fetchCache();
+  }, [accessToken]);
+
+  useEffect(() => {
+    const refresh = () => {
+      void fetchCache();
+    };
+
+    window.addEventListener('transactions:changed', refresh);
+    return () => window.removeEventListener('transactions:changed', refresh);
+  }, [accessToken]);
 
   const handleAprovar = async (item: CacheItem) => {
-    if (!accessToken) {
+    if (!accessToken && !localBypass) {
       setError("Sua sessão expirou. Faça login novamente.");
       return;
     }
@@ -34,8 +48,9 @@ export default function Aprovacoes() {
     try {
       setPendingId(item.id);
       setError("");
-      await approvePendingReceipt(accessToken, item.id);
+      await approvePendingReceipt(accessToken || '', item.id);
       setItems((current) => current.filter((currentItem) => currentItem.id !== item.id));
+      window.dispatchEvent(new CustomEvent('transactions:changed'));
     } catch (approveError) {
       setError(approveError instanceof Error ? approveError.message : "Nao foi possivel aprovar o cupom pendente.");
     } finally {
@@ -44,7 +59,7 @@ export default function Aprovacoes() {
   };
 
   const handleRejeitar = async (id: string) => {
-    if (!accessToken) {
+    if (!accessToken && !localBypass) {
       setError("Sua sessão expirou. Faça login novamente.");
       return;
     }
@@ -52,8 +67,9 @@ export default function Aprovacoes() {
     try {
       setPendingId(id);
       setError("");
-      await rejectPendingReceipt(accessToken, id);
+      await rejectPendingReceipt(accessToken || '', id);
       setItems((current) => current.filter((currentItem) => currentItem.id !== id));
+      window.dispatchEvent(new CustomEvent('transactions:changed'));
     } catch (rejectError) {
       setError(rejectError instanceof Error ? rejectError.message : "Nao foi possivel rejeitar o cupom pendente.");
     } finally {

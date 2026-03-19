@@ -1,6 +1,7 @@
 import os
 import logging
 import traceback
+import sys
 from pathlib import Path
 from pythonjsonlogger import jsonlogger
 from supabase import create_client, Client
@@ -17,6 +18,9 @@ logger.setLevel(logging.INFO)
 
 
 def load_local_env():
+    if "pytest" in sys.modules:
+        return
+
     env_path = Path(".env")
     if not env_path.exists():
         return
@@ -58,6 +62,7 @@ FRONTEND_ALLOWED_ORIGINS = frozenset(
     for origin in (os.environ.get("FRONTEND_ALLOWED_ORIGINS") or "http://localhost:5173").split(",")
     if origin.strip()
 )
+ALLOW_LOCAL_DEV_AUTH = (os.environ.get("ALLOW_LOCAL_DEV_AUTH") or "").strip().lower() == "true"
 
 def mascarar_segredos(texto):
     if not isinstance(texto, str): return texto

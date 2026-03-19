@@ -1,34 +1,36 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
 import { CopyPlus, LayoutDashboard, History, CheckSquare, Activity, LogOut } from "lucide-react";
 import { useState, useEffect } from "react";
-import { supabase } from "@/lib/supabase";
+import { getTransactions } from "@/lib/adminApi";
 import { useAuth } from "@/hooks/useAuth";
+import { useTransactionComposer } from "@/hooks/useTransactionComposer";
 
 export default function MainLayout() {
   const [isOnline, setIsOnline] = useState(false);
   const location = useLocation();
-  const { user, signOut } = useAuth();
+  const { accessToken, user, signOut } = useAuth();
+  const { openCreate } = useTransactionComposer();
 
   useEffect(() => {
     const checkStatus = async () => {
       try {
-        const { error } = await supabase.from('gastos').select('id').limit(1);
-        setIsOnline(!error);
+        await getTransactions(accessToken || '', { dateFrom: '2000-01-01', dateTo: '2000-01-01' });
+        setIsOnline(true);
       } catch {
         setIsOnline(false);
       }
     };
-    checkStatus();
+    void checkStatus();
     
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
         e.preventDefault();
-        alert("Atalho detectado: Novo Rascunho de Transação");
+        openCreate();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [accessToken, openCreate]);
 
   const menu = [
     { name: "Dashboard", path: "/", icon: LayoutDashboard },
@@ -98,7 +100,7 @@ export default function MainLayout() {
              </button>
 
              <button
-               onClick={() => alert("Abrir modal: Nova Transação!")}
+               onClick={openCreate}
                className="hidden md:flex items-center gap-2 bg-slate-900 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-slate-800 transition shadow-sm"
              >
                <CopyPlus className="h-4 w-4" />

@@ -1,13 +1,13 @@
 # 📜 Manifesto de Arquitetura: Finance Mgmt Bot
-**Versão:** V3 — *Frontend Estático, Backend Seguro & Governança Reprodutível*
+**Versão:** V3.1 — *Frontend Estático, Backend Seguro, Operação Administrativa Completa & Governança Reprodutível*
 
 ## Visão Geral do Produto
-O sistema é um Assistente Pessoal (Copilot) Financeiro multimodal orientado a eventos. O núcleo operacional continua centrado no Telegram, onde textos, cupons fiscais e áudios são recebidos e processados via Webhook assíncrono. A evolução V3 introduz uma segunda superfície oficial: um **Painel Administrativo Web** publicado estaticamente no GitHub Pages, consumindo autenticação Supabase e delegando operações sensíveis a um backend Python hospedado no Google Cloud Run.
+O sistema é um Assistente Pessoal (Copilot) Financeiro multimodal orientado a eventos. O núcleo operacional continua centrado no Telegram, onde textos, cupons fiscais e áudios são recebidos e processados via Webhook assíncrono. A evolução V3 introduziu uma segunda superfície oficial: um **Painel Administrativo Web** publicado estaticamente no GitHub Pages, consumindo autenticação Supabase e delegando operações sensíveis a um backend Python hospedado no Google Cloud Run. A versão atual V3.1 consolida essa borda administrativa com **CRUD manual de transações**, **estado de autenticação compartilhado no frontend**, **seleção de período por widget** e um **modo local de desenvolvimento** que não afeta a política de segurança de produção.
 
 A arquitetura preserva os princípios de **Determinismo Local**, **Testabilidade Extrema** e **Segurança Ativa**, mas agora segmenta claramente o sistema em duas bordas:
 
 1. **Canal Conversacional (Telegram):** ingestão multimodal, triagem de intenção, OCR/STT e persistência.
-2. **Canal Administrativo (Web SPA):** consulta visual, autenticação de operador e acionamento de rotas administrativas auditáveis.
+2. **Canal Administrativo (Web SPA):** consulta visual, autenticação de operador, edição manual e acionamento de rotas administrativas auditáveis.
 
 O resultado é uma topologia híbrida onde o frontend pode ser distribuído como ativo estático sem expor credenciais sensíveis, enquanto o backend continua concentrando toda a execução privilegiada, a autenticação forte e a governança operacional.
 
@@ -17,7 +17,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 
 * **Gateway Assíncrono & API Backend:** `Quart` — Responsável pelo Webhook Telegram e pela superfície administrativa `/api/admin/*`.
 * **Hospedagem Backend:** `Google Cloud Run` — Runtime containerizado para o backend Python com variáveis sensíveis providas por Secret Manager.
-* **Frontend Administrativo:** `React` + `Vite` + `Tailwind CSS` + `@tremor/react` — SPA publicada estaticamente no GitHub Pages.
+* **Frontend Administrativo:** `React` + `Vite` + `Tailwind CSS` + `@tremor/react` — SPA publicada estaticamente no GitHub Pages, com Dashboard analítico, Histórico editável e fila de Aprovações.
 * **Persistência & Auth:** `Supabase` / `PostgreSQL` / `GoTrue` — Banco de dados operacional, autenticação do painel web e políticas de RLS.
 * **Motores Cognitivos (Uso Restrito):**
   - **Roteador de Intenção:** DeepSeek (`deepseek-chat`) — Emite JSON estrito para intenções controladas.
@@ -25,7 +25,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - **Speech-to-Text:** Groq (`whisper-large-v3`) — Transcrição de áudio `.ogg`.
 * **Integração Telegram:** `httpx` — Cliente HTTP assíncrono para Telegram Bot API.
 * **Entrega Contínua:** `GitHub Actions` — CI para testes/backend build/frontend build e deploy automatizado do frontend no GitHub Pages.
-* **Fundação de Testes:** `pytest`, `pytest-asyncio`, `unittest.mock` — Cobertura regressiva local do backend e das novas rotas administrativas.
+* **Fundação de Testes:** `pytest`, `pytest-asyncio`, `unittest.mock` — Cobertura regressiva local do backend e das rotas administrativas, incluindo CRUD manual de transações.
 
 ---
 
@@ -49,6 +49,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 4. Toda operação destrutiva ou administrativa sensível deixa de ser executada diretamente no browser.
 5. O frontend chama o backend em `/api/admin/*` com bearer token do usuário Supabase.
 6. O backend revalida a identidade, checa allowlists administrativas e executa a operação privilegiada com auditoria.
+7. O operador pode criar, editar, excluir, aprovar e rejeitar registros a partir do painel sem expor a `service_role` ao navegador.
 
 ### 2.3 Separação de Superfícies
 * **GitHub Pages** hospeda apenas arquivos estáticos.
@@ -63,11 +64,12 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 2. **Controlador de Domínio:** `handlers.py` continua orquestrando o fluxo conversacional, sem delegar matemática, datas ou filtros ao modelo.
 3. **Muralha Anti-Alucinação:** `ai_service.py` força o DeepSeek a devolver apenas JSON estruturado, com categorias restritas e sem autonomia de execução.
 4. **Motor Determinístico Local:** `core_logic.py`, `utils.py` e `db_repository.py` concentram regras financeiras, cronologia, parcelamento e Map/Reduce de cupons.
-5. **Camada Administrativa Segura:** `admin_api.py` encapsula exclusão de transações, aprovação/rejeição de pendências e escrita de trilha de auditoria.
+5. **Camada Administrativa Segura:** `admin_api.py` encapsula listagem, criação, edição e exclusão de transações, aprovação/rejeição de pendências e escrita de trilha de auditoria.
 6. **Persistência com Duas Naturezas de Acesso:**
    - **Leitura controlada no frontend:** via `anon key` + sessão autenticada + RLS.
    - **Escrita sensível no backend:** via `service_role` no Cloud Run, fora do navegador.
-7. **Auditoria Operacional:** ações administrativas críticas escrevem eventos em `auditoria_admin` com ator, alvo, ação e metadados.
+7. **Orquestração de UI Compartilhada:** o frontend centraliza autenticação em contexto único e concentra o fluxo de criação/edição em um modal reutilizável.
+8. **Auditoria Operacional:** ações administrativas críticas escrevem eventos em `auditoria_admin` com ator, alvo, ação e metadados.
 
 ---
 
@@ -82,6 +84,10 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `VITE_SUPABASE_URL`
   - `VITE_SUPABASE_ANON_KEY`
   - `VITE_API_BASE_URL`
+* O modo local de desenvolvimento é explicitamente isolado:
+  - backend: `ALLOW_LOCAL_DEV_AUTH=true`
+  - frontend: `VITE_LOCAL_DEV_BYPASS_AUTH=true`
+  - ambos só existem para desenvolvimento e não substituem o fluxo oficial de autenticação em produção
 
 ### 4.2 Supabase & RLS
 * O acesso web é controlado por Supabase Auth.
@@ -89,6 +95,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   1. sessão válida do Supabase
   2. políticas RLS no banco
   3. allowlist opcional por email ou `user_id` no backend
+* O frontend também pode aplicar uma allowlist leve por email (`VITE_ALLOWED_ADMIN_EMAILS`) para melhorar UX e bloquear acesso indevido antes de acionar a camada privilegiada, sem substituir backend/RLS.
 * A migration versionada cria:
   - `public.admin_users`
   - função `public.is_admin()`
@@ -98,10 +105,20 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 * O frontend não executa mais `delete()` crítico diretamente em `gastos` ou `cache_aprovacao`.
 * As rotas administrativas exigem bearer token válido do Supabase.
 * O backend reconsulta o usuário autenticado antes de permitir exclusão, aprovação ou rejeição.
+* O CRUD manual de transações passa pelas rotas administrativas:
+  - `GET /api/admin/gastos`
+  - `POST /api/admin/gastos`
+  - `PATCH /api/admin/gastos/<id>`
+  - `DELETE /api/admin/gastos/<id>`
+* A fila administrativa de pendências também é exposta de forma controlada:
+  - `GET /api/admin/cache-aprovacao`
+  - `POST /api/admin/cache-aprovacao/<id>/approve`
+  - `POST /api/admin/cache-aprovacao/<id>/reject`
 
 ### 4.4 CORS e Fronteira Web
 * O backend restringe chamadas do navegador a `FRONTEND_ALLOWED_ORIGINS`.
 * A origem local `http://localhost:5173` e a origem publicada do GitHub Pages são tratadas explicitamente.
+* O bypass local do backend só é aceito sem bearer quando a flag de desenvolvimento está ligada e a chamada vem do loopback/origem permitida.
 
 ### 4.5 Observabilidade Blindada
 * Logs seguem em JSON com masking de segredos.
@@ -122,6 +139,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `GEMINI_API_KEY`
   - `SUPABASE_ADMIN_EMAILS` e/ou `SUPABASE_ADMIN_USER_IDS`
   - `FRONTEND_ALLOWED_ORIGINS`
+  - opcionalmente `ALLOW_LOCAL_DEV_AUTH` apenas fora de produção
 
 ### 5.2 Frontend
 * O frontend é buildado pelo Vite.
@@ -129,9 +147,14 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 * Em desenvolvimento:
   - `BASE_URL=/`
   - proxy `/api` → backend local `127.0.0.1:8080`
+  - bypass local opcional para autenticação de UI sem OTP
 * Em produção:
   - `BASE_URL=/financemgmtbot/`
   - chamadas administrativas apontam para o Cloud Run público
+  - login oficial via Magic Link do Supabase
+* O Dashboard usa widgets com seletor de mês compacto por card, evitando um filtro global único e permitindo leitura contextual do período.
+* O Histórico usa tabela filtrável com edição e exclusão seguras via backend.
+* O modal de transações centraliza criação e edição manual com normalização server-side.
 
 ### 5.3 CI/CD
 * `ci.yml`
@@ -157,6 +180,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 * A documentação operacional mínima vive em:
   - `README.md` — setup e deploy
   - `supabase/migrations/` — governança do banco como código
+  - `architecture.md` — manifesto vivo da topologia e dos fluxos de segurança
 
 ---
 
@@ -167,4 +191,6 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 * **Segurança reproduzível:** RLS e estruturas administrativas deixam de existir só “no painel” e passam a ser versionadas.
 * **Menor acoplamento operacional:** frontend e backend evoluem e escalam em ritmos distintos.
 * **Observabilidade e auditoria superiores:** ações administrativas ganham trilha persistente.
+* **Operação administrativa completa:** o painel deixa de ser apenas de leitura e passa a suportar manutenção manual segura de lançamentos.
+* **Experiência local mais fluida:** desenvolvimento não depende de rate limit do Magic Link, sem comprometer o modelo de segurança de produção.
 * **Base sólida para evolução futura:** caso desejado, a próxima iteração pode migrar ainda mais leitura do browser para APIs server-side sem reestruturar o sistema inteiro.

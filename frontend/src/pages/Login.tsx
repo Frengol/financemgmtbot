@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Activity, Mail, Loader2, CheckCircle2 } from 'lucide-react';
+import { localDevBypassEnabled } from '@/lib/adminApi';
 
 export default function Login() {
   const redirectTarget = new URL(import.meta.env.BASE_URL, window.location.origin).toString();
@@ -9,6 +10,11 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState('');
+
+  if (localDevBypassEnabled) {
+    window.location.replace(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
+    return null;
+  }
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
