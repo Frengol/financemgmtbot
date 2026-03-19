@@ -1,5 +1,5 @@
 # 📜 Manifesto de Arquitetura: Finance Mgmt Bot
-**Versão:** V3.1 — *Frontend Estático, Backend Seguro, Operação Administrativa Completa & Governança Reprodutível*
+**Versão:** V3.1.1 — *Frontend Estático, Backend Seguro, Operação Administrativa Completa & Governança Reprodutível*
 
 ## Visão Geral do Produto
 O sistema é um Assistente Pessoal (Copilot) Financeiro multimodal orientado a eventos. O núcleo operacional continua centrado no Telegram, onde textos, cupons fiscais e áudios são recebidos e processados via Webhook assíncrono. A evolução V3 introduziu uma segunda superfície oficial: um **Painel Administrativo Web** publicado estaticamente no GitHub Pages, consumindo autenticação Supabase e delegando operações sensíveis a um backend Python hospedado no Google Cloud Run. A versão atual V3.1 consolida essa borda administrativa com **CRUD manual de transações**, **estado de autenticação compartilhado no frontend**, **seleção de período por widget** e um **modo local de desenvolvimento** que não afeta a política de segurança de produção.
@@ -117,7 +117,11 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 
 ### 4.4 CORS e Fronteira Web
 * O backend restringe chamadas do navegador a `FRONTEND_ALLOWED_ORIGINS`.
-* A origem local `http://localhost:5173` e a origem publicada do GitHub Pages são tratadas explicitamente.
+* O parser de origens normaliza entradas configuradas com caminho completo para o formato de origem (`scheme://host[:port]`), evitando quebra de CORS por erro operacional.
+* As origens padrão do código continuam explícitas e fechadas apenas para desenvolvimento local:
+  - `http://localhost:5173`
+  - `http://127.0.0.1:5173`
+* A origem publicada do GitHub Pages deve vir do ambiente do Cloud Run via `FRONTEND_ALLOWED_ORIGINS`, e não hardcoded no repositório.
 * O bypass local do backend só é aceito sem bearer quando a flag de desenvolvimento está ligada e a chamada vem do loopback/origem permitida.
 
 ### 4.5 Observabilidade Blindada

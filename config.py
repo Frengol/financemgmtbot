@@ -3,6 +3,7 @@ import logging
 import traceback
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 from pythonjsonlogger import jsonlogger
 from supabase import create_client, Client
 from openai import AsyncOpenAI
@@ -15,6 +16,12 @@ logHandler.setFormatter(formatter)
 logger = logging.getLogger(__name__)
 logger.addHandler(logHandler)
 logger.setLevel(logging.INFO)
+
+
+DEFAULT_FRONTEND_ALLOWED_ORIGINS = (
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+)
 
 
 def load_local_env():
@@ -38,6 +45,27 @@ def load_local_env():
 
 load_local_env()
 
+
+def normalize_frontend_origin(origin: str):
+    normalized = (origin or "").strip()
+    if not normalized:
+        return ""
+
+    parsed = urlsplit(normalized)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    return normalized.rstrip("/")
+
+
+def parse_frontend_allowed_origins(raw_origins: str | None):
+    source = raw_origins or ",".join(DEFAULT_FRONTEND_ALLOWED_ORIGINS)
+    return frozenset(
+        normalized
+        for normalized in (normalize_frontend_origin(origin) for origin in source.split(","))
+        if normalized
+    )
+
 REQUIRED_VARS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_SECRET_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"]
 for var in REQUIRED_VARS:
     if not os.environ.get(var):
@@ -57,11 +85,7 @@ ADMIN_USER_IDS = frozenset(
     for user_id in (os.environ.get("SUPABASE_ADMIN_USER_IDS") or "").split(",")
     if user_id.strip()
 )
-FRONTEND_ALLOWED_ORIGINS = frozenset(
-    origin.strip()
-    for origin in (os.environ.get("FRONTEND_ALLOWED_ORIGINS") or "http://localhost:5173").split(",")
-    if origin.strip()
-)
+FRONTEND_ALLOWED_ORIGINS = parse_frontend_allowed_origins(os.environ.get("FRONTEND_ALLOWED_ORIGINS"))
 ALLOW_LOCAL_DEV_AUTH = (os.environ.get("ALLOW_LOCAL_DEV_AUTH") or "").strip().lower() == "true"
 
 def mascarar_segredos(texto):

@@ -217,6 +217,23 @@ class TestMascararSegredos:
         assert config.mascarar_segredos(text) == text
 
 
+class TestFrontendOrigins:
+    def test_normalize_frontend_origin_strips_path(self):
+        assert config.normalize_frontend_origin("https://admin.example.com/app/") == "https://admin.example.com"
+
+    def test_default_frontend_origins_include_only_local(self):
+        defaults = config.parse_frontend_allowed_origins(None)
+        assert "http://localhost:5173" in defaults
+        assert "http://127.0.0.1:5173" in defaults
+
+    def test_parse_frontend_allowed_origins_normalizes_cloud_run_secret_value(self):
+        configured = config.parse_frontend_allowed_origins(
+            "https://admin.example.com/app/,http://localhost:5173"
+        )
+        assert "https://admin.example.com" in configured
+        assert "http://localhost:5173" in configured
+
+
 # ============================================================
 # 2. BUSINESS LOGIC — MAP-REDUCE
 # ============================================================
@@ -1400,6 +1417,17 @@ class TestAdminRoutes:
             )
         assert resp.status_code == 204
         assert resp.headers["Access-Control-Allow-Origin"] == "http://localhost:5173"
+
+    @pytest.mark.asyncio
+    async def test_admin_options_preflight_accepts_github_pages_origin(self):
+        async with main.app.test_client() as client:
+            with patch.object(main, "FRONTEND_ALLOWED_ORIGINS", frozenset({"https://admin.example.com"})):
+                resp = await client.options(
+                    "/api/admin/gastos/tx-1",
+                    headers={"Origin": "https://admin.example.com"},
+                )
+        assert resp.status_code == 204
+        assert resp.headers["Access-Control-Allow-Origin"] == "https://admin.example.com"
 
 
 # ============================================================
