@@ -59,6 +59,7 @@ import core_logic
 import db_repository
 import handlers
 import main  # noqa: E402
+import admin_api
 
 # Restore correct references so tests can interact
 config.supabase = _mock_supabase_client
@@ -1172,7 +1173,144 @@ class TestTelegramWebhook:
 
 
 # ============================================================
-# 12. NO-MESSAGE UPDATE IGNORED
+# 12. ADMIN ROUTES
+# ============================================================
+class TestAdminRoutes:
+    def _mock_admin_user(self, email="admin@example.com", user_id="user-1"):
+        mock_user = MagicMock()
+        mock_user.id = user_id
+        mock_user.email = email
+
+        mock_response = MagicMock()
+        mock_response.user = mock_user
+        config.supabase.auth.get_user = MagicMock(return_value=mock_response)
+
+    @pytest.mark.asyncio
+    async def test_admin_delete_requires_bearer_token(self):
+        async with main.app.test_client() as client:
+            resp = await client.delete("/api/admin/gastos/tx-1")
+            assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_admin_delete_transaction_success(self):
+        self._mock_admin_user()
+
+        mock_gastos = MagicMock()
+        mock_gastos.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[{"id": "tx-1"}])
+        mock_gastos.delete.return_value.eq.return_value.execute.return_value = MagicMock(data=[{"id": "tx-1"}])
+
+        mock_audit = MagicMock()
+        mock_audit.insert.return_value.execute.return_value = MagicMock()
+
+        def table_switch(name):
+            if name == "gastos":
+                return mock_gastos
+            if name == "auditoria_admin":
+                return mock_audit
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            resp = await client.delete(
+                "/api/admin/gastos/tx-1",
+                headers={"Authorization": "Bearer token", "Origin": "http://localhost:5173"},
+            )
+
+        assert resp.status_code == 200
+        assert resp.headers["Access-Control-Allow-Origin"] == "http://localhost:5173"
+        mock_gastos.delete.return_value.eq.assert_called_once_with("id", "tx-1")
+        mock_audit.insert.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_admin_delete_transaction_forbidden_outside_allowlist(self):
+        self._mock_admin_user(email="other@example.com")
+
+        async with main.app.test_client() as client:
+            with patch.object(admin_api, "ADMIN_EMAILS", frozenset({"admin@example.com"})):
+                resp = await client.delete(
+                    "/api/admin/gastos/tx-1",
+                    headers={"Authorization": "Bearer token"},
+                )
+
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_admin_approve_pending_receipt_success(self):
+        self._mock_admin_user()
+
+        mock_cache = MagicMock()
+        mock_cache.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[{"payload": {"itens": [{"nome": "Arroz", "valor_bruto": 10.0, "desconto_item": 0.0, "categoria": "Mercado"}]}}]
+        )
+        mock_cache.delete.return_value.eq.return_value.execute.return_value = MagicMock()
+
+        mock_audit = MagicMock()
+        mock_audit.insert.return_value.execute.return_value = MagicMock()
+
+        def table_switch(name):
+            if name == "cache_aprovacao":
+                return mock_cache
+            if name == "auditoria_admin":
+                return mock_audit
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            with patch("admin_api.gravar_lote_no_banco", return_value=(1, 10.0)):
+                resp = await client.post(
+                    "/api/admin/cache-aprovacao/C1/approve",
+                    headers={"Authorization": "Bearer token"},
+                )
+
+        assert resp.status_code == 200
+        mock_cache.delete.return_value.eq.assert_called_once_with("id", "C1")
+        mock_audit.insert.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_admin_reject_pending_receipt_success(self):
+        self._mock_admin_user()
+
+        mock_cache = MagicMock()
+        mock_cache.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[{"id": "C2"}])
+        mock_cache.delete.return_value.eq.return_value.execute.return_value = MagicMock()
+
+        mock_audit = MagicMock()
+        mock_audit.insert.return_value.execute.return_value = MagicMock()
+
+        def table_switch(name):
+            if name == "cache_aprovacao":
+                return mock_cache
+            if name == "auditoria_admin":
+                return mock_audit
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            resp = await client.post(
+                "/api/admin/cache-aprovacao/C2/reject",
+                headers={"Authorization": "Bearer token"},
+            )
+
+        assert resp.status_code == 200
+        mock_cache.delete.return_value.eq.assert_called_once_with("id", "C2")
+        mock_audit.insert.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_admin_options_preflight(self):
+        async with main.app.test_client() as client:
+            resp = await client.options(
+                "/api/admin/gastos/tx-1",
+                headers={"Origin": "http://localhost:5173"},
+            )
+        assert resp.status_code == 204
+        assert resp.headers["Access-Control-Allow-Origin"] == "http://localhost:5173"
+
+
+# ============================================================
+# 13. NO-MESSAGE UPDATE IGNORED
 # ============================================================
 class TestEdgeCases:
     @pytest.mark.asyncio

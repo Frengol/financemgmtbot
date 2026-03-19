@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { approvePendingReceipt, rejectPendingReceipt } from "@/lib/adminApi";
+import { useAuth } from "@/hooks/useAuth";
 import { Check, X, CreditCard, ListMinus } from "lucide-react";
 
 type CacheItem = {
@@ -9,7 +11,10 @@ type CacheItem = {
 };
 
 export default function Aprovacoes() {
+  const { accessToken } = useAuth();
   const [items, setItems] = useState<CacheItem[]>([]);
+  const [error, setError] = useState("");
+  const [pendingId, setPendingId] = useState<string | null>(null);
 
   const fetchCache = async () => {
     const { data } = await supabase.from('cache_aprovacao').select('*').order('created_at', { ascending: false });
@@ -21,15 +26,39 @@ export default function Aprovacoes() {
   }, []);
 
   const handleAprovar = async (item: CacheItem) => {
-    // Na SPA chamamos delete após inserção backend/funcionamento offline dummy
-    await supabase.from('cache_aprovacao').delete().eq('id', item.id);
-    setItems(items.filter(i => i.id !== item.id));
-    alert("Operação validada com sucesso via Frontend Workflow!");
+    if (!accessToken) {
+      setError("Sua sessão expirou. Faça login novamente.");
+      return;
+    }
+
+    try {
+      setPendingId(item.id);
+      setError("");
+      await approvePendingReceipt(accessToken, item.id);
+      setItems((current) => current.filter((currentItem) => currentItem.id !== item.id));
+    } catch (approveError) {
+      setError(approveError instanceof Error ? approveError.message : "Nao foi possivel aprovar o cupom pendente.");
+    } finally {
+      setPendingId(null);
+    }
   };
 
   const handleRejeitar = async (id: string) => {
-    await supabase.from('cache_aprovacao').delete().eq('id', id);
-    setItems(items.filter(i => i.id !== id));
+    if (!accessToken) {
+      setError("Sua sessão expirou. Faça login novamente.");
+      return;
+    }
+
+    try {
+      setPendingId(id);
+      setError("");
+      await rejectPendingReceipt(accessToken, id);
+      setItems((current) => current.filter((currentItem) => currentItem.id !== id));
+    } catch (rejectError) {
+      setError(rejectError instanceof Error ? rejectError.message : "Nao foi possivel rejeitar o cupom pendente.");
+    } finally {
+      setPendingId(null);
+    }
   };
 
   if (items.length === 0) {
@@ -43,6 +72,11 @@ export default function Aprovacoes() {
 
   return (
     <div className="space-y-6">
+      {error && (
+        <div className="bg-rose-50 text-rose-700 border border-rose-100 rounded-lg px-4 py-3 text-sm">
+          {error}
+        </div>
+      )}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
         {items.map((item) => {
           const dataLote = item.payload || {};
@@ -89,6 +123,7 @@ export default function Aprovacoes() {
               <div className="flex gap-3">
                 <button
                   onClick={() => handleAprovar(item)}
+                  disabled={pendingId === item.id}
                   className="flex-1 flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white font-medium py-2 px-4 rounded-lg transition"
                 >
                   <Check className="w-4 h-4" />
@@ -96,6 +131,7 @@ export default function Aprovacoes() {
                 </button>
                 <button
                   onClick={() => handleRejeitar(item.id)}
+                  disabled={pendingId === item.id}
                   className="flex items-center justify-center gap-2 bg-rose-50 hover:bg-rose-100 text-rose-600 font-medium py-2 px-4 rounded-lg transition"
                 >
                   <X className="w-4 h-4" />

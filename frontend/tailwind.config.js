@@ -1,3 +1,5 @@
+import headlessUi from "@headlessui/tailwindcss";
+
 /** @type {import('tailwindcss').Config} */
 export default {
   content: [
@@ -10,6 +12,9 @@ export default {
     current: "currentColor",
     extend: {
       colors: {
+        background: "hsl(var(--background) / <alpha-value>)",
+        foreground: "hsl(var(--foreground) / <alpha-value>)",
+        border: "hsl(var(--border) / <alpha-value>)",
         tremor: {
           brand: {
             faint: "#eff6ff",
@@ -64,5 +69,5 @@ export default {
       variants: ["hover", "ui-selected"],
     },
   ],
-  plugins: [require("@headlessui/tailwindcss")],
+  plugins: [headlessUi],
 }

@@ -5,6 +5,9 @@ __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+node_modules/
+venv/
+.venv/
 dist/
 build/
 .eggs/
@@ -18,8 +21,9 @@ build/
 secrets/
 *.key
 *.pem
-*.json
 !requirements.json
+service-account*.json
+credentials*.json
 
 # ==================================
 # Logs exportados (contêm IPs, IDs de instância, traces internos)

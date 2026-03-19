@@ -3,6 +3,8 @@ import { supabase } from '@/lib/supabase';
 import { Activity, Mail, Loader2, CheckCircle2 } from 'lucide-react';
 
 export default function Login() {
+  const redirectTarget = new URL(import.meta.env.BASE_URL, window.location.origin).toString();
+  const reason = new URLSearchParams(window.location.search).get('reason');
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -16,7 +18,7 @@ export default function Login() {
     const { error } = await supabase.auth.signInWithOtp({
       email,
       options: {
-        emailRedirectTo: window.location.origin + '/financemgmtbot/',
+        emailRedirectTo: redirectTarget,
       },
     });
 
@@ -49,6 +51,11 @@ export default function Login() {
           </div>
         ) : (
           <form onSubmit={handleLogin} className="space-y-4">
+            {reason === 'unauthorized' && (
+              <div className="bg-amber-50 text-amber-700 p-3 rounded-lg text-sm border border-amber-100">
+                Este usuario autenticou, mas nao esta autorizado a acessar o painel administrativo.
+              </div>
+            )}
             {error && (
               <div className="bg-rose-50 text-rose-600 p-3 rounded-lg text-sm border border-rose-100">
                 {error}

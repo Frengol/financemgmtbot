@@ -1,6 +1,7 @@
 import os
 import logging
 import traceback
+from pathlib import Path
 from pythonjsonlogger import jsonlogger
 from supabase import create_client, Client
 from openai import AsyncOpenAI
@@ -14,6 +15,25 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logHandler)
 logger.setLevel(logging.INFO)
 
+
+def load_local_env():
+    env_path = Path(".env")
+    if not env_path.exists():
+        return
+
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+load_local_env()
+
 REQUIRED_VARS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_SECRET_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"]
 for var in REQUIRED_VARS:
     if not os.environ.get(var):
@@ -23,6 +43,21 @@ for var in REQUIRED_VARS:
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 SECRET_TOKEN = os.environ.get("TELEGRAM_SECRET_TOKEN")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+ADMIN_EMAILS = frozenset(
+    email.strip().lower()
+    for email in (os.environ.get("SUPABASE_ADMIN_EMAILS") or "").split(",")
+    if email.strip()
+)
+ADMIN_USER_IDS = frozenset(
+    user_id.strip()
+    for user_id in (os.environ.get("SUPABASE_ADMIN_USER_IDS") or "").split(",")
+    if user_id.strip()
+)
+FRONTEND_ALLOWED_ORIGINS = frozenset(
+    origin.strip()
+    for origin in (os.environ.get("FRONTEND_ALLOWED_ORIGINS") or "http://localhost:5173").split(",")
+    if origin.strip()
+)
 
 def mascarar_segredos(texto):
     if not isinstance(texto, str): return texto

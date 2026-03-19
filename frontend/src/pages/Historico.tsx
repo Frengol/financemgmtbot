@@ -1,6 +1,8 @@
 import { useEffect, useState, useMemo } from "react";
 import { supabase } from "@/lib/supabase";
+import { deleteTransaction } from "@/lib/adminApi";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable, getFilteredRowModel, getPaginationRowModel } from '@tanstack/react-table';
+import { useAuth } from "@/hooks/useAuth";
 import { Edit, Trash2, Search } from "lucide-react";
 
 type Gasto = {
@@ -16,8 +18,11 @@ type Gasto = {
 const columnHelper = createColumnHelper<Gasto>();
 
 export default function Historico() {
+  const { accessToken } = useAuth();
   const [data, setData] = useState<Gasto[]>([]);
   const [globalFilter, setGlobalFilter] = useState("");
+  const [error, setError] = useState("");
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
   const fetchGastos = async () => {
     const { data: gastos } = await supabase.from('gastos').select('*').order('data', { ascending: false });
@@ -30,8 +35,21 @@ export default function Historico() {
 
   const handleDelete = async (id: string) => {
     if (confirm("Deseja mesmo excluir este registro? A ação não pode ser desfeita.")) {
-      await supabase.from('gastos').delete().eq('id', id);
-      setData(data.filter(d => d.id !== id));
+      if (!accessToken) {
+        setError("Sua sessão expirou. Faça login novamente.");
+        return;
+      }
+
+      try {
+        setPendingDeleteId(id);
+        setError("");
+        await deleteTransaction(accessToken, id);
+        setData((current) => current.filter((item) => item.id !== id));
+      } catch (deleteError) {
+        setError(deleteError instanceof Error ? deleteError.message : "Nao foi possivel excluir o registro.");
+      } finally {
+        setPendingDeleteId(null);
+      }
     }
   };
 
@@ -61,11 +79,18 @@ export default function Historico() {
       cell: (props) => (
         <div className="flex justify-end gap-3 text-slate-400">
            <button title="Editar" className="hover:text-blue-600 transition"><Edit className="h-4 w-4" /></button>
-           <button onClick={() => handleDelete(props.row.original.id)} title="Excluir" className="hover:text-rose-600 transition"><Trash2 className="h-4 w-4" /></button>
+           <button
+             onClick={() => handleDelete(props.row.original.id)}
+             title="Excluir"
+             disabled={pendingDeleteId === props.row.original.id}
+             className="hover:text-rose-600 transition disabled:opacity-50"
+           >
+             <Trash2 className="h-4 w-4" />
+           </button>
         </div>
       ),
     })
-  ], [data]);
+  ], [pendingDeleteId]);
 
   const table = useReactTable({
     data,
@@ -80,16 +105,25 @@ export default function Historico() {
   return (
     <div className="bg-white border rounded-xl shadow-sm">
       <div className="p-5 border-b flex justify-between items-center bg-slate-50/50 rounded-t-xl">
-        <h2 className="font-semibold text-lg text-slate-800">Auditoria de Lançamentos</h2>
-        <div className="flex items-center gap-2 bg-white border px-3 py-1.5 rounded-md shadow-sm">
-          <Search className="h-4 w-4 text-slate-400" />
-          <input
-            type="text"
-            value={globalFilter ?? ''}
-            onChange={e => setGlobalFilter(e.target.value)}
-            placeholder="Buscar (ex: Mercado)..."
-            className="outline-none text-sm w-48 bg-transparent"
-          />
+        <div className="space-y-3 w-full">
+          <div className="flex justify-between items-center gap-4">
+            <h2 className="font-semibold text-lg text-slate-800">Auditoria de Lançamentos</h2>
+            <div className="flex items-center gap-2 bg-white border px-3 py-1.5 rounded-md shadow-sm">
+              <Search className="h-4 w-4 text-slate-400" />
+              <input
+                type="text"
+                value={globalFilter ?? ''}
+                onChange={e => setGlobalFilter(e.target.value)}
+                placeholder="Buscar (ex: Mercado)..."
+                className="outline-none text-sm w-48 bg-transparent"
+              />
+            </div>
+          </div>
+          {error && (
+            <div className="bg-rose-50 text-rose-700 border border-rose-100 rounded-lg px-4 py-3 text-sm">
+              {error}
+            </div>
+          )}
         </div>
       </div>
       
