@@ -41,10 +41,14 @@ jobs:
 
       - name: Build frontend for Pages
         env:
-          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
-        run: npm run build
+          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
+        run: |
+          test -n "$VITE_SUPABASE_URL" || (echo "::error::Missing VITE_SUPABASE_URL secret" && exit 1)
+          test -n "$VITE_SUPABASE_ANON_KEY" || (echo "::error::Missing VITE_SUPABASE_ANON_KEY secret" && exit 1)
+          test -n "$VITE_API_BASE_URL" || (echo "::error::Missing VITE_API_BASE_URL secret" && exit 1)
+          npm run build
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4
