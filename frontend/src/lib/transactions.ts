@@ -45,3 +45,42 @@ export function normalizeNatureLabel(value?: string | null): TransactionNature {
 
   return 'Outros';
 }
+
+export function formatTransactionValue(value: number) {
+  if (!value) {
+    return '';
+  }
+
+  return value.toFixed(2).replace('.', ',');
+}
+
+export function normalizeTransactionValueInput(rawValue: string) {
+  const digitsAndCommaOnly = rawValue.replace(/[^\d,]/g, '');
+  const firstCommaIndex = digitsAndCommaOnly.indexOf(',');
+
+  if (firstCommaIndex === -1) {
+    return digitsAndCommaOnly;
+  }
+
+  const integerPart = digitsAndCommaOnly.slice(0, firstCommaIndex + 1);
+  const decimalPart = digitsAndCommaOnly
+    .slice(firstCommaIndex + 1)
+    .replace(/,/g, '')
+    .slice(0, 2);
+
+  return `${integerPart}${decimalPart}`;
+}
+
+export function parseTransactionValueInput(rawValue: string) {
+  const normalized = normalizeTransactionValueInput(rawValue).replace(',', '.');
+  if (!normalized) {
+    return null;
+  }
+
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  return parsed;
+}

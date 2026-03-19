@@ -1,5 +1,5 @@
 # 📜 Manifesto de Arquitetura: Finance Mgmt Bot
-**Versão:** V3.1.1 — *Frontend Estático, Backend Seguro, Operação Administrativa Completa & Governança Reprodutível*
+**Versão:** V3.1.2 — *Frontend Estático, Backend Seguro, Operação Administrativa Completa & Governança Reprodutível*
 
 ## Visão Geral do Produto
 O sistema é um Assistente Pessoal (Copilot) Financeiro multimodal orientado a eventos. O núcleo operacional continua centrado no Telegram, onde textos, cupons fiscais e áudios são recebidos e processados via Webhook assíncrono. A evolução V3 introduziu uma segunda superfície oficial: um **Painel Administrativo Web** publicado estaticamente no GitHub Pages, consumindo autenticação Supabase e delegando operações sensíveis a um backend Python hospedado no Google Cloud Run. A versão atual V3.1 consolida essa borda administrativa com **CRUD manual de transações**, **estado de autenticação compartilhado no frontend**, **seleção de período por widget** e um **modo local de desenvolvimento** que não afeta a política de segurança de produção.
@@ -159,6 +159,8 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 * O Dashboard usa widgets com seletor de mês compacto por card, evitando um filtro global único e permitindo leitura contextual do período.
 * O Histórico usa tabela filtrável com edição e exclusão seguras via backend.
 * O modal de transações centraliza criação e edição manual com normalização server-side.
+* O campo monetário do modal opera em formato local (`12,50`), aceita apenas dígitos e vírgula no cliente e é convertido para valor numérico antes da chamada administrativa.
+* A categoria `Outros` é aceita explicitamente pelo frontend e pelo backend como categoria válida de lançamentos manuais.
 
 ### 5.3 CI/CD
 * `ci.yml`

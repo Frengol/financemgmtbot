@@ -22,7 +22,8 @@ CATEGORIA_MAP = {
     "receita": ("Receita", "Entradas Diversas"),
     "ganho": ("Receita", "Entradas Diversas"),
     "gasto": ("Outros", "Outros"),
-    "despesa": ("Outros", "Outros")
+    "despesa": ("Outros", "Outros"),
+    "outros": ("Outros", "Outros"),
 }
 
 def inferir_natureza(categoria):

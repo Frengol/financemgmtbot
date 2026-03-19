@@ -1,7 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Loader2, X } from 'lucide-react';
 import { createTransaction, updateTransaction } from '@/lib/adminApi';
-import { accountOptions, paymentMethodOptions, transactionCategories, transactionNatureLabels } from '@/lib/transactions';
+import {
+  accountOptions,
+  formatTransactionValue,
+  normalizeTransactionValueInput,
+  parseTransactionValueInput,
+  paymentMethodOptions,
+  transactionCategories,
+  transactionNatureLabels,
+} from '@/lib/transactions';
 import { useAuth } from '@/hooks/useAuth';
 import { useTransactionComposer } from '@/hooks/useTransactionComposer';
 
@@ -14,6 +22,7 @@ export default function TransactionModal() {
   const { close, draft, editingId, isOpen, setDraft } = useTransactionComposer();
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [valueInput, setValueInput] = useState('');
 
   const availableCategories = useMemo(() => transactionCategories[draft.natureza], [draft.natureza]);
 
@@ -22,6 +31,10 @@ export default function TransactionModal() {
       setDraft({ ...draft, categoria: availableCategories[0] });
     }
   }, [availableCategories, draft, setDraft]);
+
+  useEffect(() => {
+    setValueInput(formatTransactionValue(draft.valor));
+  }, [draft.valor, editingId, isOpen]);
 
   if (!isOpen) {
     return null;
@@ -42,14 +55,25 @@ export default function TransactionModal() {
       return;
     }
 
+    const parsedValue = parseTransactionValueInput(valueInput);
+    if (parsedValue === null) {
+      setError('Informe um valor numerico valido usando virgula para os centavos.');
+      return;
+    }
+
+    const payload = {
+      ...draft,
+      valor: parsedValue,
+    };
+
     try {
       setSaving(true);
       setError('');
 
       if (editingId) {
-        await updateTransaction(accessToken || '', editingId, draft);
+        await updateTransaction(accessToken || '', editingId, payload);
       } else {
-        await createTransaction(accessToken || '', draft);
+        await createTransaction(accessToken || '', payload);
       }
 
       emitTransactionsChanged();
@@ -100,12 +124,14 @@ export default function TransactionModal() {
             <label className="space-y-1 text-sm">
               <span className="font-medium text-slate-700">Valor</span>
               <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={draft.valor}
-                onChange={(event) => setDraft({ ...draft, valor: Number(event.target.value) })}
+                type="text"
+                inputMode="decimal"
+                value={valueInput}
+                onChange={(event) => {
+                  setValueInput(normalizeTransactionValueInput(event.target.value));
+                }}
                 className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-slate-900 outline-none transition focus:border-blue-500 focus:bg-white"
+                placeholder="12,50"
                 required
               />
             </label>

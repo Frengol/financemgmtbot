@@ -138,6 +138,7 @@ class TestInferirNatureza:
             ("ganho", ("Receita", "Entradas Diversas")),
             ("gasto", ("Outros", "Outros")),
             ("despesa", ("Outros", "Outros")),
+            ("outros", ("Outros", "Outros")),
         ],
     )
     def test_valid_categories(self, cat_input, expected):
@@ -1297,6 +1298,53 @@ class TestAdminRoutes:
         assert resp.status_code == 201
         mock_gastos.insert.assert_called_once()
         mock_audit.insert.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_admin_create_transaction_accepts_outros_category(self):
+        self._mock_admin_user()
+
+        mock_gastos = MagicMock()
+        mock_gastos.insert.return_value.execute.return_value = MagicMock(data=[{
+            "id": "tx-outros",
+            "data": "2026-03-19",
+            "valor": 12.5,
+            "natureza": "Outros",
+            "categoria": "Outros",
+            "descricao": "Assinatura Gemini AI Plus",
+            "metodo_pagamento": "Cartao de Credito",
+            "conta": "Bradesco",
+        }])
+
+        mock_audit = MagicMock()
+        mock_audit.insert.return_value.execute.return_value = MagicMock()
+
+        def table_switch(name):
+            if name == "gastos":
+                return mock_gastos
+            if name == "auditoria_admin":
+                return mock_audit
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            resp = await client.post(
+                "/api/admin/gastos",
+                headers={"Authorization": "Bearer token"},
+                json={
+                    "data": "2026-03-19",
+                    "valor": 12.5,
+                    "categoria": "Outros",
+                    "descricao": "Assinatura Gemini AI Plus",
+                    "metodo_pagamento": "Cartao de Credito",
+                    "conta": "Bradesco",
+                },
+            )
+
+        assert resp.status_code == 201
+        inserted_payload = mock_gastos.insert.call_args.args[0]
+        assert inserted_payload["natureza"] == "Outros"
+        assert inserted_payload["categoria"] == "Outros"
 
     @pytest.mark.asyncio
     async def test_admin_update_transaction_success(self):
