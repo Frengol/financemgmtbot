@@ -128,7 +128,7 @@ async def processar_update_assincrono(update):
         analise_ia = await processar_texto_com_llm(texto_analise)
         intencao = analise_ia.get("intencao")
 
-        logger.info({"event": "llm_routed", "intent": intencao, "payload_ia": analise_ia})
+        logger.info({"event": "llm_routed", "intent": intencao})
 
         if intencao == "registrar_lote_pendente":
             dados_lote = analise_ia.get("dados_lote", {})

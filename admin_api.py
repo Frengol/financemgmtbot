@@ -12,6 +12,18 @@ from utils import CATEGORIA_MAP, inferir_natureza
 AUDIT_TABLE = "auditoria_admin"
 
 
+def _build_field_summary(payload: dict[str, Any] | None):
+    if not isinstance(payload, dict):
+        return {"contains_sensitive_values": False, "fields": [], "field_count": 0}
+
+    fields = sorted(payload.keys())
+    return {
+        "contains_sensitive_values": False,
+        "fields": fields,
+        "field_count": len(fields),
+    }
+
+
 def _json_error(message: str, status_code: int):
     response = jsonify({"status": "error", "message": message})
     response.status_code = status_code
@@ -199,7 +211,7 @@ def criar_gasto_admin(payload: dict[str, Any] | None):
         response = supabase.table("gastos").insert(payload).execute()
         inserted = response.data[0] if getattr(response, "data", None) else payload
         transaction_id = inserted.get("id")
-        registrar_auditoria_admin(actor, "create_transaction", "gastos", str(transaction_id or "unknown"), payload)
+        registrar_auditoria_admin(actor, "create_transaction", "gastos", str(transaction_id or "unknown"), _build_field_summary(payload))
         return _json_success({"transaction": inserted}, 201)
     except APIError as exc:
         logger.error({"event": "admin_create_transaction_failed", "error": mascarar_segredos(str(exc))})
@@ -222,7 +234,7 @@ def atualizar_gasto_admin(gasto_id: str, payload: dict[str, Any] | None):
 
         response = supabase.table("gastos").update(payload).eq("id", gasto_id).execute()
         updated = response.data[0] if getattr(response, "data", None) else {"id": gasto_id, **payload}
-        registrar_auditoria_admin(actor, "update_transaction", "gastos", gasto_id, payload)
+        registrar_auditoria_admin(actor, "update_transaction", "gastos", gasto_id, _build_field_summary(payload))
         return _json_success({"transaction": updated}, 200)
     except APIError as exc:
         logger.error({"event": "admin_update_transaction_failed", "id": gasto_id, "error": mascarar_segredos(str(exc))})
@@ -266,7 +278,7 @@ def aprovar_cache_admin(cache_id: str):
             "approve_pending_receipt",
             "cache_aprovacao",
             cache_id,
-            {"linhas": linhas, "total": total},
+            {"lines": linhas, "total": total, "contains_sensitive_values": False},
         )
 
         return _json_success({"id": cache_id, "linhas": linhas, "total": total}, 200)

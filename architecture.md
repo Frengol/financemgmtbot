@@ -126,6 +126,8 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 
 ### 4.5 Observabilidade Blindada
 * Logs seguem em JSON com masking de segredos.
+* Logs operacionais não devem registrar payloads brutos de IA, transcrições, conteúdo textual de transações, itens detalhados de cupons nem dumps completos de inserts falhos; devem registrar apenas metadados mínimos como evento, contagem, ids e nomes de campos.
+* A trilha `auditoria_admin` deve registrar contexto mínimo da operação administrativa, sem duplicar descrições completas de transações ou payloads integrais de aprovação.
 * Falhas de auditoria não devem expor credenciais ou corromper o fluxo principal sem log explícito.
 
 ---
@@ -156,6 +158,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `BASE_URL=/financemgmtbot/`
   - chamadas administrativas apontam para o Cloud Run público
   - login oficial via Magic Link do Supabase
+* A SPA usa `code splitting` por rota e por dependência pesada de frontend, carregando `Dashboard`, `Histórico`, `Aprovações`, `Login` e o modal transacional sob demanda, com `manualChunks` dedicados para gráficos, tabela, Supabase e vendor base.
 * Em telas mobile, o layout principal expõe um acionador discreto no canto superior esquerdo que abre um drawer lateral esquerdo com a navegação entre Dashboard, Aprovações e Histórico, preservando o menu fixo em desktop.
 * O Dashboard usa widgets com seletor de mês compacto por card, evitando um filtro global único e permitindo leitura contextual do período.
 * O Histórico usa tabela filtrável com edição e exclusão seguras via backend.

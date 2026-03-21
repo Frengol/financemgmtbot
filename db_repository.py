@@ -5,6 +5,18 @@ from config import supabase, logger
 from utils import inferir_natureza, get_brasilia_time, add_months_safely
 from core_logic import aplicar_map_reduce
 
+
+def _payload_fields_summary(payloads):
+    fields = set()
+    if isinstance(payloads, list):
+        for payload in payloads:
+          if isinstance(payload, dict):
+              fields.update(payload.keys())
+    elif isinstance(payloads, dict):
+        fields.update(payloads.keys())
+
+    return sorted(fields)
+
 def aplicar_filtros_query(query_obj, filtros):
     query_obj = query_obj.gte("valor", 0)
     if not filtros: return query_obj
@@ -90,7 +102,13 @@ def gravar_lote_no_banco(dados_lote):
         logger.info({"event": "db_bulk_insert_success", "items_grouped": len(registros), "total_value": total})
         return len(registros), total
     except APIError as e:
-        logger.error({"event": "db_error_bulk_insert", "code": e.code, "message": e.message, "dump_payload": registros})
+        logger.error({
+            "event": "db_error_bulk_insert",
+            "code": e.code,
+            "message": e.message,
+            "payload_fields": _payload_fields_summary(registros),
+            "record_count": len(registros),
+        })
         raise Exception(f"Erro no Banco (Cod: {e.code}): {e.message}")
 
 def inserir_no_banco(dados_reg):
@@ -128,5 +146,11 @@ def inserir_no_banco(dados_reg):
         supabase.table("gastos").insert(registros_em_lote).execute()
         logger.info({"event": "db_insert_success", "installments": parcelas})
     except APIError as e:
-        logger.error({"event": "db_error_insert", "code": e.code, "message": e.message, "dump_payload": registros_em_lote})
+        logger.error({
+            "event": "db_error_insert",
+            "code": e.code,
+            "message": e.message,
+            "payload_fields": _payload_fields_summary(registros_em_lote),
+            "record_count": len(registros_em_lote),
+        })
         raise Exception(f"Erro no Banco: {e.message}")

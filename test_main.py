@@ -1298,6 +1298,10 @@ class TestAdminRoutes:
         assert resp.status_code == 201
         mock_gastos.insert.assert_called_once()
         mock_audit.insert.assert_called_once()
+        audit_payload = mock_audit.insert.call_args.args[0]
+        assert audit_payload["metadata"]["fields"] == ["categoria", "conta", "data", "descricao", "metodo_pagamento", "natureza", "valor"]
+        assert audit_payload["metadata"]["contains_sensitive_values"] is False
+        assert "Compra manual" not in json.dumps(audit_payload["metadata"])
 
     @pytest.mark.asyncio
     async def test_admin_create_transaction_accepts_outros_category(self):
@@ -1392,6 +1396,10 @@ class TestAdminRoutes:
         assert resp.status_code == 200
         mock_gastos.update.assert_called_once()
         mock_audit.insert.assert_called_once()
+        audit_payload = mock_audit.insert.call_args.args[0]
+        assert audit_payload["metadata"]["fields"] == ["categoria", "conta", "data", "descricao", "metodo_pagamento", "natureza", "valor"]
+        assert audit_payload["metadata"]["contains_sensitive_values"] is False
+        assert "Cinema" not in json.dumps(audit_payload["metadata"])
 
     @pytest.mark.asyncio
     async def test_admin_approve_pending_receipt_success(self):
@@ -1425,6 +1433,8 @@ class TestAdminRoutes:
         assert resp.status_code == 200
         mock_cache.delete.return_value.eq.assert_called_once_with("id", "C1")
         mock_audit.insert.assert_called_once()
+        audit_payload = mock_audit.insert.call_args.args[0]
+        assert audit_payload["metadata"] == {"lines": 1, "total": 10.0, "contains_sensitive_values": False}
 
     @pytest.mark.asyncio
     async def test_admin_reject_pending_receipt_success(self):
@@ -1455,6 +1465,73 @@ class TestAdminRoutes:
         assert resp.status_code == 200
         mock_cache.delete.return_value.eq.assert_called_once_with("id", "C2")
         mock_audit.insert.assert_called_once()
+
+
+class TestSensitiveDataMinimization:
+    def test_db_bulk_insert_error_does_not_log_dump_payload(self, sample_dados_lote):
+        class FakeApiError(Exception):
+            def __init__(self):
+                super().__init__("db failed")
+                self.code = "PGRST500"
+                self.message = "db failed"
+
+        mock_table = MagicMock()
+        mock_table.insert.return_value.execute.side_effect = FakeApiError()
+
+        with patch.object(db_repository, "APIError", FakeApiError):
+            with patch.object(db_repository.supabase, "table", return_value=mock_table):
+                with patch.object(db_repository.logger, "error") as mock_logger_error:
+                    with pytest.raises(Exception, match="Erro no Banco"):
+                        db_repository.gravar_lote_no_banco(sample_dados_lote)
+
+        logged_payload = mock_logger_error.call_args.args[0]
+        assert "dump_payload" not in logged_payload
+        assert "payload_fields" in logged_payload
+        assert logged_payload["payload_fields"] == ["categoria", "conta", "data", "descricao", "metodo_pagamento", "natureza", "valor"]
+
+    def test_db_insert_error_does_not_log_dump_payload(self, sample_dados_registro):
+        class FakeApiError(Exception):
+            def __init__(self):
+                super().__init__("db failed")
+                self.code = "PGRST500"
+                self.message = "db failed"
+
+        mock_table = MagicMock()
+        mock_table.insert.return_value.execute.side_effect = FakeApiError()
+
+        with patch.object(db_repository, "APIError", FakeApiError):
+            with patch.object(db_repository.supabase, "table", return_value=mock_table):
+                with patch.object(db_repository.logger, "error") as mock_logger_error:
+                    with pytest.raises(Exception, match="Erro no Banco"):
+                        db_repository.inserir_no_banco(sample_dados_registro)
+
+        logged_payload = mock_logger_error.call_args.args[0]
+        assert "dump_payload" not in logged_payload
+        assert "payload_fields" in logged_payload
+        assert logged_payload["payload_fields"] == ["categoria", "conta", "data", "descricao", "metodo_pagamento", "natureza", "valor"]
+
+    @pytest.mark.asyncio
+    async def test_processar_update_does_not_log_llm_payload(self):
+        with patch.object(handlers.logger, "info") as mock_logger_info:
+            with patch("handlers.processar_texto_com_llm", AsyncMock(return_value={
+                "intencao": "consultar",
+                "dados_registro": {"descricao": "Segredo"},
+                "dados_lote": {"itens": [{"nome": "Item sensivel"}]},
+                "filtros_pesquisa": {},
+                "filtros_exclusao": {},
+            })):
+                with patch.object(handlers.supabase, "table", return_value=MagicMock(insert=MagicMock(return_value=MagicMock(execute=MagicMock())))):
+                    with patch("handlers.enviar_acao_telegram", AsyncMock()):
+                        with patch("handlers.enviar_mensagem_telegram", AsyncMock()):
+                            with patch("handlers.consultar_no_banco", return_value=(0, 0)):
+                                await handlers.processar_update_assincrono({
+                                    "update_id": 9999,
+                                    "message": {"chat": {"id": 123}, "text": "quanto gastei?"},
+                                })
+
+        logged_events = [call.args[0] for call in mock_logger_info.call_args_list if call.args]
+        llm_event = next(event for event in logged_events if event.get("event") == "llm_routed")
+        assert llm_event == {"event": "llm_routed", "intent": "consultar"}
 
     @pytest.mark.asyncio
     async def test_admin_options_preflight(self):
