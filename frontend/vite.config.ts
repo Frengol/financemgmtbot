@@ -35,10 +35,6 @@ export default defineConfig(({ mode }) => ({
             return 'table';
           }
 
-          if (id.includes('@supabase') || id.includes('cross-fetch') || id.includes('ws')) {
-            return 'supabase';
-          }
-
           if (id.includes('react-router-dom') || id.includes('/react/') || id.includes('react-dom') || id.includes('scheduler')) {
             return 'react-vendor';
           }

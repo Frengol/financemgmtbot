@@ -10,10 +10,10 @@
     "test:e2e": "playwright test",
     "test:e2e:install": "playwright install chromium",
     "build": "tsc && vite build",
+    "verify:bundle": "node ./scripts/verify-bundle.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.39.3",
     "@tanstack/react-table": "^8.11.8",
     "@tremor/react": "^3.13.4",
     "class-variance-authority": "^0.7.0",
@@ -30,9 +30,9 @@
     "lodash": "^4.17.24"
   },
   "devDependencies": {
-    "@playwright/test": "^1.55.0",
     "@headlessui/react": "^1.7.18",
     "@headlessui/tailwindcss": "^0.2.0",
+    "@playwright/test": "^1.55.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
@@ -40,13 +40,13 @@
     "@types/react": "^18.2.43",
     "@types/react-dom": "^18.2.17",
     "@vitejs/plugin-react": "^4.2.1",
+    "@vitest/coverage-v8": "^4.1.0",
     "autoprefixer": "^10.4.17",
     "jsdom": "^29.0.0",
     "postcss": "^8.4.35",
     "tailwindcss": "^3.4.1",
     "typescript": "^5.2.2",
     "vite": "^5.0.8",
-    "vitest": "^4.1.0",
-    "@vitest/coverage-v8": "^4.1.0"
+    "vitest": "^4.1.0"
   }
 }

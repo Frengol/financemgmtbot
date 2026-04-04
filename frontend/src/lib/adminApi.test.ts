@@ -29,6 +29,7 @@ describe('adminApi', () => {
     expect(url).toBe('/api/admin/gastos?date_from=2026-04-01&date_to=2026-04-30');
     expect(init.credentials).toBe('include');
     expect(init.method).toBe('GET');
+    expect(new Headers(init.headers).has('Authorization')).toBe(false);
   });
 
   it('adds JSON and CSRF headers for mutating admin requests', async () => {
@@ -53,6 +54,7 @@ describe('adminApi', () => {
     expect(init.credentials).toBe('include');
     expect(headers.get('Content-Type')).toBe('application/json');
     expect(headers.get('X-CSRF-Token')).toBe('csrf-token');
+    expect(headers.has('Authorization')).toBe(false);
   });
 
   it('surfaces backend error messages for failed requests', async () => {
@@ -99,5 +101,7 @@ describe('adminApi', () => {
     expect(logoutUrl).toBe('/auth/logout');
     expect(magicInit.method).toBe('POST');
     expect(logoutInit.method).toBe('POST');
+    expect(new Headers(magicInit.headers).has('Authorization')).toBe(false);
+    expect(new Headers(logoutInit.headers).has('Authorization')).toBe(false);
   });
 });

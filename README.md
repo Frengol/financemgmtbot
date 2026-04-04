@@ -13,7 +13,7 @@ Frontend local:
 GitHub Pages:
 - create `frontend/.env.production` based on `frontend/.env.production.example`
 - set `VITE_API_BASE_URL` only after you have a public backend URL; GitHub Pages cannot run the Python backend by itself
-- prefer GitHub Actions `Variables` for `VITE_SUPABASE_URL` and `VITE_API_BASE_URL`, and a GitHub Actions `Secret` for `VITE_SUPABASE_ANON_KEY`, so these values are not stored in the workflow file
+- prefer GitHub Actions `Variables` for `VITE_API_BASE_URL`, so the public backend origin is not hardcoded in the workflow file
 
 ## Deployment model
 
@@ -25,13 +25,11 @@ GitHub Pages:
 
 - [`.github/workflows/ci.yml`](.github/workflows/ci.yml) now runs backend coverage, frontend unit coverage, frontend build and deterministic Playwright smoke tests on pushes and pull requests.
 - The CI workflow also runs `pip-audit`, `npm audit --omit=dev`, a built-asset string scan and a full-history `gitleaks` job when the repository is checked out in GitHub Actions.
-- [`.github/workflows/deploy-pages.yml`](.github/workflows/deploy-pages.yml) builds the frontend with repository `Variables/Secrets` and deploys `frontend/dist` to GitHub Pages.
+- [`.github/workflows/deploy-pages.yml`](.github/workflows/deploy-pages.yml) builds the frontend with repository `Variables` and deploys `frontend/dist` to GitHub Pages.
 - In the repository settings, set the Pages source to `GitHub Actions`.
 - Create these GitHub Actions settings before merging:
-  - Repository Variable: `VITE_SUPABASE_URL`
   - Repository Variable: `VITE_API_BASE_URL`
-  - Repository Secret: `VITE_SUPABASE_ANON_KEY`
-- Important: this keeps the values out of the repository and workflow YAML, but anything required by the static frontend is still visible in the final browser bundle.
+- Important: the frontend now depends only on the admin API base URL at build time; authentication itself stays behind the backend BFF.
 
 ## Public release hygiene
 
@@ -51,6 +49,7 @@ Frontend:
 - `make test-frontend`
 - `make test-frontend-coverage`
 - `make audit-frontend-deps`
+- `npm run verify:bundle --prefix frontend`
 - `npm run test:e2e --prefix frontend`
 
 Playwright:

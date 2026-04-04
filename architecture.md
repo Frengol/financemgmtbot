@@ -82,8 +82,6 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - Secret Manager / Cloud Run
   - `.env` local para desenvolvimento
 * O frontend usa apenas variáveis públicas de build:
-  - `VITE_SUPABASE_URL`
-  - `VITE_SUPABASE_ANON_KEY`
   - `VITE_API_BASE_URL`
 * O modo local de desenvolvimento é explicitamente isolado:
   - backend: `ALLOW_LOCAL_DEV_AUTH=true`
@@ -174,8 +172,8 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `BASE_URL=/financemgmtbot/`
   - chamadas administrativas apontam para o Cloud Run público
   - login oficial via backend `/auth/magic-link`
-  - a SPA não manipula mais `access_token`/`refresh_token` do Supabase
-* A SPA usa `code splitting` por rota e por dependência pesada de frontend, carregando `Dashboard`, `Histórico`, `Aprovações`, `Login` e o modal transacional sob demanda, com `manualChunks` dedicados para gráficos, tabela, Supabase e vendor base.
+  - a SPA não manipula mais `access_token`/`refresh_token` do Supabase nem depende de cliente Supabase embarcado no bundle
+* A SPA usa `code splitting` por rota e por dependência pesada de frontend, carregando `Dashboard`, `Histórico`, `Aprovações`, `Login` e o modal transacional sob demanda, com `manualChunks` dedicados para gráficos, tabela e vendor base.
 * Em telas mobile, o layout principal expõe um acionador discreto no canto superior esquerdo que abre um drawer lateral esquerdo com a navegação entre Dashboard, Aprovações e Histórico, preservando o menu fixo em desktop.
 * O Dashboard usa widgets com seletor de mês compacto por card, evitando um filtro global único e permitindo leitura contextual do período.
 * O Histórico usa tabela filtrável com edição e exclusão seguras via backend.
@@ -191,13 +189,15 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - executa `npm audit --omit=dev`
   - executa `npm run test:coverage`
   - valida `npm run build`
+  - valida `npm run verify:bundle` para garantir que o artefato publicado continua no contrato `cookie + CSRF`, sem `Authorization` nem fluxo Supabase no browser
   - varre o `dist` por strings sensíveis conhecidas antes de publicar artefatos
   - executa `npm run test:e2e` com Playwright e rotas mockadas
   - executa `gitleaks` com histórico completo no clone da CI
   - publica artefatos de coverage e do relatório Playwright
 * `deploy-pages.yml`
   - instala dependências com `npm ci`
-  - builda o frontend com `Variables/Secrets` do repositório
+  - builda o frontend com `VITE_API_BASE_URL` vindo de Repository Variables
+  - valida o bundle com `npm run verify:bundle` antes de publicar o artefato no GitHub Pages
   - publica automaticamente o SPA no GitHub Pages
 
 ---
