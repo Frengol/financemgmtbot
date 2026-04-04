@@ -2,6 +2,7 @@ import calendar
 from datetime import datetime
 from postgrest.exceptions import APIError
 from config import supabase, logger
+from security import sanitize_plain_text
 from utils import inferir_natureza, get_brasilia_time, add_months_safely
 from core_logic import aplicar_map_reduce
 
@@ -89,12 +90,13 @@ def gravar_lote_no_banco(dados_lote):
         nomes_top3 = [n for idx, n in enumerate(nomes_limpos) if idx < 3]
         nomes_str = ", ".join(nomes_top3)
         desc: str = f"{nomes_str} e +{qtd-3} itens (Cupom)" if qtd > 3 else f"{nomes_str} (Cupom)"
-        desc_limitada = "".join([c for idx, c in enumerate(str(desc)) if idx < 250])
+        desc_limitada = sanitize_plain_text(desc, 250, "Cupom")
         
         registros.append({
             "data": data_atual, "valor": float(f"{info['valor']:.2f}"), "natureza": nat, "categoria": cat,
-            "descricao": desc_limitada, "metodo_pagamento": dados_lote.get("metodo_pagamento", "Outros"),
-            "conta": dados_lote.get("conta", "Não Informada")
+            "descricao": desc_limitada,
+            "metodo_pagamento": sanitize_plain_text(dados_lote.get("metodo_pagamento"), 120, "Outros"),
+            "conta": sanitize_plain_text(dados_lote.get("conta"), 120, "Nao Informada")
         })
         
     try:
@@ -133,13 +135,14 @@ def inserir_no_banco(dados_reg):
     for i in range(parcelas):
         valor_parcela = valor_ultima if i == (parcelas - 1) else valor_base
         data_parcela = add_months_safely(data_base_dt, i).strftime("%Y-%m-%d")
-        desc = dados_reg.get("descricao", "Sem descrição")
+        desc = sanitize_plain_text(dados_reg.get("descricao"), 250, "Sem descricao")
         if parcelas > 1: desc = f"{desc} [{i+1}/{parcelas}]"
             
         registros_em_lote.append({
             "data": data_parcela, "valor": valor_parcela, "natureza": nat_limpa, "categoria": cat_limpa,
-            "descricao": desc, "metodo_pagamento": dados_reg.get("metodo_pagamento", "Outros"),
-            "conta": dados_reg.get("conta", "Não Informada")
+            "descricao": sanitize_plain_text(desc, 250, "Sem descricao"),
+            "metodo_pagamento": sanitize_plain_text(dados_reg.get("metodo_pagamento"), 120, "Outros"),
+            "conta": sanitize_plain_text(dados_reg.get("conta"), 120, "Nao Informada")
         })
         
     try:

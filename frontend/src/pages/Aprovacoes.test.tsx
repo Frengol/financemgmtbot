@@ -24,7 +24,8 @@ describe('Aprovacoes', () => {
     mockGetPendingReceipts.mockReset();
     mockRejectPendingReceipt.mockReset();
     mockUseAuth.mockReturnValue({
-      accessToken: 'token',
+      authenticated: true,
+      csrfToken: 'csrf-token',
       localBypass: false,
     });
   });
@@ -35,15 +36,16 @@ describe('Aprovacoes', () => {
     mockGetPendingReceipts.mockResolvedValue({
       items: [{
         id: 'C1',
+        kind: 'receipt_batch',
+        expires_at: '2026-03-20T10:00:00Z',
         created_at: '2026-03-19T10:00:00Z',
-        payload: {
+        preview: {
+          summary: 'Cupom pendente',
           metodo_pagamento: 'Pix',
           conta: 'Nubank',
-          desconto_global: 1,
-          itens: [
-            { nome: 'Arroz', valor_bruto: 10, desconto_item: 0, categoria: 'Mercado' },
-            { nome: 'Feijao', valor_bruto: 12, desconto_item: 1, categoria: 'Mercado' },
-          ],
+          itens_count: 2,
+          total_estimado: 20,
+          itens: ['Arroz', 'Feijao'],
         },
       }],
     });
@@ -51,14 +53,14 @@ describe('Aprovacoes', () => {
 
     render(<Aprovacoes />);
 
-    expect(await screen.findByText('Cupom Pendente')).toBeInTheDocument();
+    expect(await screen.findByText(/Cupom pendente/i)).toBeInTheDocument();
     expect(screen.getByText(/Arroz/)).toBeInTheDocument();
     expect(screen.getByText(/Total: R\$ 20.00/)).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: /Aprovar/i }));
 
     await waitFor(() => {
-      expect(mockApprovePendingReceipt).toHaveBeenCalledWith('token', 'C1');
+      expect(mockApprovePendingReceipt).toHaveBeenCalledWith('C1', 'csrf-token');
     });
     await waitFor(() => {
       expect(screen.queryByText('Arroz')).not.toBeInTheDocument();
@@ -69,14 +71,17 @@ describe('Aprovacoes', () => {
 
   it('shows session error before rejecting when there is no access token', async () => {
     mockUseAuth.mockReturnValue({
-      accessToken: '',
+      authenticated: true,
+      csrfToken: '',
       localBypass: false,
     });
     mockGetPendingReceipts.mockResolvedValue({
       items: [{
         id: 'C2',
+        kind: 'receipt_batch',
+        expires_at: '2026-03-20T10:00:00Z',
         created_at: '2026-03-19T10:00:00Z',
-        payload: { itens: [{ nome: 'Cafe', valor_bruto: 8, desconto_item: 0 }] },
+        preview: { itens: ['Cafe'], itens_count: 1, total_estimado: 8 },
       }],
     });
 

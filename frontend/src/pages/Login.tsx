@@ -1,7 +1,6 @@
 import { useState } from 'react';
-import { supabase } from '@/lib/supabase';
 import { Activity, Mail, Loader2, CheckCircle2 } from 'lucide-react';
-import { localDevBypassEnabled } from '@/lib/adminApi';
+import { localDevBypassEnabled, requestMagicLink } from '@/lib/adminApi';
 
 export default function Login() {
   const redirectTarget = new URL(import.meta.env.BASE_URL, window.location.origin).toString();
@@ -21,17 +20,11 @@ export default function Login() {
     setLoading(true);
     setError('');
 
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: {
-        emailRedirectTo: redirectTarget,
-      },
-    });
-
-    if (error) {
-      setError(error.message);
-    } else {
+    try {
+      await requestMagicLink(email, redirectTarget);
       setSuccess(true);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Nao foi possivel solicitar o magic link agora.');
     }
     setLoading(false);
   };

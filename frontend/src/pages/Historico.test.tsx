@@ -29,7 +29,8 @@ describe('Historico', () => {
     mockGetTransactions.mockReset();
     mockOpenEdit.mockReset();
     mockUseAuth.mockReturnValue({
-      accessToken: 'token',
+      authenticated: true,
+      csrfToken: 'csrf-token',
       loading: false,
       localBypass: false,
     });
@@ -66,7 +67,7 @@ describe('Historico', () => {
     await userEvent.click(screen.getAllByTitle('Excluir')[0]);
 
     await waitFor(() => {
-      expect(mockDeleteTransaction).toHaveBeenCalledWith('token', 'tx-1');
+      expect(mockDeleteTransaction).toHaveBeenCalledWith('tx-1', 'csrf-token');
     });
     await waitFor(() => {
       expect(screen.queryByText('Compra do mes')).not.toBeInTheDocument();
@@ -77,7 +78,8 @@ describe('Historico', () => {
 
   it('shows auth error before deleting when the session is unavailable', async () => {
     mockUseAuth.mockReturnValue({
-      accessToken: '',
+      authenticated: true,
+      csrfToken: '',
       loading: false,
       localBypass: false,
     });

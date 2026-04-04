@@ -35,7 +35,8 @@ describe('ProtectedRoute', () => {
 
   it('shows a loading spinner while auth is loading', () => {
     mockUseAuth.mockReturnValue({
-      session: null,
+      authenticated: false,
+      user: null,
       loading: true,
       localBypass: false,
       signOut: vi.fn(),
@@ -49,7 +50,8 @@ describe('ProtectedRoute', () => {
 
   it('renders the protected outlet for authorized users', async () => {
     mockUseAuth.mockReturnValue({
-      session: { user: { email: 'admin@example.com' } },
+      authenticated: true,
+      user: { email: 'admin@example.com' },
       loading: false,
       localBypass: false,
       signOut: vi.fn(),
@@ -64,7 +66,8 @@ describe('ProtectedRoute', () => {
   it('redirects unauthorized users and revokes the session', async () => {
     const signOut = vi.fn().mockResolvedValue(undefined);
     mockUseAuth.mockReturnValue({
-      session: { user: { email: 'blocked@example.com' } },
+      authenticated: true,
+      user: { email: 'blocked@example.com' },
       loading: false,
       localBypass: false,
       signOut,

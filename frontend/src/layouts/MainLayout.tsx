@@ -9,13 +9,13 @@ export default function MainLayout() {
   const [isOnline, setIsOnline] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const location = useLocation();
-  const { accessToken, user, signOut } = useAuth();
+  const { user, signOut } = useAuth();
   const { openCreate } = useTransactionComposer();
 
   useEffect(() => {
     const checkStatus = async () => {
       try {
-        await getTransactions(accessToken || '', { dateFrom: '2000-01-01', dateTo: '2000-01-01' });
+        await getTransactions({ dateFrom: '2000-01-01', dateTo: '2000-01-01' });
         setIsOnline(true);
       } catch {
         setIsOnline(false);
@@ -31,7 +31,7 @@ export default function MainLayout() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [accessToken, openCreate]);
+  }, [openCreate]);
 
   useEffect(() => {
     setIsMobileMenuOpen(false);

@@ -31,6 +31,8 @@ credentials*.json
 *.csv
 downloaded-logs-*
 *.log
+pentest-findings-*.md
+SecOps
 
 # ==================================
 # Deploy scripts (expõem Project ID e infraestrutura GCP)
@@ -42,6 +44,7 @@ deploy.sh
 # ==================================
 .vscode/
 .idea/
+.codex
 *.swp
 *.swo
 *~
@@ -54,3 +57,6 @@ Thumbs.db
 .pytest_cache/
 htmlcov/
 .coverage
+coverage/
+playwright-report/
+test-results/

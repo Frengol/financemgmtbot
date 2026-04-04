@@ -7,21 +7,28 @@ from utils import get_brasilia_time
 from config import groq_client, deepseek_client
 
 async def transcrever_audio(audio_bytes):
+    if not audio_bytes:
+        raise ValueError("Audio payload is empty.")
     with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp_file:
         tmp_path = tmp_file.name
         tmp_file.write(audio_bytes)
     try:
         with open(tmp_path, "rb") as file_to_read:
-            transcription = await groq_client.audio.transcriptions.create(
-                file=(tmp_path, file_to_read.read()),
-                model="whisper-large-v3",
-                prompt="Transcreva este áudio em português sobre finanças, fast food, mercado, faturas e parcelamentos."
+            transcription = await asyncio.wait_for(
+                groq_client.audio.transcriptions.create(
+                    file=(tmp_path, file_to_read.read()),
+                    model="whisper-large-v3",
+                    prompt="Transcreva este áudio em português sobre finanças, fast food, mercado, faturas e parcelamentos."
+                ),
+                timeout=45,
             )
         return transcription.text
     finally:
         if os.path.exists(tmp_path): os.remove(tmp_path)
 
 async def extrair_tabela_recibo_gemini(image_bytes):
+    if not image_bytes:
+        raise ValueError("Image payload is empty.")
     model = genai.GenerativeModel('gemini-2.5-flash')
     prompt_visao = """
     Atue como um extrator de dados. Extraia a tabela de itens comprados. 
@@ -32,9 +39,12 @@ async def extrair_tabela_recibo_gemini(image_bytes):
     Desconto Global: [Apenas o valor numérico do desconto final da nota. Diferencie de subtotais! Subtotal NÃO é desconto. Procure palavras como "Desconto", "Desconto total". Se não houver, escreva 0.00]
     Pagamento: [Infira o método lendo a nota inteira: Pix, Crédito, Débito, Dinheiro, Vale Alimentação. Se impossível saber, escreva Não Informado]
     """
-    response = await asyncio.to_thread(
-        model.generate_content, 
-        [{"mime_type": "image/jpeg", "data": image_bytes}, prompt_visao]
+    response = await asyncio.wait_for(
+        asyncio.to_thread(
+            model.generate_content,
+            [{"mime_type": "image/jpeg", "data": image_bytes}, prompt_visao]
+        ),
+        timeout=45,
     )
     return response.text
 
@@ -115,10 +125,13 @@ async def processar_texto_com_llm(texto_usuario):
     </formato_de_saida>
     """
     
-    response = await deepseek_client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": texto_usuario}],
-        response_format={"type": "json_object"}
+    response = await asyncio.wait_for(
+        deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": texto_usuario}],
+            response_format={"type": "json_object"}
+        ),
+        timeout=45,
     )
     texto_resposta = response.choices[0].message.content
     return json.loads(str(texto_resposta) if texto_resposta else "{}")

@@ -35,6 +35,12 @@ def _env_vars(monkeypatch):
         monkeypatch.setenv(k, v)
 
 
+@pytest.fixture(autouse=True)
+def _reset_security_state():
+    with patch.dict(security._RATE_LIMIT_BUCKETS, {}, clear=True):
+        yield
+
+
 # Patch heavy external clients at module level so they don't connect on import
 _mock_supabase_client = MagicMock()
 _mock_groq = MagicMock()
@@ -60,6 +66,7 @@ import db_repository
 import handlers
 import main  # noqa: E402
 import admin_api
+import security
 
 # Restore correct references so tests can interact
 config.supabase = _mock_supabase_client
@@ -1174,15 +1181,36 @@ class TestTelegramWebhook:
                 assert resp.status_code == 200
 
     @pytest.mark.asyncio
+    async def test_webhook_requires_json_content_type(self, mock_http_client):
+        async with main.app.test_client() as client:
+            resp = await client.post(
+                "/",
+                data="not-json",
+                headers={
+                    "X-Telegram-Bot-Api-Secret-Token": "FAKE_SECRET",
+                    "Content-Type": "text/plain",
+                },
+            )
+
+        assert resp.status_code == 415
+
+    @pytest.mark.asyncio
     async def test_processing_error_returns_500(self, mock_http_client):
         async with main.app.test_client() as client:
-            with patch.object(main, "processar_update_assincrono", new_callable=AsyncMock, side_effect=Exception("boom")):
+            with patch.object(main, "processar_update_assincrono", new_callable=AsyncMock, side_effect=Exception("boom-secret")):
                 resp = await client.post(
                     "/",
                     json={"update_id": 9002, "message": {"chat": {"id": 1}, "text": "hi"}},
-                    headers={"X-Telegram-Bot-Api-Secret-Token": "FAKE_SECRET"},
+                    headers={
+                        "X-Telegram-Bot-Api-Secret-Token": "FAKE_SECRET",
+                        "Origin": "http://localhost:5173",
+                    },
                 )
                 assert resp.status_code == 500
+                payload = await resp.get_json()
+                assert payload["message"] == "Internal processing error."
+                assert "boom-secret" not in json.dumps(payload)
+                assert "Access-Control-Allow-Origin" not in resp.headers
 
     def _setup_supabase(self):
         mock_table = MagicMock()
@@ -1203,59 +1231,143 @@ class TestAdminRoutes:
         mock_response.user = mock_user
         config.supabase.auth.get_user = MagicMock(return_value=mock_response)
 
-    @pytest.mark.asyncio
-    async def test_admin_delete_requires_bearer_token(self):
-        async with main.app.test_client() as client:
-            resp = await client.delete("/api/admin/gastos/tx-1")
-            assert resp.status_code == 401
+    def _build_session_row(self, email="admin@example.com", user_id="user-1", expires_at="2099-04-03T23:59:59"):
+        return {
+            "session_id_hash": "session-hash",
+            "user_id": user_id,
+            "email": email,
+            "created_at": "2026-04-03T10:00:00",
+            "last_seen_at": "2026-04-03T10:00:00",
+            "expires_at": expires_at,
+            "revoked_at": None,
+        }
+
+    async def _authenticate_session(self, client, redirect_to="http://localhost:5173/"):
+        response = await client.post(
+            "/auth/callback",
+            json={"access_token": "valid-access-token", "redirectTo": redirect_to},
+        )
+        assert response.status_code == 200
+        payload = await response.get_json()
+        return payload["csrfToken"]
 
     @pytest.mark.asyncio
-    async def test_admin_delete_transaction_success(self):
+    async def test_auth_magic_link_uses_backend_callback_and_returns_uniform_success(self):
+        config.supabase.auth.sign_in_with_otp = MagicMock()
+
+        async with main.app.test_client() as client:
+            resp = await client.post(
+                "/auth/magic-link",
+                json={"email": "admin@example.com", "redirectTo": "http://localhost:5173/"},
+            )
+
+        assert resp.status_code == 200
+        payload = await resp.get_json()
+        assert payload["status"] == "ok"
+        assert payload["message"] == "If the e-mail is authorized, a magic link will be sent shortly."
+        config.supabase.auth.sign_in_with_otp.assert_called_once()
+        sent_payload = config.supabase.auth.sign_in_with_otp.call_args.args[0]
+        assert sent_payload["email"] == "admin@example.com"
+        assert "/auth/callback" in sent_payload["options"]["email_redirect_to"]
+
+    @pytest.mark.asyncio
+    async def test_auth_callback_creates_cookie_session_and_session_endpoint_resolves_user(self):
         self._mock_admin_user()
 
-        mock_gastos = MagicMock()
-        mock_gastos.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[{"id": "tx-1"}])
-        mock_gastos.delete.return_value.eq.return_value.execute.return_value = MagicMock(data=[{"id": "tx-1"}])
-
-        mock_audit = MagicMock()
-        mock_audit.insert.return_value.execute.return_value = MagicMock()
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[self._build_session_row()]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
 
         def table_switch(name):
-            if name == "gastos":
-                return mock_gastos
-            if name == "auditoria_admin":
-                return mock_audit
+            if name == "admin_web_sessions":
+                return mock_sessions
             return MagicMock()
 
         config.supabase.table = MagicMock(side_effect=table_switch)
 
         async with main.app.test_client() as client:
-            resp = await client.delete(
-                "/api/admin/gastos/tx-1",
-                headers={"Authorization": "Bearer token", "Origin": "http://localhost:5173"},
+            callback_resp = await client.post(
+                "/auth/callback",
+                json={"access_token": "valid-access-token", "redirectTo": "http://localhost:5173/"},
             )
+            assert callback_resp.status_code == 200
+            callback_payload = await callback_resp.get_json()
+            assert callback_payload["redirectTo"] == "http://localhost:5173/"
+            assert callback_payload["csrfToken"]
+            assert "fm_admin_session=" in callback_resp.headers["Set-Cookie"]
 
-        assert resp.status_code == 200
-        assert resp.headers["Access-Control-Allow-Origin"] == "http://localhost:5173"
-        mock_gastos.delete.return_value.eq.assert_called_once_with("id", "tx-1")
-        mock_audit.insert.assert_called_once()
+            session_resp = await client.get("/auth/session")
+
+        assert session_resp.status_code == 200
+        session_payload = await session_resp.get_json()
+        assert session_payload["authenticated"] is True
+        assert session_payload["user"]["email"] == "admin@example.com"
+        assert session_payload["csrfToken"]
+        assert session_resp.headers["Cache-Control"] == "no-store, private"
+        assert session_resp.headers["X-Content-Type-Options"] == "nosniff"
 
     @pytest.mark.asyncio
-    async def test_admin_delete_transaction_forbidden_outside_allowlist(self):
-        self._mock_admin_user(email="other@example.com")
+    async def test_admin_delete_requires_session_cookie(self):
+        async with main.app.test_client() as client:
+            resp = await client.delete("/api/admin/gastos/tx-1")
+
+        assert resp.status_code == 401
+        payload = await resp.get_json()
+        assert payload["message"] == "Missing admin session."
+
+    @pytest.mark.asyncio
+    async def test_admin_create_transaction_requires_csrf(self):
+        self._mock_admin_user()
+
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[self._build_session_row()]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+
+        def table_switch(name):
+            if name == "admin_web_sessions":
+                return mock_sessions
+            if name == "auditoria_admin":
+                return MagicMock()
+            if name == "gastos":
+                return MagicMock()
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
 
         async with main.app.test_client() as client:
-            with patch.object(admin_api, "ADMIN_EMAILS", frozenset({"admin@example.com"})):
-                resp = await client.delete(
-                    "/api/admin/gastos/tx-1",
-                    headers={"Authorization": "Bearer token"},
-                )
+            await self._authenticate_session(client)
+            resp = await client.post(
+                "/api/admin/gastos",
+                json={
+                    "data": "2026-03-19",
+                    "valor": 99.9,
+                    "categoria": "Mercado",
+                    "descricao": "Compra manual",
+                    "metodo_pagamento": "Pix",
+                    "conta": "Nubank",
+                },
+            )
 
         assert resp.status_code == 403
+        payload = await resp.get_json()
+        assert payload["message"] == "Missing or invalid CSRF token."
 
     @pytest.mark.asyncio
     async def test_admin_create_transaction_success(self):
         self._mock_admin_user()
+
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[self._build_session_row()]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
 
         mock_gastos = MagicMock()
         mock_gastos.insert.return_value.execute.return_value = MagicMock(data=[{
@@ -1273,6 +1385,8 @@ class TestAdminRoutes:
         mock_audit.insert.return_value.execute.return_value = MagicMock()
 
         def table_switch(name):
+            if name == "admin_web_sessions":
+                return mock_sessions
             if name == "gastos":
                 return mock_gastos
             if name == "auditoria_admin":
@@ -1282,9 +1396,10 @@ class TestAdminRoutes:
         config.supabase.table = MagicMock(side_effect=table_switch)
 
         async with main.app.test_client() as client:
+            csrf_token = await self._authenticate_session(client)
             resp = await client.post(
                 "/api/admin/gastos",
-                headers={"Authorization": "Bearer token"},
+                headers={"X-CSRF-Token": csrf_token},
                 json={
                     "data": "2026-03-19",
                     "valor": 99.9,
@@ -1302,10 +1417,19 @@ class TestAdminRoutes:
         assert audit_payload["metadata"]["fields"] == ["categoria", "conta", "data", "descricao", "metodo_pagamento", "natureza", "valor"]
         assert audit_payload["metadata"]["contains_sensitive_values"] is False
         assert "Compra manual" not in json.dumps(audit_payload["metadata"])
+        assert resp.headers["Cache-Control"] == "no-store, private"
+        assert resp.headers["X-Content-Type-Options"] == "nosniff"
 
     @pytest.mark.asyncio
     async def test_admin_create_transaction_accepts_outros_category(self):
         self._mock_admin_user()
+
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[self._build_session_row()]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
 
         mock_gastos = MagicMock()
         mock_gastos.insert.return_value.execute.return_value = MagicMock(data=[{
@@ -1323,6 +1447,8 @@ class TestAdminRoutes:
         mock_audit.insert.return_value.execute.return_value = MagicMock()
 
         def table_switch(name):
+            if name == "admin_web_sessions":
+                return mock_sessions
             if name == "gastos":
                 return mock_gastos
             if name == "auditoria_admin":
@@ -1332,9 +1458,10 @@ class TestAdminRoutes:
         config.supabase.table = MagicMock(side_effect=table_switch)
 
         async with main.app.test_client() as client:
+            csrf_token = await self._authenticate_session(client)
             resp = await client.post(
                 "/api/admin/gastos",
-                headers={"Authorization": "Bearer token"},
+                headers={"X-CSRF-Token": csrf_token},
                 json={
                     "data": "2026-03-19",
                     "valor": 12.5,
@@ -1351,8 +1478,85 @@ class TestAdminRoutes:
         assert inserted_payload["categoria"] == "Outros"
 
     @pytest.mark.asyncio
+    async def test_admin_delete_transaction_forbidden_outside_allowlist(self):
+        self._mock_admin_user(email="other@example.com")
+
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[self._build_session_row(email="other@example.com")]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+
+        def table_switch(name):
+            if name == "admin_web_sessions":
+                return mock_sessions
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            csrf_token = await self._authenticate_session(client)
+            with patch.object(admin_api, "ADMIN_EMAILS", frozenset({"admin@example.com"})):
+                resp = await client.delete(
+                    "/api/admin/gastos/tx-1",
+                    headers={"X-CSRF-Token": csrf_token},
+                )
+
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_admin_delete_transaction_success(self):
+        self._mock_admin_user()
+
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[self._build_session_row()]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+
+        mock_gastos = MagicMock()
+        mock_gastos.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[{"id": "tx-1"}])
+        mock_gastos.delete.return_value.eq.return_value.execute.return_value = MagicMock(data=[{"id": "tx-1"}])
+
+        mock_audit = MagicMock()
+        mock_audit.insert.return_value.execute.return_value = MagicMock()
+
+        def table_switch(name):
+            if name == "admin_web_sessions":
+                return mock_sessions
+            if name == "gastos":
+                return mock_gastos
+            if name == "auditoria_admin":
+                return mock_audit
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            csrf_token = await self._authenticate_session(client)
+            resp = await client.delete(
+                "/api/admin/gastos/tx-1",
+                headers={"X-CSRF-Token": csrf_token, "Origin": "http://localhost:5173"},
+            )
+
+        assert resp.status_code == 200
+        assert resp.headers["Access-Control-Allow-Origin"] == "http://localhost:5173"
+        assert resp.headers["Access-Control-Allow-Credentials"] == "true"
+        mock_gastos.delete.return_value.eq.assert_called_once_with("id", "tx-1")
+        mock_audit.insert.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_admin_update_transaction_success(self):
         self._mock_admin_user()
+
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[self._build_session_row()]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
 
         mock_gastos = MagicMock()
         mock_gastos.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[{"id": "tx-3"}])
@@ -1371,6 +1575,8 @@ class TestAdminRoutes:
         mock_audit.insert.return_value.execute.return_value = MagicMock()
 
         def table_switch(name):
+            if name == "admin_web_sessions":
+                return mock_sessions
             if name == "gastos":
                 return mock_gastos
             if name == "auditoria_admin":
@@ -1380,9 +1586,10 @@ class TestAdminRoutes:
         config.supabase.table = MagicMock(side_effect=table_switch)
 
         async with main.app.test_client() as client:
+            csrf_token = await self._authenticate_session(client)
             resp = await client.patch(
                 "/api/admin/gastos/tx-3",
-                headers={"Authorization": "Bearer token"},
+                headers={"X-CSRF-Token": csrf_token},
                 json={
                     "data": "2026-03-19",
                     "valor": 150,
@@ -1402,12 +1609,72 @@ class TestAdminRoutes:
         assert "Cinema" not in json.dumps(audit_payload["metadata"])
 
     @pytest.mark.asyncio
+    async def test_admin_list_pending_returns_preview_only(self):
+        self._mock_admin_user()
+
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[self._build_session_row()]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+
+        mock_cache = MagicMock()
+        mock_cache.select.return_value.order.return_value.execute.return_value = MagicMock(
+            data=[{
+                "id": "C1",
+                "kind": "receipt_batch",
+                "created_at": "2026-04-03T10:00:00",
+                "expires_at": "2026-04-04T10:00:00",
+                "preview_json": {
+                    "summary": "Cupom pendente",
+                    "itens": ["Arroz", "Feijao"],
+                    "itens_count": 2,
+                    "total_estimado": 20.0,
+                    "metodo_pagamento": "Pix",
+                    "conta": "Nubank",
+                },
+                "payload": {"metodo_pagamento": "Pix"},
+            }]
+        )
+
+        def table_switch(name):
+            if name == "admin_web_sessions":
+                return mock_sessions
+            if name == "cache_aprovacao":
+                return mock_cache
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            await self._authenticate_session(client)
+            resp = await client.get("/api/admin/cache-aprovacao")
+
+        assert resp.status_code == 200
+        payload = await resp.get_json()
+        assert payload["items"][0]["preview"]["summary"] == "Cupom pendente"
+        assert "payload" not in payload["items"][0]
+
+    @pytest.mark.asyncio
     async def test_admin_approve_pending_receipt_success(self):
         self._mock_admin_user()
 
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[self._build_session_row()]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+
         mock_cache = MagicMock()
         mock_cache.select.return_value.eq.return_value.execute.return_value = MagicMock(
-            data=[{"payload": {"itens": [{"nome": "Arroz", "valor_bruto": 10.0, "desconto_item": 0.0, "categoria": "Mercado"}]}}]
+            data=[{
+                "kind": "receipt_batch",
+                "expires_at": "2099-04-03T23:59:59",
+                "payload": {"itens": [{"nome": "Arroz", "valor_bruto": 10.0, "desconto_item": 0.0, "categoria": "Mercado"}]},
+                "payload_ciphertext": None,
+            }]
         )
         mock_cache.delete.return_value.eq.return_value.execute.return_value = MagicMock()
 
@@ -1415,6 +1682,8 @@ class TestAdminRoutes:
         mock_audit.insert.return_value.execute.return_value = MagicMock()
 
         def table_switch(name):
+            if name == "admin_web_sessions":
+                return mock_sessions
             if name == "cache_aprovacao":
                 return mock_cache
             if name == "auditoria_admin":
@@ -1424,10 +1693,11 @@ class TestAdminRoutes:
         config.supabase.table = MagicMock(side_effect=table_switch)
 
         async with main.app.test_client() as client:
+            csrf_token = await self._authenticate_session(client)
             with patch("admin_api.gravar_lote_no_banco", return_value=(1, 10.0)):
                 resp = await client.post(
                     "/api/admin/cache-aprovacao/C1/approve",
-                    headers={"Authorization": "Bearer token"},
+                    headers={"X-CSRF-Token": csrf_token},
                 )
 
         assert resp.status_code == 200
@@ -1437,17 +1707,70 @@ class TestAdminRoutes:
         assert audit_payload["metadata"] == {"lines": 1, "total": 10.0, "contains_sensitive_values": False}
 
     @pytest.mark.asyncio
+    async def test_admin_approve_pending_receipt_rejects_expired_item(self):
+        self._mock_admin_user()
+
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[self._build_session_row()]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+
+        mock_cache = MagicMock()
+        mock_cache.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[{
+                "kind": "receipt_batch",
+                "expires_at": "2000-01-01T00:00:00",
+                "payload_ciphertext": "cipher",
+                "payload": None,
+            }]
+        )
+        mock_cache.delete.return_value.eq.return_value.execute.return_value = MagicMock()
+
+        def table_switch(name):
+            if name == "admin_web_sessions":
+                return mock_sessions
+            if name == "cache_aprovacao":
+                return mock_cache
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            csrf_token = await self._authenticate_session(client)
+            resp = await client.post(
+                "/api/admin/cache-aprovacao/C1/approve",
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert resp.status_code == 410
+        payload = await resp.get_json()
+        assert payload["message"] == "Pending item expired."
+
+    @pytest.mark.asyncio
     async def test_admin_reject_pending_receipt_success(self):
         self._mock_admin_user()
 
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[self._build_session_row()]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+
         mock_cache = MagicMock()
-        mock_cache.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[{"id": "C2"}])
+        mock_cache.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[{"id": "C2", "expires_at": "2099-04-03T23:59:59"}]
+        )
         mock_cache.delete.return_value.eq.return_value.execute.return_value = MagicMock()
 
         mock_audit = MagicMock()
         mock_audit.insert.return_value.execute.return_value = MagicMock()
 
         def table_switch(name):
+            if name == "admin_web_sessions":
+                return mock_sessions
             if name == "cache_aprovacao":
                 return mock_cache
             if name == "auditoria_admin":
@@ -1457,9 +1780,10 @@ class TestAdminRoutes:
         config.supabase.table = MagicMock(side_effect=table_switch)
 
         async with main.app.test_client() as client:
+            csrf_token = await self._authenticate_session(client)
             resp = await client.post(
                 "/api/admin/cache-aprovacao/C2/reject",
-                headers={"Authorization": "Bearer token"},
+                headers={"X-CSRF-Token": csrf_token},
             )
 
         assert resp.status_code == 200
@@ -1580,3 +1904,383 @@ class TestEdgeCases:
 
         update = {"update_id": 3002, "message": {"chat": {"id": 123}, "sticker": {"file_id": "x"}}}
         await handlers.processar_update_assincrono(update)
+
+
+class TestSecurityCoverage:
+    def test_sanitize_plain_text_escapes_null_bytes_and_truncates(self):
+        value = "  <script>alert(1)</script>\x00resto  "
+
+        sanitized = security.sanitize_plain_text(value, 20, "fallback")
+
+        assert sanitized == "&lt;script&gt;alert("
+
+    def test_build_pending_preview_for_delete_confirmation_counts_records(self):
+        preview = security.build_pending_preview("delete_confirmation", {"ids": ["1", "2", "3"]})
+
+        assert preview == {
+            "summary": "Exclusão pendente",
+            "records_count": 3,
+        }
+
+    def test_load_pending_item_decrypts_ciphertext_and_builds_preview(self):
+        payload = {
+            "metodo_pagamento": "Pix",
+            "conta": "Nubank",
+            "desconto_global": 1.5,
+            "itens": [
+                {"nome": "Cafe", "valor_bruto": 12.0, "desconto_item": 0.0, "categoria": "Mercado"},
+                {"nome": "Pao", "valor_bruto": 8.0, "desconto_item": 1.0, "categoria": "Mercado"},
+            ],
+        }
+        encrypted_payload = security.encrypt_pending_payload(payload)
+        mock_cache = MagicMock()
+        mock_cache.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[{
+                "id": "CIPHER-1",
+                "kind": "receipt_batch",
+                "payload_ciphertext": encrypted_payload,
+                "payload_key_version": security.PENDING_KEY_VERSION,
+                "preview_json": None,
+                "created_at": "2026-04-03T10:00:00",
+                "expires_at": "2099-04-03T12:00:00",
+                "origin_chat_id": "123",
+                "origin_user_id": "456",
+                "payload": {},
+            }]
+        )
+
+        with patch.object(security.supabase, "table", return_value=mock_cache):
+            item = security.load_pending_item("CIPHER-1")
+
+        assert item["payload"]["conta"] == "Nubank"
+        assert item["preview_json"]["summary"] == "Cupom pendente"
+        assert item["preview_json"]["total_estimado"] == 17.5
+
+    def test_load_pending_item_handles_invalid_ciphertext_and_matches_origin(self):
+        mock_cache = MagicMock()
+        mock_cache.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[{
+                "id": "BROKEN-1",
+                "kind": "receipt_batch",
+                "payload_ciphertext": "invalid-token",
+                "payload_key_version": security.PENDING_KEY_VERSION,
+                "preview_json": None,
+                "created_at": "2026-04-03T10:00:00",
+                "expires_at": "2099-04-03T12:00:00",
+                "origin_chat_id": "chat-1",
+                "origin_user_id": "user-1",
+                "payload": {},
+            }]
+        )
+
+        with patch.object(security.supabase, "table", return_value=mock_cache):
+            item = security.load_pending_item("BROKEN-1")
+
+        assert item["payload"] is None
+        assert security.matches_pending_origin(item, "chat-1", "user-1") is True
+        assert security.matches_pending_origin(item, "chat-2", "user-1") is False
+        assert security.matches_pending_origin(item, "chat-1", "user-2") is False
+
+    def test_pending_item_expired_and_rate_limit(self):
+        expired_item = {"expires_at": "2000-01-01T00:00:00"}
+        valid_item = {"expires_at": "2099-01-01T00:00:00"}
+
+        assert security.pending_item_expired(expired_item) is True
+        assert security.pending_item_expired(valid_item) is False
+
+        with patch.dict(security._RATE_LIMIT_BUCKETS, {}, clear=True):
+            assert security.allow_request("auth", "127.0.0.1", limit=2, window_seconds=60) is True
+            assert security.allow_request("auth", "127.0.0.1", limit=2, window_seconds=60) is True
+            assert security.allow_request("auth", "127.0.0.1", limit=2, window_seconds=60) is False
+
+    def test_resolve_admin_session_returns_none_for_revoked_session(self):
+        mock_sessions = MagicMock()
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[{
+                "session_id_hash": "hash",
+                "user_id": "user-1",
+                "email": "admin@example.com",
+                "created_at": "2026-04-03T10:00:00",
+                "last_seen_at": "2026-04-03T10:00:00",
+                "expires_at": "2099-04-03T10:00:00",
+                "revoked_at": "2026-04-03T10:05:00",
+            }]
+        )
+
+        with patch.object(security.supabase, "table", return_value=mock_sessions):
+            assert security.resolve_admin_session("opaque-token") is None
+
+
+class TestAdminRoutesAdditional:
+    @pytest.mark.asyncio
+    async def test_auth_magic_link_disallowed_email_returns_uniform_success_without_upstream_call(self):
+        config.supabase.auth.sign_in_with_otp = MagicMock()
+
+        async with main.app.test_client() as client:
+            with patch.object(main, "ADMIN_EMAILS", frozenset({"allowed@example.com"})):
+                resp = await client.post(
+                    "/auth/magic-link",
+                    json={"email": "blocked@example.com", "redirectTo": "http://localhost:5173/"},
+                )
+
+        assert resp.status_code == 200
+        payload = await resp.get_json()
+        assert payload["message"] == "If the e-mail is authorized, a magic link will be sent shortly."
+        config.supabase.auth.sign_in_with_otp.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_auth_callback_get_without_token_hash_returns_bridge_html(self):
+        async with main.app.test_client() as client:
+            resp = await client.get("/auth/callback?next=http://localhost:5173/")
+
+        body = (await resp.get_data()).decode("utf-8")
+        assert resp.status_code == 200
+        assert resp.mimetype == "text/html"
+        assert "Finalizing secure sign-in" in body
+        assert "history.replaceState" in body
+        assert resp.headers["Cache-Control"] == "no-store, private"
+
+    @pytest.mark.asyncio
+    async def test_auth_callback_get_redirects_unauthorized_identity(self):
+        unauthorized_user = MagicMock()
+        unauthorized_user.id = "user-9"
+        unauthorized_user.email = "blocked@example.com"
+        config.supabase.auth.verify_otp = MagicMock(return_value=unauthorized_user)
+
+        async with main.app.test_client() as client:
+            with patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})):
+                resp = await client.get(
+                    "/auth/callback?token_hash=fakehash&type=magiclink&next=http://localhost:5173/",
+                )
+
+        assert resp.status_code == 302
+        assert resp.headers["Location"].endswith("/login?reason=unauthorized")
+
+    @pytest.mark.asyncio
+    async def test_auth_callback_post_requires_access_token(self):
+        async with main.app.test_client() as client:
+            resp = await client.post("/auth/callback", json={"redirectTo": "http://localhost:5173/"})
+
+        assert resp.status_code == 400
+        payload = await resp.get_json()
+        assert payload["message"] == "Missing access token."
+
+    @pytest.mark.asyncio
+    async def test_auth_logout_clears_cookies_even_when_revoke_fails(self):
+        async with main.app.test_client() as client:
+            client.set_cookie("localhost", security.SESSION_COOKIE_NAME, "opaque-session")
+            client.set_cookie("localhost", security.CSRF_COOKIE_NAME, "csrf-token")
+            with patch.object(main, "revoke_admin_session", side_effect=Exception("boom")):
+                resp = await client.post("/auth/logout")
+
+        assert resp.status_code == 200
+        payload = await resp.get_json()
+        assert payload["loggedOut"] is True
+        set_cookie_headers = resp.headers.getlist("Set-Cookie")
+        assert any("fm_admin_session=;" in header for header in set_cookie_headers)
+        assert any("fm_csrf=;" in header for header in set_cookie_headers)
+
+    @pytest.mark.asyncio
+    async def test_webhook_rejects_oversized_payload(self):
+        async with main.app.test_client() as client:
+            resp = await client.post(
+                "/",
+                data="{}",
+                headers={
+                    "X-Telegram-Bot-Api-Secret-Token": "FAKE_SECRET",
+                    "Content-Type": "application/json",
+                    "Content-Length": str(security.MAX_WEBHOOK_BODY_BYTES + 1),
+                },
+            )
+
+        assert resp.status_code == 413
+        payload = await resp.get_json()
+        assert payload["message"] == "Webhook payload too large."
+
+
+class TestAdminValidationCoverage:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "payload, expected_message",
+        [
+            (
+                {
+                    "data": "2026-03-19",
+                    "valor": 9.9,
+                    "categoria": "Mercado",
+                    "descricao": "Compra",
+                    "metodo_pagamento": "Pix",
+                    "conta": "Nubank",
+                    "extra": "field",
+                },
+                "Unexpected transaction fields provided.",
+            ),
+            (
+                {
+                    "data": "03/19/2026",
+                    "valor": 9.9,
+                    "categoria": "Mercado",
+                    "descricao": "Compra",
+                    "metodo_pagamento": "Pix",
+                    "conta": "Nubank",
+                },
+                "Transaction date must be in YYYY-MM-DD format.",
+            ),
+            (
+                {
+                    "data": "2026-03-19",
+                    "valor": -1,
+                    "categoria": "Mercado",
+                    "descricao": "Compra",
+                    "metodo_pagamento": "Pix",
+                    "conta": "Nubank",
+                },
+                "Transaction value must be zero or positive.",
+            ),
+            (
+                {
+                    "data": "2026-03-19",
+                    "valor": 10,
+                    "categoria": "Invalida",
+                    "descricao": "Compra",
+                    "metodo_pagamento": "Pix",
+                    "conta": "Nubank",
+                },
+                "Transaction category is invalid.",
+            ),
+        ],
+    )
+    async def test_normalize_transaction_payload_rejects_invalid_inputs(self, payload, expected_message):
+        helper = TestAdminRoutes()
+        helper._mock_admin_user()
+
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[helper._build_session_row()]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+
+        mock_gastos = MagicMock()
+        mock_audit = MagicMock()
+
+        def table_switch(name):
+            if name == "admin_web_sessions":
+                return mock_sessions
+            if name == "gastos":
+                return mock_gastos
+            if name == "auditoria_admin":
+                return mock_audit
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            csrf_token = await helper._authenticate_session(client)
+            resp = await client.post(
+                "/api/admin/gastos",
+                headers={"X-CSRF-Token": csrf_token},
+                json=payload,
+            )
+
+        assert resp.status_code == 400
+        body = await resp.get_json()
+        assert body["message"] == expected_message
+        mock_gastos.insert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_listar_cache_admin_builds_preview_from_legacy_delete_payload(self):
+        helper = TestAdminRoutes()
+        helper._mock_admin_user()
+
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[helper._build_session_row()]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+
+        mock_cache = MagicMock()
+        mock_cache.select.return_value.order.return_value.execute.return_value = MagicMock(
+            data=[{
+                "id": "DEL-1",
+                "kind": None,
+                "created_at": "2026-04-03T10:00:00",
+                "expires_at": "2099-04-03T10:00:00",
+                "preview_json": None,
+                "payload": {"ids": ["1", "2"]},
+            }]
+        )
+
+        def table_switch(name):
+            if name == "admin_web_sessions":
+                return mock_sessions
+            if name == "cache_aprovacao":
+                return mock_cache
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            await helper._authenticate_session(client)
+            response = await client.get("/api/admin/cache-aprovacao")
+
+        assert response.status_code == 200
+        payload = await response.get_json()
+        assert payload["items"][0]["kind"] == "delete_confirmation"
+        assert payload["items"][0]["preview"]["records_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_admin_approve_delete_confirmation_returns_deleted_count(self):
+        helper = TestAdminRoutes()
+        helper._mock_admin_user()
+
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[helper._build_session_row()]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+
+        mock_cache = MagicMock()
+        mock_cache.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[{
+                "id": "DEL-2",
+                "kind": "delete_confirmation",
+                "expires_at": "2099-04-03T23:59:59",
+                "payload": {"ids": ["10", "11", "12"]},
+                "payload_ciphertext": None,
+            }]
+        )
+        mock_cache.delete.return_value.eq.return_value.execute.return_value = MagicMock()
+
+        mock_gastos = MagicMock()
+        mock_gastos.delete.return_value.in_.return_value.execute.return_value = MagicMock()
+
+        mock_audit = MagicMock()
+        mock_audit.insert.return_value.execute.return_value = MagicMock()
+
+        def table_switch(name):
+            if name == "admin_web_sessions":
+                return mock_sessions
+            if name == "cache_aprovacao":
+                return mock_cache
+            if name == "gastos":
+                return mock_gastos
+            if name == "auditoria_admin":
+                return mock_audit
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            csrf_token = await helper._authenticate_session(client)
+            resp = await client.post(
+                "/api/admin/cache-aprovacao/DEL-2/approve",
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert resp.status_code == 200
+        payload = await resp.get_json()
+        assert payload["deleted_records"] == 3
+        mock_gastos.delete.return_value.in_.assert_called_once_with("id", ["10", "11", "12"])

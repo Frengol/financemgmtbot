@@ -1,25 +1,24 @@
 import { useEffect, useState } from "react";
-import { approvePendingReceipt, getPendingReceipts, rejectPendingReceipt } from "@/lib/adminApi";
+import { approvePendingReceipt, getPendingReceipts, rejectPendingReceipt, type PendingApprovalItem } from "@/lib/adminApi";
 import { useAuth } from "@/hooks/useAuth";
 import { Check, X, CreditCard, ListMinus } from "lucide-react";
 
-type CacheItem = {
-  id: string;
-  payload: any;
-  created_at: string;
-};
-
 export default function Aprovacoes() {
-  const { accessToken, localBypass } = useAuth();
-  const [items, setItems] = useState<CacheItem[]>([]);
+  const { authenticated, csrfToken, localBypass } = useAuth();
+  const [items, setItems] = useState<PendingApprovalItem[]>([]);
   const [error, setError] = useState("");
   const [pendingId, setPendingId] = useState<string | null>(null);
 
   const fetchCache = async () => {
+    if (!authenticated && !localBypass) {
+      setItems([]);
+      return;
+    }
+
     try {
-      const { items: data } = await getPendingReceipts(accessToken || '');
+      const { items: data } = await getPendingReceipts();
       if (data) {
-        setItems(data as CacheItem[]);
+        setItems(data as PendingApprovalItem[]);
       }
     } catch {
       setError("Nao foi possivel carregar as aprovacoes agora.");
@@ -28,7 +27,7 @@ export default function Aprovacoes() {
 
   useEffect(() => {
     void fetchCache();
-  }, [accessToken]);
+  }, [authenticated, localBypass]);
 
   useEffect(() => {
     const refresh = () => {
@@ -37,10 +36,10 @@ export default function Aprovacoes() {
 
     window.addEventListener('transactions:changed', refresh);
     return () => window.removeEventListener('transactions:changed', refresh);
-  }, [accessToken]);
+  }, [authenticated, localBypass]);
 
-  const handleAprovar = async (item: CacheItem) => {
-    if (!accessToken && !localBypass) {
+  const handleAprovar = async (item: PendingApprovalItem) => {
+    if ((!authenticated || !csrfToken) && !localBypass) {
       setError("Sua sessão expirou. Faça login novamente.");
       return;
     }
@@ -48,7 +47,7 @@ export default function Aprovacoes() {
     try {
       setPendingId(item.id);
       setError("");
-      await approvePendingReceipt(accessToken || '', item.id);
+      await approvePendingReceipt(item.id, csrfToken);
       setItems((current) => current.filter((currentItem) => currentItem.id !== item.id));
       window.dispatchEvent(new CustomEvent('transactions:changed'));
     } catch (approveError) {
@@ -59,7 +58,7 @@ export default function Aprovacoes() {
   };
 
   const handleRejeitar = async (id: string) => {
-    if (!accessToken && !localBypass) {
+    if ((!authenticated || !csrfToken) && !localBypass) {
       setError("Sua sessão expirou. Faça login novamente.");
       return;
     }
@@ -67,7 +66,7 @@ export default function Aprovacoes() {
     try {
       setPendingId(id);
       setError("");
-      await rejectPendingReceipt(accessToken || '', id);
+      await rejectPendingReceipt(id, csrfToken);
       setItems((current) => current.filter((currentItem) => currentItem.id !== id));
       window.dispatchEvent(new CustomEvent('transactions:changed'));
     } catch (rejectError) {
@@ -95,18 +94,18 @@ export default function Aprovacoes() {
       )}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
         {items.map((item) => {
-          const dataLote = item.payload || {};
-          const isLote = dataLote.itens && Array.isArray(dataLote.itens);
-          const totalEstimado = isLote 
-            ? dataLote.itens.reduce((acc: number, curr: any) => acc + (Number(curr.valor_bruto) || 0) - (Number(curr.desconto_item) || 0), 0) - (Number(dataLote.desconto_global)||0) 
-            : 0;
+          const preview = item.preview || {};
+          const isReceiptBatch = item.kind !== 'delete_confirmation';
+          const previewItems = Array.isArray(preview.itens) ? preview.itens : [];
+          const totalEstimado = Number(preview.total_estimado) || 0;
+          const recordCount = Number(preview.records_count) || 0;
 
           return (
             <div key={item.id} className="bg-white border text-sm rounded-xl p-5 shadow-sm hover:shadow-md transition">
               <div className="flex justify-between items-start mb-4">
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700">
                   <ListMinus className="w-3.5 h-3.5" />
-                  Cupom Pendente
+                  {preview.summary || (isReceiptBatch ? 'Cupom Pendente' : 'Pendencia Administrativa')}
                 </span>
                 <span className="text-slate-400 text-xs">
                   {new Date(item.created_at).toLocaleDateString()}
@@ -114,23 +113,28 @@ export default function Aprovacoes() {
               </div>
               
               <div className="space-y-3 mb-6">
-                <div className="flex items-center gap-2 text-slate-700">
-                  <CreditCard className="w-4 h-4 text-slate-400" />
-                  <span className="font-medium">{dataLote.metodo_pagamento || "Não informado"}</span>
-                  <span className="text-slate-500 text-xs">({dataLote.conta || "Conta não informada"})</span>
-                </div>
+                {isReceiptBatch ? (
+                  <div className="flex items-center gap-2 text-slate-700">
+                    <CreditCard className="w-4 h-4 text-slate-400" />
+                    <span className="font-medium">{preview.metodo_pagamento || "Não informado"}</span>
+                    <span className="text-slate-500 text-xs">({preview.conta || "Conta não informada"})</span>
+                  </div>
+                ) : null}
                 
                 <div className="bg-slate-50 p-3 rounded-lg border border-slate-100 space-y-2">
                   <p className="font-semibold text-slate-800 text-xs flex justify-between">
-                    <span>Qtd de Itens: {isLote ? dataLote.itens.length : 0}</span>
-                    <span className="text-blue-600">Total: R$ {Math.max(0, totalEstimado).toFixed(2)}</span>
+                    <span>{isReceiptBatch ? `Qtd de Itens: ${preview.itens_count || 0}` : `Registros: ${recordCount}`}</span>
+                    {isReceiptBatch ? <span className="text-blue-600">Total: R$ {Math.max(0, totalEstimado).toFixed(2)}</span> : null}
                   </p>
                   <ul className="text-xs text-slate-600 space-y-1">
-                    {isLote && dataLote.itens.slice(0, 3).map((it:any, idx:number) => (
-                      <li key={idx} className="truncate">• {it.nome}</li>
+                    {previewItems.slice(0, 3).map((itemName, idx) => (
+                      <li key={idx} className="truncate">• {itemName}</li>
                     ))}
-                    {isLote && dataLote.itens.length > 3 && (
-                      <li className="text-slate-400 italic">...e mais {dataLote.itens.length - 3} itens</li>
+                    {previewItems.length > 3 && (
+                      <li className="text-slate-400 italic">...e mais {previewItems.length - 3} itens</li>
+                    )}
+                    {!previewItems.length && !isReceiptBatch && (
+                      <li className="text-slate-400 italic">Aguardando confirmacao da exclusao segura.</li>
                     )}
                   </ul>
                 </div>

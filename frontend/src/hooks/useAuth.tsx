@@ -1,89 +1,125 @@
 import type { ReactNode } from 'react';
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
-import type { Session } from '@supabase/supabase-js';
-import { supabase } from '@/lib/supabase';
-import { localDevBypassEnabled } from '@/lib/adminApi';
+import { createContext, startTransition, useContext, useEffect, useState } from 'react';
+import { getAuthSession, localDevBypassEnabled, logoutAuthSession } from '@/lib/adminApi';
+
+type AuthUser = {
+  id: string;
+  email?: string | null;
+};
 
 type AuthContextValue = {
-  session: Session | null;
-  user: Session['user'] | undefined;
-  accessToken: string | undefined;
+  authenticated: boolean;
+  user: AuthUser | null;
+  csrfToken: string;
   loading: boolean;
   localBypass: boolean;
   signOut: () => Promise<void>;
+  refreshSession: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+function stripTokenFragment() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const hash = window.location.hash || '';
+  if (!hash.includes('access_token=') && !hash.includes('refresh_token=')) {
+    return;
+  }
+
+  const cleanUrl = `${window.location.pathname}${window.location.search}`;
+  window.history.replaceState({}, document.title, cleanUrl);
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<Session | null>(null);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [csrfToken, setCsrfToken] = useState('');
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
+  const refreshSession = async () => {
     if (localDevBypassEnabled) {
-      setSession({
-        access_token: '',
-        token_type: 'bearer',
-        expires_in: 0,
-        expires_at: 0,
-        refresh_token: '',
-        user: {
+      startTransition(() => {
+        setAuthenticated(true);
+        setUser({
           id: 'local-dev',
           email: 'local-dev@localhost',
-          aud: 'authenticated',
-          role: 'authenticated',
-          created_at: new Date().toISOString(),
-          app_metadata: {},
-          user_metadata: {},
-        },
-      } as Session);
-      setLoading(false);
+        });
+        setCsrfToken('local-dev-csrf');
+        setLoading(false);
+      });
       return;
     }
 
+    stripTokenFragment();
+
+    try {
+      const payload = await getAuthSession();
+      startTransition(() => {
+        setAuthenticated(Boolean(payload.authenticated));
+        setUser(payload.user || null);
+        setCsrfToken(payload.csrfToken || '');
+        setLoading(false);
+      });
+    } catch {
+      startTransition(() => {
+        setAuthenticated(false);
+        setUser(null);
+        setCsrfToken('');
+        setLoading(false);
+      });
+    }
+  };
+
+  useEffect(() => {
     let mounted = true;
 
-    void supabase.auth.getSession().then(({ data }) => {
+    const load = async () => {
+      await refreshSession();
       if (!mounted) {
         return;
       }
+    };
 
-      setSession(data.session);
-      setLoading(false);
-    });
+    void load();
 
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      if (!mounted) {
-        return;
-      }
-
-      setSession(nextSession);
-      setLoading(false);
-    });
+    const onFocus = () => {
+      void refreshSession();
+    };
+    window.addEventListener('focus', onFocus);
 
     return () => {
       mounted = false;
-      subscription.unsubscribe();
+      window.removeEventListener('focus', onFocus);
     };
   }, []);
 
-  const value = useMemo<AuthContextValue>(() => ({
-    session,
-    user: session?.user,
-    accessToken: session?.access_token,
-    loading,
-    localBypass: localDevBypassEnabled,
-    signOut: async () => {
-      if (localDevBypassEnabled) {
-        return;
-      }
-      await supabase.auth.signOut();
-    },
-  }), [loading, session]);
-
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider
+      value={{
+        authenticated,
+        user,
+        csrfToken,
+        loading,
+        localBypass: localDevBypassEnabled,
+        signOut: async () => {
+          if (!localDevBypassEnabled) {
+            await logoutAuthSession();
+          }
+          startTransition(() => {
+            setAuthenticated(false);
+            setUser(null);
+            setCsrfToken('');
+          });
+        },
+        refreshSession,
+      }}
+    >
+      {children}
+    </AuthContext.Provider>
+  );
 }
 
 export function useAuth() {

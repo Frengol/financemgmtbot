@@ -7,9 +7,28 @@ from quart import jsonify, request
 
 from config import ADMIN_EMAILS, ADMIN_USER_IDS, ALLOW_LOCAL_DEV_AUTH, FRONTEND_ALLOWED_ORIGINS, logger, mascarar_segredos, supabase
 from db_repository import gravar_lote_no_banco
+from security import (
+    SESSION_COOKIE_NAME,
+    build_pending_preview,
+    delete_pending_item,
+    load_pending_item,
+    pending_item_expired,
+    resolve_admin_session,
+    sanitize_plain_text,
+    validate_csrf_token,
+)
 from utils import CATEGORIA_MAP, inferir_natureza
 
 AUDIT_TABLE = "auditoria_admin"
+ALLOWED_TRANSACTION_FIELDS = {
+    "data",
+    "valor",
+    "categoria",
+    "descricao",
+    "metodo_pagamento",
+    "conta",
+    "natureza",
+}
 
 
 def _build_field_summary(payload: dict[str, Any] | None):
@@ -53,35 +72,39 @@ def _normalize_lookup(value: str):
 
 
 def autenticar_admin_request():
-    authorization = request.headers.get("Authorization", "")
-    token = authorization.removeprefix("Bearer ").strip() if authorization.startswith("Bearer ") else ""
     origin = request.headers.get("Origin", "")
     remote_addr = request.remote_addr or ""
     is_loopback = remote_addr in {"127.0.0.1", "::1", "localhost"}
     is_allowed_origin = origin in FRONTEND_ALLOWED_ORIGINS if origin else False
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
 
-    if ALLOW_LOCAL_DEV_AUTH and token == "" and (is_allowed_origin or is_loopback):
+    if ALLOW_LOCAL_DEV_AUTH and not session_token and (is_allowed_origin or is_loopback):
         return {"id": "local-dev", "email": "local-dev@localhost"}, None
 
-    if not token:
-        return None, _json_error("Missing bearer token.", 401)
+    if not session_token:
+        return None, _json_error("Missing admin session.", 401)
 
     try:
-        auth_response = supabase.auth.get_user(token)
+        session = resolve_admin_session(session_token)
     except Exception as exc:
-        logger.warning({"event": "admin_auth_failed", "error": mascarar_segredos(str(exc))})
+        logger.warning({"event": "admin_session_lookup_failed", "error": mascarar_segredos(str(exc))})
         return None, _json_error("Invalid or expired session.", 401)
 
-    user = getattr(auth_response, "user", None) if auth_response is not None else None
-    user_id, email = _extract_user_fields(user)
-    if not user_id:
-        return None, _json_error("Unable to resolve the authenticated user.", 401)
+    if not session:
+        return None, _json_error("Invalid or expired session.", 401)
 
+    user_id = session.get("user_id")
+    email = session.get("email")
     normalized_email = email.lower() if isinstance(email, str) else None
     if ADMIN_USER_IDS and user_id not in ADMIN_USER_IDS:
         return None, _json_error("Authenticated user is not allowed to access this admin route.", 403)
     if ADMIN_EMAILS and normalized_email not in ADMIN_EMAILS:
         return None, _json_error("Authenticated user is not allowed to access this admin route.", 403)
+
+    if request.method in {"POST", "PATCH", "DELETE"}:
+        csrf_token = request.headers.get("X-CSRF-Token")
+        if not validate_csrf_token(session_token, csrf_token):
+            return None, _json_error("Missing or invalid CSRF token.", 403)
 
     return {"id": user_id, "email": normalized_email}, None
 
@@ -89,6 +112,10 @@ def autenticar_admin_request():
 def _normalize_transaction_payload(payload: dict[str, Any] | None):
     if not isinstance(payload, dict):
         return None, _json_error("Invalid transaction payload.", 400)
+
+    extra_fields = sorted(set(payload.keys()) - ALLOWED_TRANSACTION_FIELDS)
+    if extra_fields:
+        return None, _json_error("Unexpected transaction fields provided.", 400)
 
     raw_date = str(payload.get("data") or "").strip()
     try:
@@ -104,7 +131,7 @@ def _normalize_transaction_payload(payload: dict[str, Any] | None):
     if normalized_value < 0:
         return None, _json_error("Transaction value must be zero or positive.", 400)
 
-    raw_description = str(payload.get("descricao") or "").strip()
+    raw_description = sanitize_plain_text(payload.get("descricao"), 250)
     if not raw_description:
         return None, _json_error("Transaction description is required.", 400)
 
@@ -119,17 +146,17 @@ def _normalize_transaction_payload(payload: dict[str, Any] | None):
         return None, _json_error("Transaction category is invalid.", 400)
 
     normalized_nature, normalized_category = inferir_natureza(canonical_category_key)
-    normalized_payment_method = str(payload.get("metodo_pagamento") or "Outros").strip() or "Outros"
-    normalized_account = str(payload.get("conta") or "Nao Informada").strip() or "Nao Informada"
+    normalized_payment_method = sanitize_plain_text(payload.get("metodo_pagamento"), 120, "Outros") or "Outros"
+    normalized_account = sanitize_plain_text(payload.get("conta"), 120, "Nao Informada") or "Nao Informada"
 
     return {
         "data": normalized_date,
         "valor": normalized_value,
         "natureza": normalized_nature,
         "categoria": normalized_category,
-        "descricao": raw_description[:250],
-        "metodo_pagamento": normalized_payment_method[:120],
-        "conta": normalized_account[:120],
+        "descricao": raw_description,
+        "metodo_pagamento": normalized_payment_method,
+        "conta": normalized_account,
     }, None
 
 
@@ -174,9 +201,9 @@ def listar_gastos_admin():
         date_to = (request.args.get("date_to") or "").strip()
 
         if date_from:
-          query = query.gte("data", date_from)
+            query = query.gte("data", date_from)
         if date_to:
-          query = query.lte("data", date_to)
+            query = query.lte("data", date_to)
 
         response = query.execute()
         return _json_success({"transactions": getattr(response, "data", [])}, 200)
@@ -191,8 +218,26 @@ def listar_cache_admin():
         return auth_error
 
     try:
-        response = supabase.table("cache_aprovacao").select("id, payload, created_at").order("created_at", desc=True).execute()
-        return _json_success({"items": getattr(response, "data", [])}, 200)
+        response = (
+            supabase
+            .table("cache_aprovacao")
+            .select("id, kind, preview_json, created_at, expires_at, payload")
+            .order("created_at", desc=True)
+            .execute()
+        )
+
+        items = []
+        for item in getattr(response, "data", []):
+            kind = item.get("kind") or ("delete_confirmation" if isinstance(item.get("payload"), dict) and isinstance(item["payload"].get("ids"), list) else "receipt_batch")
+            preview = item.get("preview_json") if isinstance(item.get("preview_json"), dict) else build_pending_preview(kind, item.get("payload"))
+            items.append({
+                "id": item.get("id"),
+                "kind": kind,
+                "created_at": item.get("created_at"),
+                "expires_at": item.get("expires_at"),
+                "preview": preview,
+            })
+        return _json_success({"items": items}, 200)
     except APIError as exc:
         logger.error({"event": "admin_list_pending_receipts_failed", "error": mascarar_segredos(str(exc))})
         return _json_error("Unable to load pending receipts right now.", 500)
@@ -265,14 +310,32 @@ def aprovar_cache_admin(cache_id: str):
         return auth_error
 
     try:
-        response = supabase.table("cache_aprovacao").select("payload").eq("id", cache_id).execute()
-        if not response.data:
+        item = load_pending_item(cache_id)
+        if not item:
             return _json_error("Pending receipt not found.", 404)
+        if pending_item_expired(item):
+            delete_pending_item(cache_id)
+            return _json_error("Pending item expired.", 410)
 
-        payload = response.data[0]["payload"]
+        payload = item.get("payload")
+        if not isinstance(payload, dict):
+            return _json_error("Pending item payload unavailable.", 500)
+
+        if item.get("kind") == "delete_confirmation":
+            ids = payload.get("ids") if isinstance(payload.get("ids"), list) else []
+            supabase.table("gastos").delete().in_("id", ids).execute()
+            delete_pending_item(cache_id)
+            registrar_auditoria_admin(
+                actor,
+                "approve_pending_delete",
+                "cache_aprovacao",
+                cache_id,
+                {"records_count": len(ids), "contains_sensitive_values": False},
+            )
+            return _json_success({"id": cache_id, "deleted_records": len(ids)}, 200)
+
         linhas, total = gravar_lote_no_banco(payload)
-        supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
-
+        delete_pending_item(cache_id)
         registrar_auditoria_admin(
             actor,
             "approve_pending_receipt",
@@ -296,11 +359,11 @@ def rejeitar_cache_admin(cache_id: str):
         return auth_error
 
     try:
-        response = supabase.table("cache_aprovacao").select("id").eq("id", cache_id).execute()
-        if not response.data:
+        item = load_pending_item(cache_id)
+        if not item:
             return _json_error("Pending receipt not found.", 404)
 
-        supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
+        delete_pending_item(cache_id)
         registrar_auditoria_admin(actor, "reject_pending_receipt", "cache_aprovacao", cache_id)
         return _json_success({"id": cache_id}, 200)
     except APIError as exc:

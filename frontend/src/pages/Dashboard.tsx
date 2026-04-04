@@ -21,7 +21,7 @@ function toMonthRange(referenceDate: Date) {
 }
 
 export default function Dashboard() {
-  const { accessToken } = useAuth();
+  const { authenticated, localBypass } = useAuth();
   const [referenceMonth, setReferenceMonth] = useState(() => startOfMonth(new Date()));
   const [dataGeral, setDataGeral] = useState({ total: 0, essencial: 0, superfluous: 0 });
   const [chartData, setChartData] = useState<Array<{ date: string; Gasto: number }>>([]);
@@ -30,9 +30,17 @@ export default function Dashboard() {
 
   useEffect(() => {
     const fetchKPIs = async () => {
+      if (!authenticated && !localBypass) {
+        setDataGeral({ total: 0, essencial: 0, superfluous: 0 });
+        setChartData([]);
+        setDonutData([]);
+        setHeatmapData([]);
+        return;
+      }
+
       try {
         const { start, end } = toMonthRange(referenceMonth);
-        const { transactions: data } = await getTransactions(accessToken || '', {
+        const { transactions: data } = await getTransactions({
           dateFrom: format(start, 'yyyy-MM-dd'),
           dateTo: format(end, 'yyyy-MM-dd'),
         });
@@ -96,7 +104,7 @@ export default function Dashboard() {
     };
 
     void fetchKPIs();
-  }, [accessToken, referenceMonth]);
+  }, [authenticated, localBypass, referenceMonth]);
 
   useEffect(() => {
     const refresh = () => {

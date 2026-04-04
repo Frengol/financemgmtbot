@@ -1,12 +1,38 @@
 import type { TransactionDraft, TransactionRecord } from '@/lib/transactions';
 
-const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
+const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 export const localDevBypassEnabled = import.meta.env.DEV && import.meta.env.VITE_LOCAL_DEV_BYPASS_AUTH === 'true';
 
-type AdminResponse<T> = {
+type ApiResponse<T> = {
   status: string;
   message?: string;
 } & T;
+
+export type AuthSessionPayload = {
+  authenticated: boolean;
+  csrfToken?: string;
+  expiresAt?: string;
+  user?: {
+    id: string;
+    email?: string | null;
+  } | null;
+};
+
+export type PendingApprovalItem = {
+  id: string;
+  kind: string;
+  created_at: string;
+  expires_at?: string;
+  preview: {
+    summary?: string;
+    metodo_pagamento?: string;
+    conta?: string;
+    itens?: string[];
+    itens_count?: number;
+    total_estimado?: number;
+    records_count?: number;
+  };
+};
 
 function buildApiUrl(path: string) {
   return `${configuredApiBaseUrl}${path}`;
@@ -21,16 +47,21 @@ async function parseError(response: Response) {
   }
 }
 
-async function adminRequest<T>(path: string, accessToken: string, init: RequestInit): Promise<AdminResponse<T>> {
+async function apiRequest<T>(path: string, init: RequestInit = {}, csrfToken?: string): Promise<ApiResponse<T>> {
   const headers = new Headers(init.headers);
-  headers.set("Content-Type", "application/json");
+  const method = (init.method || 'GET').toUpperCase();
 
-  if (accessToken) {
-    headers.set("Authorization", `Bearer ${accessToken}`);
+  if (init.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  if (csrfToken && ['POST', 'PATCH', 'DELETE'].includes(method)) {
+    headers.set('X-CSRF-Token', csrfToken);
   }
 
   const response = await fetch(buildApiUrl(path), {
     ...init,
+    credentials: 'include',
     headers,
   });
 
@@ -38,16 +69,35 @@ async function adminRequest<T>(path: string, accessToken: string, init: RequestI
     throw new Error(await parseError(response));
   }
 
-  return response.json() as Promise<AdminResponse<T>>;
+  return response.json() as Promise<ApiResponse<T>>;
 }
 
-export function deleteTransaction(accessToken: string, transactionId: string) {
-  return adminRequest<{ id: string }>(`/api/admin/gastos/${transactionId}`, accessToken, {
-    method: "DELETE",
+export function requestMagicLink(email: string, redirectTo: string) {
+  return apiRequest<{ message: string }>('/auth/magic-link', {
+    method: 'POST',
+    body: JSON.stringify({ email, redirectTo }),
   });
 }
 
-export function getTransactions(accessToken: string, params?: { dateFrom?: string; dateTo?: string }) {
+export function getAuthSession() {
+  return apiRequest<AuthSessionPayload>('/auth/session', {
+    method: 'GET',
+  });
+}
+
+export function logoutAuthSession() {
+  return apiRequest<{ loggedOut: boolean }>('/auth/logout', {
+    method: 'POST',
+  });
+}
+
+export function deleteTransaction(transactionId: string, csrfToken?: string) {
+  return apiRequest<{ id: string }>(`/api/admin/gastos/${transactionId}`, {
+    method: 'DELETE',
+  }, csrfToken);
+}
+
+export function getTransactions(params?: { dateFrom?: string; dateTo?: string }) {
   const searchParams = new URLSearchParams();
   if (params?.dateFrom) {
     searchParams.set('date_from', params.dateFrom);
@@ -57,39 +107,39 @@ export function getTransactions(accessToken: string, params?: { dateFrom?: strin
   }
 
   const suffix = searchParams.toString() ? `?${searchParams.toString()}` : '';
-  return adminRequest<{ transactions: TransactionRecord[] }>(`/api/admin/gastos${suffix}`, accessToken, {
+  return apiRequest<{ transactions: TransactionRecord[] }>(`/api/admin/gastos${suffix}`, {
     method: 'GET',
   });
 }
 
-export function createTransaction(accessToken: string, payload: TransactionDraft) {
-  return adminRequest<{ transaction: TransactionRecord }>('/api/admin/gastos', accessToken, {
+export function createTransaction(payload: TransactionDraft, csrfToken?: string) {
+  return apiRequest<{ transaction: TransactionRecord }>('/api/admin/gastos', {
     method: 'POST',
     body: JSON.stringify(payload),
-  });
+  }, csrfToken);
 }
 
-export function updateTransaction(accessToken: string, transactionId: string, payload: TransactionDraft) {
-  return adminRequest<{ transaction: TransactionRecord }>(`/api/admin/gastos/${transactionId}`, accessToken, {
+export function updateTransaction(transactionId: string, payload: TransactionDraft, csrfToken?: string) {
+  return apiRequest<{ transaction: TransactionRecord }>(`/api/admin/gastos/${transactionId}`, {
     method: 'PATCH',
     body: JSON.stringify(payload),
-  });
+  }, csrfToken);
 }
 
-export function approvePendingReceipt(accessToken: string, cacheId: string) {
-  return adminRequest<{ id: string; linhas: number; total: number }>(`/api/admin/cache-aprovacao/${cacheId}/approve`, accessToken, {
-    method: "POST",
-  });
+export function approvePendingReceipt(cacheId: string, csrfToken?: string) {
+  return apiRequest<{ id: string; linhas?: number; total?: number; deleted_records?: number }>(`/api/admin/cache-aprovacao/${cacheId}/approve`, {
+    method: 'POST',
+  }, csrfToken);
 }
 
-export function rejectPendingReceipt(accessToken: string, cacheId: string) {
-  return adminRequest<{ id: string }>(`/api/admin/cache-aprovacao/${cacheId}/reject`, accessToken, {
-    method: "POST",
-  });
+export function rejectPendingReceipt(cacheId: string, csrfToken?: string) {
+  return apiRequest<{ id: string }>(`/api/admin/cache-aprovacao/${cacheId}/reject`, {
+    method: 'POST',
+  }, csrfToken);
 }
 
-export function getPendingReceipts(accessToken: string) {
-  return adminRequest<{ items: Array<{ id: string; payload: unknown; created_at: string }> }>('/api/admin/cache-aprovacao', accessToken, {
+export function getPendingReceipts() {
+  return apiRequest<{ items: PendingApprovalItem[] }>('/api/admin/cache-aprovacao', {
     method: 'GET',
   });
 }

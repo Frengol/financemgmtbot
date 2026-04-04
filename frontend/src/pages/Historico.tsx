@@ -11,7 +11,7 @@ type Gasto = TransactionRecord;
 const columnHelper = createColumnHelper<Gasto>();
 
 export default function Historico() {
-  const { accessToken, loading, localBypass } = useAuth();
+  const { authenticated, csrfToken, loading, localBypass } = useAuth();
   const { openEdit } = useTransactionComposer();
   const [data, setData] = useState<Gasto[]>([]);
   const [globalFilter, setGlobalFilter] = useState("");
@@ -21,8 +21,14 @@ export default function Historico() {
 
   const fetchGastos = async () => {
     setFetching(true);
+    if (!authenticated && !localBypass) {
+      setData([]);
+      setFetching(false);
+      return;
+    }
+
     try {
-      const { transactions: gastos } = await getTransactions(accessToken || '');
+      const { transactions: gastos } = await getTransactions();
       setData((gastos || []).map((item) => ({
         ...item,
         natureza: normalizeNatureLabel(item.natureza),
@@ -38,7 +44,7 @@ export default function Historico() {
 
   useEffect(() => {
     void fetchGastos();
-  }, [accessToken]);
+  }, [authenticated, localBypass]);
 
   useEffect(() => {
     const refresh = () => {
@@ -47,7 +53,7 @@ export default function Historico() {
 
     window.addEventListener('transactions:changed', refresh);
     return () => window.removeEventListener('transactions:changed', refresh);
-  }, [accessToken]);
+  }, [authenticated, localBypass]);
 
   const handleDelete = async (id: string) => {
     if (confirm("Deseja mesmo excluir este registro? A ação não pode ser desfeita.")) {
@@ -56,7 +62,7 @@ export default function Historico() {
         return;
       }
 
-      if (!accessToken && !localBypass) {
+      if ((!authenticated || !csrfToken) && !localBypass) {
         setError("Nao foi possivel validar sua sessao. Entre novamente.");
         return;
       }
@@ -64,7 +70,7 @@ export default function Historico() {
       try {
         setPendingDeleteId(id);
         setError("");
-        await deleteTransaction(accessToken || '', id);
+        await deleteTransaction(id, csrfToken);
         setData((current) => current.filter((item) => item.id !== id));
         window.dispatchEvent(new CustomEvent('transactions:changed'));
       } catch (deleteError) {
@@ -122,7 +128,7 @@ export default function Historico() {
         </div>
       ),
     })
-  ], [openEdit, pendingDeleteId, accessToken, loading, localBypass]);
+  ], [authenticated, csrfToken, loading, localBypass, openEdit, pendingDeleteId]);
 
   const table = useReactTable({
     data,

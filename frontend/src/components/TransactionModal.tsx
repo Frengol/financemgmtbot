@@ -18,7 +18,7 @@ function emitTransactionsChanged() {
 }
 
 export default function TransactionModal() {
-  const { accessToken, loading: authLoading, localBypass } = useAuth();
+  const { authenticated, csrfToken, loading: authLoading, localBypass } = useAuth();
   const { close, draft, editingId, isOpen, setDraft } = useTransactionComposer();
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
@@ -50,7 +50,7 @@ export default function TransactionModal() {
       return;
     }
 
-    if (!accessToken && !localBypass) {
+    if ((!authenticated || !csrfToken) && !localBypass) {
       setError('Nao foi possivel validar sua sessao. Entre novamente.');
       return;
     }
@@ -71,9 +71,9 @@ export default function TransactionModal() {
       setError('');
 
       if (editingId) {
-        await updateTransaction(accessToken || '', editingId, payload);
+        await updateTransaction(editingId, payload, csrfToken);
       } else {
-        await createTransaction(accessToken || '', payload);
+        await createTransaction(payload, csrfToken);
       }
 
       emitTransactionsChanged();

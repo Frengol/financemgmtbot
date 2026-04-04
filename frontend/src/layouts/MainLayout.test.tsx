@@ -14,7 +14,7 @@ vi.mock('@/lib/adminApi', () => ({
 
 vi.mock('@/hooks/useAuth', () => ({
   useAuth: () => ({
-    accessToken: 'token',
+    authenticated: true,
     user: { email: 'test@example.com' },
     signOut: mockSignOut,
   }),

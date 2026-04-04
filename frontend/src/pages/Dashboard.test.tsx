@@ -27,7 +27,7 @@ vi.mock('@tremor/react', () => ({
 describe('Dashboard', () => {
   beforeEach(() => {
     mockGetTransactions.mockReset();
-    mockUseAuth.mockReturnValue({ accessToken: 'token' });
+    mockUseAuth.mockReturnValue({ authenticated: true });
   });
 
   it('loads KPI totals and chart data for the selected month', async () => {

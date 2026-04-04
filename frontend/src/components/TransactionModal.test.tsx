@@ -30,7 +30,8 @@ describe('TransactionModal', () => {
     mockClose.mockReset();
     mockSetDraft.mockReset();
     mockUseAuth.mockReturnValue({
-      accessToken: 'token',
+      authenticated: true,
+      csrfToken: 'csrf-token',
       loading: false,
       localBypass: false,
     });
@@ -66,10 +67,10 @@ describe('TransactionModal', () => {
     await userEvent.click(screen.getAllByRole('button', { name: 'Criar transacao' })[0]);
 
     await waitFor(() => {
-      expect(mockCreateTransaction).toHaveBeenCalledWith('token', expect.objectContaining({
+      expect(mockCreateTransaction).toHaveBeenCalledWith(expect.objectContaining({
         valor: 45.9,
         descricao: 'Compra inicial',
-      }));
+      }), 'csrf-token');
     });
     expect(mockClose).toHaveBeenCalled();
     expect(eventSpy).toHaveBeenCalled();
@@ -78,7 +79,8 @@ describe('TransactionModal', () => {
 
   it('shows a session validation error before saving without access token', async () => {
     mockUseAuth.mockReturnValue({
-      accessToken: '',
+      authenticated: false,
+      csrfToken: '',
       loading: false,
       localBypass: false,
     });
@@ -114,10 +116,10 @@ describe('TransactionModal', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Salvar alteracoes' }));
 
     await waitFor(() => {
-      expect(mockUpdateTransaction).toHaveBeenCalledWith('token', 'tx-2', expect.objectContaining({
+      expect(mockUpdateTransaction).toHaveBeenCalledWith('tx-2', expect.objectContaining({
         descricao: 'Cinema',
         valor: 55,
-      }));
+      }), 'csrf-token');
     });
   });
 });

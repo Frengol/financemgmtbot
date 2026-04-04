@@ -5,22 +5,24 @@ import { isAllowedAdminEmail } from '@/lib/auth';
 import { Loader2 } from 'lucide-react';
 
 export default function ProtectedRoute() {
-  const { session, loading, localBypass, signOut } = useAuth();
+  const { authenticated, loading, localBypass, signOut, user } = useAuth();
   const [revokingAccess, setRevokingAccess] = useState(false);
-  const isAuthorized = isAllowedAdminEmail(session?.user?.email);
+  const isAuthorized = isAllowedAdminEmail(user?.email);
 
   useEffect(() => {
     if (localBypass) {
       return;
     }
 
-    if (!session || isAuthorized) {
+    if (!authenticated || isAuthorized) {
       return;
     }
 
     setRevokingAccess(true);
-    void signOut();
-  }, [isAuthorized, session, signOut]);
+    void signOut().finally(() => {
+      setRevokingAccess(false);
+    });
+  }, [authenticated, isAuthorized, signOut]);
 
   if (loading || revokingAccess) {
     return (
@@ -30,7 +32,7 @@ export default function ProtectedRoute() {
     );
   }
 
-  if (!session && !localBypass) {
+  if (!authenticated && !localBypass) {
     return <Navigate to="/login" replace />;
   }
 
