@@ -1,4 +1,3 @@
-import os
 import json
 from urllib.parse import quote, urlsplit
 
@@ -13,7 +12,7 @@ from admin_api import (
     listar_gastos_admin,
     rejeitar_cache_admin,
 )
-from config import ADMIN_EMAILS, ADMIN_USER_IDS, FRONTEND_ALLOWED_ORIGINS, SECRET_TOKEN, logger, mascarar_segredos, normalize_frontend_origin, supabase
+from config import ADMIN_EMAILS, ADMIN_USER_IDS, AUTH_CALLBACK_PUBLIC_URL, FRONTEND_ALLOWED_ORIGINS, FRONTEND_PUBLIC_URL, SECRET_TOKEN, logger, mascarar_segredos, normalize_frontend_origin, supabase
 from handlers import processar_update_assincrono
 from security import (
     CSRF_COOKIE_NAME,
@@ -75,6 +74,36 @@ def _origin_allowed(origin: str):
     return origin in FRONTEND_ALLOWED_ORIGINS or "*" in FRONTEND_ALLOWED_ORIGINS
 
 
+def _is_loopback_url(url: str):
+    parsed = urlsplit((url or "").strip())
+    return parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+
+
+def _is_loopback_request():
+    return _is_loopback_url(request.url_root)
+
+
+def _default_frontend_public_url():
+    if FRONTEND_PUBLIC_URL:
+        return FRONTEND_PUBLIC_URL
+    if _is_loopback_request():
+        return "http://localhost:5173/"
+    raise RuntimeError("Missing FRONTEND_PUBLIC_URL for public auth redirects.")
+
+
+def _default_auth_callback_public_url():
+    if AUTH_CALLBACK_PUBLIC_URL:
+        return AUTH_CALLBACK_PUBLIC_URL
+    if _is_loopback_request():
+        return request.url_root.rstrip("/") + "/auth/callback"
+    raise RuntimeError("Missing AUTH_CALLBACK_PUBLIC_URL for public auth redirects.")
+
+
+def _auth_redirect_config_error(exc: Exception):
+    logger.error({"event": "auth_redirect_configuration_invalid", "error": mascarar_segredos(str(exc))})
+    return _json_error("Auth redirect configuration is invalid.", 500)
+
+
 def _set_session_cookies(response, session_token: str, csrf_token: str):
     secure_cookie = request.scheme == "https"
     cookie_settings = {
@@ -112,21 +141,23 @@ def _is_magic_link_email_allowed(email: str | None):
 
 
 def _sanitize_frontend_redirect_target(candidate: str | None):
+    default_target = _default_frontend_public_url()
     raw_value = (candidate or "").strip()
-    if raw_value:
-        parsed = urlsplit(raw_value)
-        if parsed.scheme in {"http", "https"} and normalize_frontend_origin(raw_value) in FRONTEND_ALLOWED_ORIGINS:
+    if not raw_value:
+        return default_target
+
+    parsed = urlsplit(raw_value)
+    if parsed.scheme in {"http", "https"}:
+        if normalize_frontend_origin(raw_value) == normalize_frontend_origin(default_target):
+            return raw_value
+        if not FRONTEND_PUBLIC_URL and _is_loopback_request() and _is_loopback_url(raw_value):
             return raw_value
 
-    if FRONTEND_ALLOWED_ORIGINS:
-        default_origin = sorted(FRONTEND_ALLOWED_ORIGINS)[0]
-        return f"{default_origin}/"
-
-    return "http://localhost:5173/"
+    return default_target
 
 
 def _build_callback_url(frontend_redirect: str):
-    callback_base = request.url_root.rstrip("/") + "/auth/callback"
+    callback_base = _default_auth_callback_public_url()
     return f"{callback_base}?next={quote(frontend_redirect, safe='')}"
 
 
@@ -219,7 +250,11 @@ async def auth_magic_link():
 
     payload = await request.get_json(silent=True) or {}
     email = sanitize_plain_text(payload.get("email"), 160).lower()
-    redirect_to = _sanitize_frontend_redirect_target(payload.get("redirectTo"))
+    try:
+        redirect_to = _sanitize_frontend_redirect_target(payload.get("redirectTo"))
+        callback_url = _build_callback_url(redirect_to)
+    except RuntimeError as exc:
+        return _auth_redirect_config_error(exc)
     remote_addr = request.remote_addr or "unknown"
 
     rate_limited = _rate_limited("auth_magic_link", f"{remote_addr}:{email}", limit=5, window_seconds=300)
@@ -231,7 +266,7 @@ async def auth_magic_link():
             supabase.auth.sign_in_with_otp({
                 "email": email,
                 "options": {
-                    "email_redirect_to": _build_callback_url(redirect_to),
+                    "email_redirect_to": callback_url,
                 },
             })
         except Exception as exc:
@@ -251,7 +286,10 @@ async def auth_callback():
         return rate_limited
 
     if request.method == "GET":
-        redirect_to = _sanitize_frontend_redirect_target(request.args.get("next"))
+        try:
+            redirect_to = _sanitize_frontend_redirect_target(request.args.get("next"))
+        except RuntimeError as exc:
+            return _auth_redirect_config_error(exc)
         token_hash = (request.args.get("token_hash") or "").strip()
         otp_type = (request.args.get("type") or "").strip()
         if not token_hash or not otp_type:
@@ -272,7 +310,10 @@ async def auth_callback():
 
     payload = await request.get_json(silent=True) or {}
     access_token = str(payload.get("access_token") or "").strip()
-    redirect_to = _sanitize_frontend_redirect_target(payload.get("redirectTo") or request.args.get("next"))
+    try:
+        redirect_to = _sanitize_frontend_redirect_target(payload.get("redirectTo") or request.args.get("next"))
+    except RuntimeError as exc:
+        return _auth_redirect_config_error(exc)
     if not access_token:
         return _json_error("Missing access token.", 400)
 

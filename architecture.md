@@ -157,6 +157,8 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `GEMINI_API_KEY`
   - `SUPABASE_ADMIN_EMAILS` e/ou `SUPABASE_ADMIN_USER_IDS`
   - `FRONTEND_ALLOWED_ORIGINS`
+  - `FRONTEND_PUBLIC_URL`
+  - `AUTH_CALLBACK_PUBLIC_URL`
   - opcionalmente `APP_SESSION_SECRET`
   - opcionalmente `DATA_ENCRYPTION_KEY`
   - opcionalmente `ALLOW_LOCAL_DEV_AUTH` apenas fora de produção
@@ -172,6 +174,8 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `BASE_URL=/financemgmtbot/`
   - chamadas administrativas apontam para o Cloud Run público
   - login oficial via backend `/auth/magic-link`
+  - o backend constrói `email_redirect_to` do Supabase usando `AUTH_CALLBACK_PUBLIC_URL`
+  - o fallback seguro de retorno do painel usa `FRONTEND_PUBLIC_URL`, nunca `localhost`
   - a SPA não manipula mais `access_token`/`refresh_token` do Supabase nem depende de cliente Supabase embarcado no bundle
 * A SPA usa `code splitting` por rota e por dependência pesada de frontend, carregando `Dashboard`, `Histórico`, `Aprovações`, `Login` e o modal transacional sob demanda, com `manualChunks` dedicados para gráficos, tabela e vendor base.
 * Em telas mobile, o layout principal expõe um acionador discreto no canto superior esquerdo que abre um drawer lateral esquerdo com a navegação entre Dashboard, Aprovações e Histórico, preservando o menu fixo em desktop.

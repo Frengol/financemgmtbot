@@ -1223,6 +1223,8 @@ class TestTelegramWebhook:
 # ============================================================
 class TestAdminRoutes:
     def _mock_admin_user(self, email="admin@example.com", user_id="user-1"):
+        self._mocked_admin_email = email
+        self._mocked_admin_user_id = user_id
         mock_user = MagicMock()
         mock_user.id = user_id
         mock_user.email = email
@@ -1236,17 +1238,20 @@ class TestAdminRoutes:
             "session_id_hash": "session-hash",
             "user_id": user_id,
             "email": email,
-            "created_at": "2026-04-03T10:00:00",
-            "last_seen_at": "2026-04-03T10:00:00",
+            "created_at": "2099-04-03T10:00:00",
+            "last_seen_at": "2099-04-03T10:00:00",
             "expires_at": expires_at,
             "revoked_at": None,
         }
 
     async def _authenticate_session(self, client, redirect_to="http://localhost:5173/"):
-        response = await client.post(
-            "/auth/callback",
-            json={"access_token": "valid-access-token", "redirectTo": redirect_to},
-        )
+        allowed_email = getattr(self, "_mocked_admin_email", "admin@example.com")
+        allowed_user_id = getattr(self, "_mocked_admin_user_id", "user-1")
+        with patch.object(main, "ADMIN_EMAILS", frozenset({allowed_email})), patch.object(main, "ADMIN_USER_IDS", frozenset({allowed_user_id})):
+            response = await client.post(
+                "/auth/callback",
+                json={"access_token": "valid-access-token", "redirectTo": redirect_to},
+            )
         assert response.status_code == 200
         payload = await response.get_json()
         return payload["csrfToken"]
@@ -1256,10 +1261,11 @@ class TestAdminRoutes:
         config.supabase.auth.sign_in_with_otp = MagicMock()
 
         async with main.app.test_client() as client:
-            resp = await client.post(
-                "/auth/magic-link",
-                json={"email": "admin@example.com", "redirectTo": "http://localhost:5173/"},
-            )
+            with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), patch.object(main, "AUTH_CALLBACK_PUBLIC_URL", "https://api.example.com/auth/callback"), patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})), patch.object(main, "ADMIN_USER_IDS", frozenset({"user-1"})):
+                resp = await client.post(
+                    "/auth/magic-link",
+                    json={"email": "admin@example.com", "redirectTo": "https://admin.example.com/app/login"},
+                )
 
         assert resp.status_code == 200
         payload = await resp.get_json()
@@ -1268,7 +1274,23 @@ class TestAdminRoutes:
         config.supabase.auth.sign_in_with_otp.assert_called_once()
         sent_payload = config.supabase.auth.sign_in_with_otp.call_args.args[0]
         assert sent_payload["email"] == "admin@example.com"
-        assert "/auth/callback" in sent_payload["options"]["email_redirect_to"]
+        assert sent_payload["options"]["email_redirect_to"] == "https://api.example.com/auth/callback?next=https%3A%2F%2Fadmin.example.com%2Fapp%2Flogin"
+
+    @pytest.mark.asyncio
+    async def test_auth_magic_link_invalid_public_redirect_falls_back_to_frontend_public_url(self):
+        config.supabase.auth.sign_in_with_otp = MagicMock()
+
+        async with main.app.test_client() as client:
+            with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), patch.object(main, "AUTH_CALLBACK_PUBLIC_URL", "https://api.example.com/auth/callback"), patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})), patch.object(main, "ADMIN_USER_IDS", frozenset({"user-1"})):
+                resp = await client.post(
+                    "/auth/magic-link",
+                    json={"email": "admin@example.com", "redirectTo": "http://localhost:3000/"},
+                )
+
+        assert resp.status_code == 200
+        sent_payload = config.supabase.auth.sign_in_with_otp.call_args.args[0]
+        assert "localhost" not in sent_payload["options"]["email_redirect_to"]
+        assert sent_payload["options"]["email_redirect_to"] == "https://api.example.com/auth/callback?next=https%3A%2F%2Fadmin.example.com%2Fapp%2F"
 
     @pytest.mark.asyncio
     async def test_auth_callback_creates_cookie_session_and_session_endpoint_resolves_user(self):
@@ -1289,13 +1311,14 @@ class TestAdminRoutes:
         config.supabase.table = MagicMock(side_effect=table_switch)
 
         async with main.app.test_client() as client:
-            callback_resp = await client.post(
-                "/auth/callback",
-                json={"access_token": "valid-access-token", "redirectTo": "http://localhost:5173/"},
-            )
+            with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})), patch.object(main, "ADMIN_USER_IDS", frozenset({"user-1"})):
+                callback_resp = await client.post(
+                    "/auth/callback",
+                    json={"access_token": "valid-access-token", "redirectTo": "https://admin.example.com/app/"},
+                )
             assert callback_resp.status_code == 200
             callback_payload = await callback_resp.get_json()
-            assert callback_payload["redirectTo"] == "http://localhost:5173/"
+            assert callback_payload["redirectTo"] == "https://admin.example.com/app/"
             assert callback_payload["csrfToken"]
             assert "fm_admin_session=" in callback_resp.headers["Set-Cookie"]
 
@@ -2017,10 +2040,10 @@ class TestAdminRoutesAdditional:
         config.supabase.auth.sign_in_with_otp = MagicMock()
 
         async with main.app.test_client() as client:
-            with patch.object(main, "ADMIN_EMAILS", frozenset({"allowed@example.com"})):
+            with patch.object(main, "ADMIN_EMAILS", frozenset({"allowed@example.com"})), patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), patch.object(main, "AUTH_CALLBACK_PUBLIC_URL", "https://api.example.com/auth/callback"):
                 resp = await client.post(
                     "/auth/magic-link",
-                    json={"email": "blocked@example.com", "redirectTo": "http://localhost:5173/"},
+                    json={"email": "blocked@example.com", "redirectTo": "https://admin.example.com/app/"},
                 )
 
         assert resp.status_code == 200
@@ -2031,13 +2054,15 @@ class TestAdminRoutesAdditional:
     @pytest.mark.asyncio
     async def test_auth_callback_get_without_token_hash_returns_bridge_html(self):
         async with main.app.test_client() as client:
-            resp = await client.get("/auth/callback?next=http://localhost:5173/")
+            with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"):
+                resp = await client.get("/auth/callback")
 
         body = (await resp.get_data()).decode("utf-8")
         assert resp.status_code == 200
         assert resp.mimetype == "text/html"
         assert "Finalizing secure sign-in" in body
         assert "history.replaceState" in body
+        assert "https://admin.example.com/app/" in body
         assert resp.headers["Cache-Control"] == "no-store, private"
 
     @pytest.mark.asyncio
@@ -2048,22 +2073,36 @@ class TestAdminRoutesAdditional:
         config.supabase.auth.verify_otp = MagicMock(return_value=unauthorized_user)
 
         async with main.app.test_client() as client:
-            with patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})):
+            with patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})), patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"):
                 resp = await client.get(
-                    "/auth/callback?token_hash=fakehash&type=magiclink&next=http://localhost:5173/",
+                    "/auth/callback?token_hash=fakehash&type=magiclink",
                 )
 
         assert resp.status_code == 302
-        assert resp.headers["Location"].endswith("/login?reason=unauthorized")
+        assert resp.headers["Location"] == "https://admin.example.com/app/login?reason=unauthorized"
 
     @pytest.mark.asyncio
     async def test_auth_callback_post_requires_access_token(self):
         async with main.app.test_client() as client:
-            resp = await client.post("/auth/callback", json={"redirectTo": "http://localhost:5173/"})
+            with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"):
+                resp = await client.post("/auth/callback", json={"redirectTo": "https://admin.example.com/app/"})
 
         assert resp.status_code == 400
         payload = await resp.get_json()
         assert payload["message"] == "Missing access token."
+
+    @pytest.mark.asyncio
+    async def test_auth_routes_fail_explicitly_without_public_urls_outside_localhost(self):
+        async with main.app.test_client() as client:
+            with patch.object(main, "FRONTEND_PUBLIC_URL", ""), patch.object(main, "AUTH_CALLBACK_PUBLIC_URL", ""), patch.object(main, "_is_loopback_request", return_value=False):
+                resp = await client.post(
+                    "/auth/magic-link",
+                    json={"email": "admin@example.com", "redirectTo": "https://admin.example.com/app/"},
+                )
+
+        assert resp.status_code == 500
+        payload = await resp.get_json()
+        assert payload["message"] == "Auth redirect configuration is invalid."
 
     @pytest.mark.asyncio
     async def test_auth_logout_clears_cookies_even_when_revoke_fails(self):

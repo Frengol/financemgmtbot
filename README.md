@@ -5,6 +5,8 @@
 Backend local:
 - create `.env` based on `.env.example`
 - fill the required secrets before starting `main.py`
+- set `FRONTEND_PUBLIC_URL` to the published frontend URL in production
+- set `AUTH_CALLBACK_PUBLIC_URL` to the public backend callback URL in production
 
 Frontend local:
 - create `frontend/.env.development` based on `frontend/.env.development.example`
@@ -15,6 +17,11 @@ GitHub Pages:
 - set `VITE_API_BASE_URL` only after you have a public backend URL; GitHub Pages cannot run the Python backend by itself
 - prefer GitHub Actions `Variables` for `VITE_API_BASE_URL`, and use a GitHub Actions `Secret` with the same name as fallback if your repository policy blocks Variables
 - production builds now fail fast with `npm run verify:build-env` when `VITE_API_BASE_URL` is missing or not an absolute `http(s)` URL
+
+Supabase Auth:
+- in `Authentication -> URL Configuration`, set `Site URL` to your public backend callback, for example `https://api.example.com/auth/callback`
+- add both the backend callback URL and the published frontend URL to `Redirect URLs`
+- do not leave `localhost` as the production Site URL, or Supabase can generate expired/invalid links pointing at a local address
 
 ## Deployment model
 
