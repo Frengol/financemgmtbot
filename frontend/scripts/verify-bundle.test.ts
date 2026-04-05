@@ -25,36 +25,42 @@ afterEach(() => {
 });
 
 describe('verifyBundleDirectory', () => {
-  it('accepts a bundle that keeps cookie auth and CSRF without legacy browser auth', () => {
+  it('accepts a bundle that keeps Supabase browser auth and bearer transport', () => {
     const dir = createBundleDir(`
-      fetch('/api/admin/gastos', { credentials: 'include', headers: { 'X-CSRF-Token': 'csrf' } });
+      const storageKey = 'financemgmtbot-admin-auth';
+      supabase.auth.setSession({ access_token: 'token', refresh_token: 'refresh' });
+      fetch('/api/admin/gastos', { headers: { Authorization: 'Bearer abc' } });
     `);
 
     expect(verifyBundleDirectory(dir)).toBe(2);
   });
 
-  it('rejects a bundle that reintroduces Authorization headers', () => {
+  it('rejects a bundle that loses bearer token transport', () => {
     const dir = createBundleDir(`
-      fetch('/api/admin/gastos', { credentials: 'include', headers: { Authorization: 'Bearer abc', 'X-CSRF-Token': 'csrf' } });
+      const storageKey = 'financemgmtbot-admin-auth';
+      supabase.auth.setSession({ access_token: 'token', refresh_token: 'refresh' });
+      fetch('/api/admin/gastos');
     `);
 
-    expect(() => verifyBundleDirectory(dir)).toThrow(/legacy Authorization header usage/i);
+    expect(() => verifyBundleDirectory(dir)).toThrow(/bearer authorization transport/i);
   });
 
-  it('rejects a bundle that loses cookie credentials', () => {
+  it('rejects a bundle that loses Supabase browser session bootstrap', () => {
     const dir = createBundleDir(`
-      fetch('/api/admin/gastos', { headers: { 'X-CSRF-Token': 'csrf' } });
+      fetch('/api/admin/gastos', { headers: { Authorization: 'Bearer abc' } });
     `);
 
-    expect(() => verifyBundleDirectory(dir)).toThrow(/cookie-based credentials enabled/i);
+    expect(() => verifyBundleDirectory(dir)).toThrow(/Supabase browser session storage key/i);
   });
 
-  it('rejects a bundle that bootstraps a Supabase browser client again', () => {
+  it('does not fail only because legacy compatibility strings still exist in the bundle', () => {
     const dir = createBundleDir(`
-      createClient('https://your-project-ref.supabase.co', 'anon-key');
+      const storageKey = 'financemgmtbot-admin-auth';
+      supabase.auth.setSession({ access_token: 'token', refresh_token: 'refresh' });
       fetch('/api/admin/gastos', { credentials: 'include', headers: { 'X-CSRF-Token': 'csrf' } });
+      fetch('/api/admin/gastos', { headers: { Authorization: 'Bearer abc' } });
     `);
 
-    expect(() => verifyBundleDirectory(dir)).toThrow(/Supabase client bootstrap/i);
+    expect(verifyBundleDirectory(dir)).toBe(2);
   });
 });

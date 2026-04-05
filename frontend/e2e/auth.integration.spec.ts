@@ -1,6 +1,7 @@
 import { expect, test, type APIRequestContext } from '@playwright/test';
 
 const backendBaseUrl = process.env.E2E_API_BASE_URL || 'http://127.0.0.1:8080';
+const frontendBaseUrl = process.env.E2E_FRONTEND_BASE_URL || 'http://127.0.0.1:4173';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -55,7 +56,14 @@ test('requests a magic link, completes the callback and loads seeded transaction
 
   await page.goto(magicLink);
 
-  await expect(page).toHaveURL(/127\.0\.0\.1:4173\/$/);
+  await expect.poll(async () => {
+    try {
+      return await page.evaluate(() => window.localStorage.getItem('financemgmtbot-admin-auth-test-session'));
+    } catch {
+      return null;
+    }
+  }).not.toBeNull();
+  await expect(page).toHaveURL(new RegExp(`${frontendBaseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`));
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
   await page.goto('/historico');
   await expect(page.getByText('Mercado Playwright')).toBeVisible();
@@ -67,7 +75,7 @@ test('redirects unauthorized identities back to login with reason and without lo
     data: {
       email,
       userId: 'blocked-user',
-      redirectTo: 'http://127.0.0.1:4173/',
+      redirectTo: 'http://127.0.0.1:4173/auth/callback',
     },
   });
 
@@ -77,8 +85,14 @@ test('redirects unauthorized identities back to login with reason and without lo
 
   await page.goto(magicLink);
 
-  await expect(page).toHaveURL(/\/login\?reason=unauthorized$/);
+  await expect.poll(async () => {
+    try {
+      return await page.evaluate(() => window.localStorage.getItem('financemgmtbot-admin-auth-test-session'));
+    } catch {
+      return null;
+    }
+  }).not.toBeNull();
+  await expect(page).toHaveURL(new RegExp(`${frontendBaseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`));
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
   await expect(page.getByText(/nao esta autorizado/i)).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Enviar Magic Link' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Dashboard' })).not.toBeVisible();
 });

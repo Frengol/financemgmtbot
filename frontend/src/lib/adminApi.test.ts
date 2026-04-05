@@ -13,14 +13,21 @@ import {
 } from './adminApi';
 
 const fetchMock = vi.fn();
+const mockGetAccessToken = vi.fn();
+
+vi.mock('@/lib/supabase', () => ({
+  getAccessToken: (...args: unknown[]) => mockGetAccessToken(...args),
+}));
 
 describe('adminApi', () => {
   beforeEach(() => {
     fetchMock.mockReset();
+    mockGetAccessToken.mockReset();
     vi.stubGlobal('fetch', fetchMock);
   });
 
-  it('sends browser credentials and query parameters for transaction listing', async () => {
+  it('sends bearer auth and query parameters for transaction listing', async () => {
+    mockGetAccessToken.mockResolvedValue('token-123');
     fetchMock.mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({ status: 'ok', transactions: [] }),
@@ -31,12 +38,13 @@ describe('adminApi', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('/api/admin/gastos?date_from=2026-04-01&date_to=2026-04-30');
-    expect(init.credentials).toBe('include');
     expect(init.method).toBe('GET');
-    expect(new Headers(init.headers).has('Authorization')).toBe(false);
+    expect(init.credentials).toBeUndefined();
+    expect(new Headers(init.headers).get('Authorization')).toBe('Bearer token-123');
   });
 
-  it('adds JSON and CSRF headers for mutating admin requests', async () => {
+  it('adds JSON and bearer headers for mutating admin requests', async () => {
+    mockGetAccessToken.mockResolvedValue('token-456');
     fetchMock.mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({ status: 'ok', transaction: { id: 'tx-1' } }),
@@ -55,10 +63,10 @@ describe('adminApi', () => {
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     const headers = new Headers(init.headers);
     expect(init.method).toBe('POST');
-    expect(init.credentials).toBe('include');
+    expect(init.credentials).toBeUndefined();
     expect(headers.get('Content-Type')).toBe('application/json');
-    expect(headers.get('X-CSRF-Token')).toBe('csrf-token');
-    expect(headers.has('Authorization')).toBe(false);
+    expect(headers.get('Authorization')).toBe('Bearer token-456');
+    expect(headers.has('X-CSRF-Token')).toBe(false);
   });
 
   it('surfaces backend error messages for failed requests', async () => {
@@ -135,6 +143,7 @@ describe('adminApi', () => {
   });
 
   it('keeps the auth endpoints on the same origin and includes the JSON payload', async () => {
+    mockGetAccessToken.mockResolvedValue('token-123');
     fetchMock.mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({ status: 'ok', message: 'sent', loggedOut: true }),
@@ -152,9 +161,12 @@ describe('adminApi', () => {
     expect(logoutInit.method).toBe('POST');
     expect(new Headers(magicInit.headers).has('Authorization')).toBe(false);
     expect(new Headers(logoutInit.headers).has('Authorization')).toBe(false);
+    expect(magicInit.credentials).toBe('include');
+    expect(logoutInit.credentials).toBe('include');
   });
 
-  it('covers the remaining admin methods with credentials and csrf tokens', async () => {
+  it('covers the remaining admin methods with bearer auth', async () => {
+    mockGetAccessToken.mockResolvedValue('token-789');
     fetchMock
       .mockResolvedValueOnce({
         ok: true,
@@ -182,7 +194,33 @@ describe('adminApi', () => {
     expect(fetchMock.mock.calls[1][0]).toBe('/api/admin/cache-aprovacao');
     expect(fetchMock.mock.calls[2][0]).toBe('/api/admin/cache-aprovacao/pending-1/approve');
     expect(fetchMock.mock.calls[3][0]).toBe('/api/admin/cache-aprovacao/pending-2/reject');
-    expect(new Headers(fetchMock.mock.calls[2][1].headers).get('X-CSRF-Token')).toBe('csrf-1');
-    expect(new Headers(fetchMock.mock.calls[3][1].headers).get('X-CSRF-Token')).toBe('csrf-2');
+    expect(new Headers(fetchMock.mock.calls[2][1].headers).get('Authorization')).toBe('Bearer token-789');
+    expect(new Headers(fetchMock.mock.calls[3][1].headers).get('Authorization')).toBe('Bearer token-789');
+    expect(new Headers(fetchMock.mock.calls[2][1].headers).has('X-CSRF-Token')).toBe(false);
+    expect(new Headers(fetchMock.mock.calls[3][1].headers).has('X-CSRF-Token')).toBe(false);
+  });
+
+  it('falls back to cookie csrf transport when no bearer token is available', async () => {
+    mockGetAccessToken.mockResolvedValue(null);
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({ status: 'ok', transaction: { id: 'tx-1' } }),
+    });
+
+    await updateTransaction('tx-1', {
+      data: '2026-04-03',
+      natureza: 'Essencial',
+      categoria: 'Mercado',
+      descricao: 'Compra',
+      valor: 10,
+      conta: 'Nubank',
+      metodo_pagamento: 'Pix',
+    }, 'csrf-token');
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(init.credentials).toBe('include');
+    expect(headers.get('X-CSRF-Token')).toBe('csrf-token');
+    expect(headers.has('Authorization')).toBe(false);
   });
 });

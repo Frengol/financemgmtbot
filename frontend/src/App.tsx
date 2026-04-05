@@ -10,6 +10,7 @@ const Dashboard = lazy(() => import("./pages/Dashboard"));
 const Aprovacoes = lazy(() => import("./pages/Aprovacoes"));
 const Historico = lazy(() => import("./pages/Historico"));
 const Login = lazy(() => import("./pages/Login"));
+const AuthCallback = lazy(() => import("./pages/AuthCallback"));
 const ProtectedRoute = lazy(() => import("./components/ProtectedRoute"));
 
 function RouteFallback() {
@@ -30,6 +31,7 @@ export default function App() {
           <Suspense fallback={<RouteFallback />}>
             <Routes>
               <Route path="/login" element={<Login />} />
+              <Route path="/auth/callback" element={<AuthCallback />} />
               
               <Route element={<ProtectedRoute />}>
                 <Route path="/" element={<MainLayout />}>

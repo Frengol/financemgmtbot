@@ -1,12 +1,19 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const e2eBackendPort = Number(process.env.E2E_BACKEND_PORT || '8080');
+const e2eFrontendPort = Number(process.env.E2E_FRONTEND_PORT || '4173');
+const e2eBackendBaseUrl = `http://127.0.0.1:${e2eBackendPort}`;
+const e2eFrontendBaseUrl = `http://127.0.0.1:${e2eFrontendPort}`;
+const reuseExistingServer = !process.env.CI && process.env.E2E_FORCE_FRESH_SERVERS !== 'true';
+
 export default defineConfig({
   testDir: './e2e',
-  fullyParallel: true,
+  fullyParallel: false,
+  workers: 2,
   retries: process.env.CI ? 1 : 0,
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
-    baseURL: 'http://127.0.0.1:4173',
+    baseURL: e2eFrontendBaseUrl,
     trace: 'retain-on-failure',
   },
   webServer: [
@@ -15,7 +22,7 @@ export default defineConfig({
       cwd: '..',
       env: {
         ...process.env,
-        PORT: '8080',
+        PORT: String(e2eBackendPort),
         AUTH_TEST_MODE: 'true',
         TELEGRAM_BOT_TOKEN: 'test-telegram-token',
         TELEGRAM_SECRET_TOKEN: 'test-telegram-secret',
@@ -25,24 +32,27 @@ export default defineConfig({
         GROQ_API_KEY: 'test-groq-key',
         GEMINI_API_KEY: 'test-gemini-key',
         SUPABASE_ADMIN_EMAILS: 'admin@example.com,admin+chromium@example.com,admin+firefox@example.com',
-        FRONTEND_ALLOWED_ORIGINS: 'http://127.0.0.1:4173,http://localhost:4173',
-        FRONTEND_PUBLIC_URL: 'http://127.0.0.1:4173/',
-        AUTH_CALLBACK_PUBLIC_URL: 'http://127.0.0.1:8080/auth/callback',
+        FRONTEND_ALLOWED_ORIGINS: `${e2eFrontendBaseUrl},http://localhost:${e2eFrontendPort}`,
+        FRONTEND_PUBLIC_URL: `${e2eFrontendBaseUrl}/`,
+        AUTH_CALLBACK_PUBLIC_URL: `${e2eBackendBaseUrl}/auth/callback`,
         PYTHONUNBUFFERED: '1',
       },
-      port: 8080,
-      reuseExistingServer: !process.env.CI,
+      port: e2eBackendPort,
+      reuseExistingServer,
       timeout: 120_000,
     },
     {
-      command: 'npm run dev -- --host 127.0.0.1 --port 4173',
+      command: `npm run dev -- --host 127.0.0.1 --port ${e2eFrontendPort}`,
       env: {
         ...process.env,
-        VITE_API_BASE_URL: 'http://127.0.0.1:8080',
+        VITE_API_BASE_URL: e2eBackendBaseUrl,
+        VITE_SUPABASE_URL: 'https://your-project-ref.supabase.co',
+        VITE_SUPABASE_ANON_KEY: 'public-anon-key',
+        VITE_ALLOWED_ADMIN_EMAILS: 'admin@example.com,admin+chromium@example.com,admin+firefox@example.com',
         VITE_LOCAL_DEV_BYPASS_AUTH: 'false',
       },
-      port: 4173,
-      reuseExistingServer: !process.env.CI,
+      port: e2eFrontendPort,
+      reuseExistingServer,
       timeout: 120_000,
     },
   ],

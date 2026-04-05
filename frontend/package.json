@@ -17,6 +17,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.101.1",
     "@tanstack/react-table": "^8.11.8",
     "@tremor/react": "^3.13.4",
     "class-variance-authority": "^0.7.0",

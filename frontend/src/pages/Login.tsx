@@ -3,7 +3,7 @@ import { Activity, Mail, Loader2, CheckCircle2 } from 'lucide-react';
 import { localDevBypassEnabled, requestMagicLink } from '@/lib/adminApi';
 
 export default function Login() {
-  const redirectTarget = new URL(import.meta.env.BASE_URL, window.location.origin).toString();
+  const redirectTarget = new URL('auth/callback', new URL(import.meta.env.BASE_URL, window.location.origin)).toString();
   const searchParams = new URLSearchParams(window.location.search);
   const reason = searchParams.get('reason');
   const requestId = searchParams.get('requestId');

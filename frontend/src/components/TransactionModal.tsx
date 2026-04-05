@@ -50,7 +50,7 @@ export default function TransactionModal() {
       return;
     }
 
-    if ((!authenticated || !csrfToken) && !localBypass) {
+    if (!authenticated && !localBypass) {
       setError('Nao foi possivel validar sua sessao. Entre novamente.');
       return;
     }

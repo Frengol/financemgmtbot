@@ -18,7 +18,7 @@ from security import (
     sanitize_plain_text,
     validate_csrf_token,
 )
-from test_support import auth_test_mode_enabled, list_seeded_transactions
+from test_support import auth_test_mode_enabled, list_seeded_transactions, resolve_test_access_token
 from utils import CATEGORIA_MAP, inferir_natureza
 
 AUDIT_TABLE = "auditoria_admin"
@@ -66,7 +66,27 @@ def _extract_user_fields(user: Any):
     if isinstance(user, dict):
         return user.get("id"), user.get("email")
 
+    attributes = getattr(user, "__dict__", {})
+    user_id = attributes.get("id")
+    email = attributes.get("email")
+    if user_id is not None or email is not None:
+        return user_id, email
+
+    nested_user = attributes.get("user")
+    if nested_user is not None and nested_user is not user:
+        return _extract_user_fields(nested_user)
+
     return getattr(user, "id", None), getattr(user, "email", None)
+
+
+def _extract_bearer_token():
+    authorization = sanitize_plain_text(request.headers.get("Authorization"), 400)
+    if not authorization:
+        return None
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return None
+    return token.strip()
 
 
 def _normalize_lookup(value: str):
@@ -81,6 +101,29 @@ def autenticar_admin_request():
     is_loopback = remote_addr in {"127.0.0.1", "::1", "localhost"}
     is_allowed_origin = origin in FRONTEND_ALLOWED_ORIGINS if origin else False
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    bearer_token = _extract_bearer_token()
+
+    if bearer_token:
+        try:
+            if auth_test_mode_enabled():
+                auth_user = resolve_test_access_token(bearer_token)
+                if not auth_user:
+                    raise ValueError("Invalid test bearer token.")
+                user_id, email = _extract_user_fields(auth_user)
+            else:
+                auth_response = supabase.auth.get_user(bearer_token)
+                user_id, email = _extract_user_fields(getattr(auth_response, "user", auth_response))
+        except Exception as exc:
+            logger.warning(with_request_id({"event": "admin_bearer_auth_failed", "error": mascarar_segredos(str(exc))}))
+            return None, _json_error("Invalid or expired session.", 401, code="AUTH_SESSION_INVALID")
+
+        normalized_email = email.lower() if isinstance(email, str) else None
+        if ADMIN_USER_IDS and user_id not in ADMIN_USER_IDS:
+            return None, _json_error("Authenticated user is not allowed to access this admin route.", 403, code="AUTH_ACCESS_DENIED")
+        if ADMIN_EMAILS and normalized_email not in ADMIN_EMAILS:
+            return None, _json_error("Authenticated user is not allowed to access this admin route.", 403, code="AUTH_ACCESS_DENIED")
+
+        return {"id": user_id, "email": normalized_email}, None
 
     if ALLOW_LOCAL_DEV_AUTH and not session_token and (is_allowed_origin or is_loopback):
         return {"id": "local-dev", "email": "local-dev@localhost"}, None

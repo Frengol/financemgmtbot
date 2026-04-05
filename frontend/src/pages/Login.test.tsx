@@ -34,7 +34,7 @@ describe('Login', () => {
     await waitFor(() => {
       expect(mockRequestMagicLink).toHaveBeenCalledWith(
         'admin@example.com',
-        new URL(import.meta.env.BASE_URL, window.location.origin).toString(),
+        new URL('auth/callback', new URL(import.meta.env.BASE_URL, window.location.origin)).toString(),
       );
     });
     expect(await screen.findByText('Link mágico enviado!')).toBeInTheDocument();

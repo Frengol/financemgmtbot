@@ -1,11 +1,28 @@
 import type { ReactNode } from 'react';
 import { createContext, startTransition, useContext, useEffect, useState } from 'react';
 import { getAuthSession, localDevBypassEnabled, logoutAuthSession } from '@/lib/adminApi';
+import {
+  clearBrowserAdminProfile,
+  clearBrowserAdminTestSession,
+  decodeAccessTokenIdentity,
+  loadBrowserAdminProfile,
+  loadBrowserAdminTestSession,
+  saveBrowserAdminProfile,
+} from '@/lib/auth';
+import { supabase } from '@/lib/supabase';
 
 type AuthUser = {
   id: string;
   email?: string | null;
 };
+
+type SessionLike = {
+  access_token?: string;
+  user?: {
+    id: string;
+    email?: string | null;
+  } | null;
+} | null;
 
 type AuthContextValue = {
   authenticated: boolean;
@@ -24,6 +41,10 @@ function stripTokenFragment() {
     return;
   }
 
+  if (window.location.pathname.endsWith('/auth/callback')) {
+    return;
+  }
+
   const hash = window.location.hash || '';
   if (!hash.includes('access_token=') && !hash.includes('refresh_token=')) {
     return;
@@ -31,6 +52,26 @@ function stripTokenFragment() {
 
   const cleanUrl = `${window.location.pathname}${window.location.search}`;
   window.history.replaceState({}, document.title, cleanUrl);
+}
+
+function buildAuthUser(session: SessionLike): AuthUser | null {
+  if (!session?.access_token) {
+    return null;
+  }
+
+  const claims = decodeAccessTokenIdentity(session.access_token);
+  const storedProfile = loadBrowserAdminProfile();
+  const userId = session.user?.id || claims?.id || storedProfile?.id;
+  const email = session.user?.email ?? claims?.email ?? storedProfile?.email ?? null;
+
+  if (!userId) {
+    return null;
+  }
+
+  return {
+    id: userId,
+    email,
+  };
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -53,10 +94,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    stripTokenFragment();
-
     try {
+      const browserAuthTestSession = loadBrowserAdminTestSession();
+      if (browserAuthTestSession?.accessToken && browserAuthTestSession.user?.id) {
+        startTransition(() => {
+          setAuthenticated(true);
+          setUser(browserAuthTestSession.user);
+          setCsrfToken('');
+          setLoading(false);
+        });
+        return;
+      }
+
+      const { data } = await supabase.auth.getSession();
+      const session = data.session;
+      const authUser = buildAuthUser(session);
+      if (session?.access_token && authUser) {
+        saveBrowserAdminProfile(authUser);
+        startTransition(() => {
+          setAuthenticated(true);
+          setUser(authUser);
+          setCsrfToken('');
+          setLoading(false);
+        });
+        return;
+      }
+
       const payload = await getAuthSession();
+      if (!payload.authenticated) {
+        clearBrowserAdminProfile();
+        clearBrowserAdminTestSession();
+      }
       startTransition(() => {
         setAuthenticated(Boolean(payload.authenticated));
         setUser(payload.user || null);
@@ -64,6 +132,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setLoading(false);
       });
     } catch {
+      clearBrowserAdminProfile();
+      clearBrowserAdminTestSession();
       startTransition(() => {
         setAuthenticated(false);
         setUser(null);
@@ -75,6 +145,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let mounted = true;
+    stripTokenFragment();
 
     const load = async () => {
       await refreshSession();
@@ -85,6 +156,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     void load();
 
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_, session) => {
+      if (!session?.access_token) {
+        void refreshSession();
+        return;
+      }
+
+      const authUser = buildAuthUser(session);
+      if (!authUser) {
+        void refreshSession();
+        return;
+      }
+
+      saveBrowserAdminProfile(authUser);
+      startTransition(() => {
+        setAuthenticated(true);
+        setUser(authUser);
+        setCsrfToken('');
+        setLoading(false);
+      });
+    });
+
     const onFocus = () => {
       void refreshSession();
     };
@@ -92,6 +186,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     return () => {
       mounted = false;
+      subscription.unsubscribe();
       window.removeEventListener('focus', onFocus);
     };
   }, []);
@@ -106,8 +201,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         localBypass: localDevBypassEnabled,
         signOut: async () => {
           if (!localDevBypassEnabled) {
-            await logoutAuthSession();
+            await supabase.auth.signOut();
+            await logoutAuthSession().catch(() => undefined);
           }
+          clearBrowserAdminProfile();
+          clearBrowserAdminTestSession();
           startTransition(() => {
             setAuthenticated(false);
             setUser(null);

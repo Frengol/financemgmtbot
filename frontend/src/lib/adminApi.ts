@@ -1,4 +1,5 @@
 import type { TransactionDraft, TransactionRecord } from '@/lib/transactions';
+import { getAccessToken } from '@/lib/supabase';
 
 const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 export const localDevBypassEnabled = import.meta.env.DEV && import.meta.env.VITE_LOCAL_DEV_BYPASS_AUTH === 'true';
@@ -97,6 +98,10 @@ function buildApiUrl(path: string) {
   return `${configuredApiBaseUrl}${path}`;
 }
 
+function isAdminApiPath(path: string) {
+  return path.startsWith('/api/admin/');
+}
+
 async function parseError(response: Response) {
   let payload: ApiErrorPayload = {};
   try {
@@ -123,22 +128,30 @@ async function parseError(response: Response) {
 async function apiRequest<T>(path: string, init: RequestInit = {}, csrfToken?: string): Promise<ApiResponse<T>> {
   const headers = new Headers(init.headers);
   const method = (init.method || 'GET').toUpperCase();
+  const isAdminRoute = isAdminApiPath(path);
+  const accessToken = isAdminRoute ? await getAccessToken() : null;
 
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
 
-  if (csrfToken && ['POST', 'PATCH', 'DELETE'].includes(method)) {
+  if (accessToken) {
+    headers.set('Authorization', `Bearer ${accessToken}`);
+  } else if (csrfToken && ['POST', 'PATCH', 'DELETE'].includes(method)) {
     headers.set('X-CSRF-Token', csrfToken);
   }
 
   let response: Response;
   try {
-    response = await fetch(buildApiUrl(path), {
+    const requestInit: RequestInit = {
       ...init,
-      credentials: 'include',
       headers,
-    });
+    };
+    if (!accessToken) {
+      requestInit.credentials = 'include';
+    }
+
+    response = await fetch(buildApiUrl(path), requestInit);
   } catch {
     throw new ApiError(ERROR_MESSAGES.NETWORK_ERROR, {
       code: 'NETWORK_ERROR',

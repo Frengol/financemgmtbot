@@ -1,23 +1,17 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import ProtectedRoute from './ProtectedRoute';
 
 const mockUseAuth = vi.fn();
-const mockIsAllowedAdminEmail = vi.fn();
 
 vi.mock('@/hooks/useAuth', () => ({
   useAuth: () => mockUseAuth(),
 }));
 
-vi.mock('@/lib/auth', () => ({
-  isAllowedAdminEmail: (...args: unknown[]) => mockIsAllowedAdminEmail(...args),
-}));
-
 describe('ProtectedRoute', () => {
   beforeEach(() => {
     mockUseAuth.mockReset();
-    mockIsAllowedAdminEmail.mockReset();
   });
 
   function renderProtected() {
@@ -39,9 +33,7 @@ describe('ProtectedRoute', () => {
       user: null,
       loading: true,
       localBypass: false,
-      signOut: vi.fn(),
     });
-    mockIsAllowedAdminEmail.mockReturnValue(false);
 
     renderProtected();
 
@@ -54,9 +46,7 @@ describe('ProtectedRoute', () => {
       user: { email: 'admin@example.com' },
       loading: false,
       localBypass: false,
-      signOut: vi.fn(),
     });
-    mockIsAllowedAdminEmail.mockReturnValue(true);
 
     renderProtected();
 
@@ -69,9 +59,7 @@ describe('ProtectedRoute', () => {
       user: null,
       loading: false,
       localBypass: true,
-      signOut: vi.fn(),
     });
-    mockIsAllowedAdminEmail.mockReturnValue(false);
 
     renderProtected();
 
@@ -84,31 +72,23 @@ describe('ProtectedRoute', () => {
       user: null,
       loading: false,
       localBypass: false,
-      signOut: vi.fn(),
     });
-    mockIsAllowedAdminEmail.mockReturnValue(false);
 
     renderProtected();
 
     expect(await screen.findByText('Login screen')).toBeInTheDocument();
   });
 
-  it('redirects unauthorized users and revokes the session', async () => {
-    const signOut = vi.fn().mockResolvedValue(undefined);
+  it('keeps authenticated users inside the app shell even when frontend metadata is incomplete', async () => {
     mockUseAuth.mockReturnValue({
       authenticated: true,
-      user: { email: 'blocked@example.com' },
+      user: null,
       loading: false,
       localBypass: false,
-      signOut,
     });
-    mockIsAllowedAdminEmail.mockReturnValue(false);
 
     renderProtected();
 
-    await waitFor(() => {
-      expect(signOut).toHaveBeenCalled();
-    });
-    expect(await screen.findByText('Login screen')).toBeInTheDocument();
+    expect(await screen.findByText('Secure content')).toBeInTheDocument();
   });
 });

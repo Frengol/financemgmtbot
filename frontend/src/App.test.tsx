@@ -32,6 +32,10 @@ vi.mock('./pages/Login', () => ({
   default: () => <div>Login page</div>,
 }));
 
+vi.mock('./pages/AuthCallback', () => ({
+  default: () => <div>Auth callback page</div>,
+}));
+
 vi.mock('./components/ProtectedRoute', () => ({
   default: () => <div>Protected route shell</div>,
 }));
@@ -72,5 +76,14 @@ describe('App', () => {
     render(<App />);
 
     expect(await screen.findByText('Protected route shell')).toBeInTheDocument();
+  });
+
+  it('renders the auth callback route', async () => {
+    window.history.pushState({}, '', '/auth/callback#access_token=test&refresh_token=test');
+    const { default: App } = await import('./App');
+
+    render(<App />);
+
+    expect(await screen.findByText('Auth callback page')).toBeInTheDocument();
   });
 });

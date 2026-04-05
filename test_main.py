@@ -1275,14 +1275,14 @@ class TestAdminRoutes:
         return payload["csrfToken"]
 
     @pytest.mark.asyncio
-    async def test_auth_magic_link_uses_backend_callback_and_returns_uniform_success(self):
+    async def test_auth_magic_link_uses_frontend_callback_and_returns_uniform_success(self):
         config.supabase.auth.sign_in_with_otp = MagicMock()
 
         async with main.app.test_client() as client:
             with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), patch.object(main, "AUTH_CALLBACK_PUBLIC_URL", "https://api.example.com/auth/callback"), patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})), patch.object(main, "ADMIN_USER_IDS", frozenset({"user-1"})):
                 resp = await client.post(
                     "/auth/magic-link",
-                    json={"email": "admin@example.com", "redirectTo": "https://admin.example.com/app/login"},
+                    json={"email": "admin@example.com", "redirectTo": "https://admin.example.com/app/auth/callback"},
                 )
 
         assert resp.status_code == 200
@@ -1292,10 +1292,10 @@ class TestAdminRoutes:
         config.supabase.auth.sign_in_with_otp.assert_called_once()
         sent_payload = config.supabase.auth.sign_in_with_otp.call_args.args[0]
         assert sent_payload["email"] == "admin@example.com"
-        assert sent_payload["options"]["email_redirect_to"] == "https://api.example.com/auth/callback?next=https%3A%2F%2Fadmin.example.com%2Fapp%2Flogin"
+        assert sent_payload["options"]["email_redirect_to"] == "https://admin.example.com/app/auth/callback"
 
     @pytest.mark.asyncio
-    async def test_auth_magic_link_invalid_public_redirect_falls_back_to_frontend_public_url(self):
+    async def test_auth_magic_link_invalid_public_redirect_falls_back_to_frontend_callback(self):
         config.supabase.auth.sign_in_with_otp = MagicMock()
 
         async with main.app.test_client() as client:
@@ -1308,7 +1308,7 @@ class TestAdminRoutes:
         assert resp.status_code == 200
         sent_payload = config.supabase.auth.sign_in_with_otp.call_args.args[0]
         assert "localhost" not in sent_payload["options"]["email_redirect_to"]
-        assert sent_payload["options"]["email_redirect_to"] == "https://api.example.com/auth/callback?next=https%3A%2F%2Fadmin.example.com%2Fapp%2F"
+        assert sent_payload["options"]["email_redirect_to"] == "https://admin.example.com/app/auth/callback"
 
     @pytest.mark.asyncio
     async def test_auth_magic_link_returns_rate_limit_error_with_request_id(self):
@@ -1329,6 +1329,26 @@ class TestAdminRoutes:
         assert payload["requestId"].startswith("req_")
         assert resp.headers["X-Request-ID"] == payload["requestId"]
         assert resp.headers["Retry-After"] == "300"
+
+    @pytest.mark.asyncio
+    async def test_auth_magic_link_parses_supabase_retry_after_seconds_from_cooldown_message(self):
+        config.supabase.auth.sign_in_with_otp = MagicMock(
+            side_effect=Exception("For security purposes, you can only request this after 8 seconds.")
+        )
+
+        async with main.app.test_client() as client:
+            with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})):
+                resp = await client.post(
+                    "/auth/magic-link",
+                    json={"email": "admin@example.com", "redirectTo": "https://admin.example.com/app/auth/callback"},
+                )
+
+        assert resp.status_code == 429
+        payload = await resp.get_json()
+        assert payload["code"] == "AUTH_MAGIC_LINK_RATE_LIMIT"
+        assert payload["retryable"] is True
+        assert payload["retryAfterSeconds"] == 8
+        assert resp.headers["Retry-After"] == "8"
 
     @pytest.mark.asyncio
     async def test_auth_magic_link_returns_sanitized_send_failure_for_allowed_email(self):
@@ -1390,21 +1410,7 @@ class TestAdminRoutes:
         assert session_resp.headers["X-Content-Type-Options"] == "nosniff"
 
     @pytest.mark.asyncio
-    async def test_auth_magic_link_callback_and_admin_list_work_with_proxy_aware_secure_cookie(self):
-        mock_sessions = MagicMock()
-        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
-        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
-            data=[self._build_session_row()]
-        )
-        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
-
-        def table_switch(name):
-            if name == "admin_web_sessions":
-                return mock_sessions
-            return MagicMock()
-
-        config.supabase.table = MagicMock(side_effect=table_switch)
-
+    async def test_auth_magic_link_test_verify_redirects_to_frontend_callback_with_tokens_and_bearer_data_loads(self):
         seeded_transactions = [
             {
                 "id": "tx-auth-1",
@@ -1425,35 +1431,33 @@ class TestAdminRoutes:
                 with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), patch.object(main, "AUTH_CALLBACK_PUBLIC_URL", "https://api.example.com/auth/callback"), patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})), patch.object(admin_api, "ADMIN_EMAILS", frozenset({"admin@example.com"})), patch.object(main, "_test_support_request_allowed", return_value=True):
                     magic_resp = await client.post(
                         "/auth/magic-link",
-                        json={"email": "admin@example.com", "redirectTo": "https://admin.example.com/app/"},
+                        json={"email": "admin@example.com", "redirectTo": "https://admin.example.com/app/auth/callback"},
                     )
                     assert magic_resp.status_code == 200
 
                     magic_link_resp = await client.get("/__test__/auth/magic-link?email=admin@example.com")
                     assert magic_link_resp.status_code == 200
                     magic_link_payload = await magic_link_resp.get_json()
-                    callback_target = urlsplit(magic_link_payload["magicLink"]["link"])
+                    verify_target = urlsplit(magic_link_payload["magicLink"]["link"])
 
-                    callback_resp = await client.get(
-                        f"{callback_target.path}?{callback_target.query}",
-                        headers={"X-Forwarded-Proto": "https"},
+                    verify_resp = await client.get(
+                        f"{verify_target.path}?{verify_target.query}",
                     )
 
-                    assert callback_resp.status_code == 302
-                    assert callback_resp.headers["Location"] == "https://admin.example.com/app/"
-                    set_cookie = callback_resp.headers["Set-Cookie"]
-                    assert "Secure" in set_cookie
-                    assert "SameSite=None" in set_cookie
+                    assert verify_resp.status_code == 302
+                    redirect_target = urlsplit(verify_resp.headers["Location"])
+                    assert redirect_target.scheme == "https"
+                    assert redirect_target.netloc == "admin.example.com"
+                    assert redirect_target.path == "/app/auth/callback"
+                    fragment = parse_qs(redirect_target.fragment)
+                    assert fragment["access_token"][0].count(".") == 2
+                    assert fragment["refresh_token"][0].startswith("auth-test-refresh-")
 
-                    session_resp = await client.get("/auth/session", headers={"X-Forwarded-Proto": "https"})
-                    assert session_resp.status_code == 200
-                    session_payload = await session_resp.get_json()
-                    assert session_payload["authenticated"] is True
-                    assert session_payload["user"]["email"] == "admin@example.com"
+                    bearer_token = fragment["access_token"][0]
 
                     transactions_resp = await client.get(
                         "/api/admin/gastos?date_from=2026-04-01&date_to=2026-04-30",
-                        headers={"X-Forwarded-Proto": "https"},
+                        headers={"Authorization": f"Bearer {bearer_token}"},
                     )
 
         assert transactions_resp.status_code == 200
@@ -1472,6 +1476,124 @@ class TestAdminRoutes:
         assert payload["code"] == "AUTH_SESSION_INVALID"
         assert payload["requestId"].startswith("req_")
         assert resp.headers["X-Request-ID"] == payload["requestId"]
+
+    @pytest.mark.asyncio
+    async def test_admin_list_transactions_accepts_valid_bearer_without_cookie_session(self):
+        self._mock_admin_user()
+
+        mock_gastos = MagicMock()
+        mock_gastos.select.return_value.order.return_value.execute.return_value = MagicMock(
+            data=[{"id": "tx-1", "descricao": "Mercado Bearer"}]
+        )
+
+        def table_switch(name):
+            if name == "gastos":
+                return mock_gastos
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            with patch.object(admin_api, "ADMIN_EMAILS", frozenset({"admin@example.com"})), patch.object(admin_api, "ADMIN_USER_IDS", frozenset({"user-1"})):
+                resp = await client.get(
+                    "/api/admin/gastos",
+                    headers={"Authorization": "Bearer valid-access-token"},
+                )
+
+        assert resp.status_code == 200
+        payload = await resp.get_json()
+        assert payload["transactions"] == [{"id": "tx-1", "descricao": "Mercado Bearer"}]
+        config.supabase.auth.get_user.assert_called_once_with("valid-access-token")
+
+    @pytest.mark.asyncio
+    async def test_admin_create_transaction_with_valid_bearer_does_not_require_csrf(self):
+        self._mock_admin_user()
+
+        mock_gastos = MagicMock()
+        mock_gastos.insert.return_value.execute.return_value = MagicMock(data=[{
+            "id": "tx-99",
+            "data": "2026-03-19",
+            "valor": 99.9,
+            "natureza": "Essencial",
+            "categoria": "Mercado",
+            "descricao": "Compra bearer",
+            "metodo_pagamento": "Pix",
+            "conta": "Nubank",
+        }])
+
+        def table_switch(name):
+            if name == "gastos":
+                return mock_gastos
+            if name == "auditoria_admin":
+                return MagicMock()
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            with patch.object(admin_api, "ADMIN_EMAILS", frozenset({"admin@example.com"})), patch.object(admin_api, "ADMIN_USER_IDS", frozenset({"user-1"})):
+                resp = await client.post(
+                    "/api/admin/gastos",
+                    headers={"Authorization": "Bearer valid-access-token"},
+                    json={
+                        "data": "2026-03-19",
+                        "valor": 99.9,
+                        "categoria": "Mercado",
+                        "descricao": "Compra bearer",
+                        "metodo_pagamento": "Pix",
+                        "conta": "Nubank",
+                    },
+                )
+
+        assert resp.status_code == 201
+        payload = await resp.get_json()
+        assert payload["transaction"]["id"] == "tx-99"
+
+    @pytest.mark.asyncio
+    async def test_admin_routes_reject_invalid_bearer_tokens(self):
+        config.supabase.auth.get_user = MagicMock(side_effect=Exception("invalid jwt"))
+
+        async with main.app.test_client() as client:
+            resp = await client.get(
+                "/api/admin/gastos",
+                headers={"Authorization": "Bearer bad-token"},
+            )
+
+        assert resp.status_code == 401
+        payload = await resp.get_json()
+        assert payload["code"] == "AUTH_SESSION_INVALID"
+
+    @pytest.mark.asyncio
+    async def test_admin_routes_reject_bearer_tokens_for_blocked_identities(self):
+        self._mock_admin_user(email="blocked@example.com", user_id="user-9")
+
+        async with main.app.test_client() as client:
+            with patch.object(admin_api, "ADMIN_EMAILS", frozenset({"admin@example.com"})), patch.object(admin_api, "ADMIN_USER_IDS", frozenset({"user-9"})):
+                resp = await client.get(
+                    "/api/admin/gastos",
+                    headers={"Authorization": "Bearer valid-access-token"},
+                )
+
+        assert resp.status_code == 403
+        payload = await resp.get_json()
+        assert payload["code"] == "AUTH_ACCESS_DENIED"
+
+    @pytest.mark.asyncio
+    async def test_admin_preflight_allows_authorization_header(self):
+        async with main.app.test_client() as client:
+            with patch.object(main, "FRONTEND_ALLOWED_ORIGINS", frozenset({"https://admin.example.com"})):
+                resp = await client.options(
+                    "/api/admin/gastos",
+                    headers={
+                        "Origin": "https://admin.example.com",
+                        "Access-Control-Request-Method": "GET",
+                        "Access-Control-Request-Headers": "authorization",
+                    },
+                )
+
+        assert resp.status_code == 204
+        assert resp.headers["Access-Control-Allow-Origin"] == "https://admin.example.com"
+        assert "Authorization" in resp.headers["Access-Control-Allow-Headers"]
 
     @pytest.mark.asyncio
     async def test_admin_create_transaction_requires_csrf(self):

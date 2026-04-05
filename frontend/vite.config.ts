@@ -2,14 +2,18 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
 
+const devProxyTarget = process.env.VITE_DEV_PROXY_TARGET || process.env.E2E_API_BASE_URL || 'http://127.0.0.1:8080'
+
 export default defineConfig(({ mode }) => ({
   plugins: [react()],
   base: mode === 'production' ? '/financemgmtbot/' : '/',
   server: {
     proxy: {
-      '/api': 'http://127.0.0.1:8080',
-      '/auth': 'http://127.0.0.1:8080',
-      '/__test__': 'http://127.0.0.1:8080',
+      '/api': devProxyTarget,
+      '/__test__': devProxyTarget,
+      '/auth/magic-link': devProxyTarget,
+      '/auth/session': devProxyTarget,
+      '/auth/logout': devProxyTarget,
     },
   },
   resolve: {

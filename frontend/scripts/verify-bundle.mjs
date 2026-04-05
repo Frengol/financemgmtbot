@@ -4,34 +4,16 @@ import { fileURLToPath } from 'node:url';
 
 const requiredPatterns = [
   {
-    description: 'BFF browser requests must keep cookie-based credentials enabled',
-    regex: /credentials\s*:\s*["']include["']/,
+    description: 'Supabase browser session storage key',
+    regex: /financemgmtbot-admin-auth/,
   },
   {
-    description: 'Admin mutations must keep the CSRF header in the published bundle',
-    regex: /X-CSRF-Token/,
+    description: 'Supabase browser session bootstrap',
+    regex: /\.auth\.setSession/,
   },
-];
-const forbiddenPatterns = [
   {
-    description: 'legacy Authorization header usage',
+    description: 'bearer authorization transport',
     regex: /Authorization/,
-  },
-  {
-    description: 'legacy bearer token transport',
-    regex: /Bearer\s+/,
-  },
-  {
-    description: 'legacy Supabase browser session lookup',
-    regex: /\.auth\.getSession/,
-  },
-  {
-    description: 'legacy Supabase OTP login path in the browser',
-    regex: /signInWithOtp/,
-  },
-  {
-    description: 'legacy Supabase client bootstrap in the browser bundle',
-    regex: /createClient\(/,
   },
 ];
 
@@ -55,13 +37,6 @@ export function verifyBundleDirectory(targetDir = resolve('dist')) {
       throw new Error(`Bundle verification failed: missing ${pattern.description}.`);
     }
   }
-
-  for (const pattern of forbiddenPatterns) {
-    if (pattern.regex.test(bundle)) {
-      throw new Error(`Bundle verification failed: found ${pattern.description}.`);
-    }
-  }
-
   return files.length;
 }
 

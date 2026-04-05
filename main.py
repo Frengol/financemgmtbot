@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from urllib.parse import quote, urlencode, urlsplit
 
 from quart import Quart, Response, jsonify, redirect, request
@@ -119,6 +120,10 @@ def _default_frontend_public_url():
     raise RuntimeError("Missing FRONTEND_PUBLIC_URL for public auth redirects.")
 
 
+def _default_frontend_auth_callback_url():
+    return f"{_default_frontend_public_url().rstrip('/')}/auth/callback"
+
+
 def _default_auth_callback_public_url():
     if AUTH_CALLBACK_PUBLIC_URL:
         return AUTH_CALLBACK_PUBLIC_URL
@@ -169,6 +174,22 @@ def _is_magic_link_email_allowed(email: str | None):
 
 
 def _sanitize_frontend_redirect_target(candidate: str | None):
+    default_target = _default_frontend_auth_callback_url()
+    raw_value = (candidate or "").strip()
+    if not raw_value:
+        return default_target
+
+    parsed = urlsplit(raw_value)
+    if parsed.scheme in {"http", "https"}:
+        if normalize_frontend_origin(raw_value) == normalize_frontend_origin(default_target):
+            return raw_value
+        if not FRONTEND_PUBLIC_URL and _is_loopback_request() and _is_loopback_url(raw_value):
+            return raw_value
+
+    return default_target
+
+
+def _sanitize_frontend_app_redirect_target(candidate: str | None):
     default_target = _default_frontend_public_url()
     raw_value = (candidate or "").strip()
     if not raw_value:
@@ -185,8 +206,23 @@ def _sanitize_frontend_redirect_target(candidate: str | None):
 
 
 def _build_callback_url(frontend_redirect: str):
-    callback_base = _default_auth_callback_public_url()
-    return f"{callback_base}?next={quote(frontend_redirect, safe='')}"
+    return frontend_redirect
+
+
+def _extract_magic_link_retry_after_seconds(error_text: str):
+    lowered = (error_text or "").lower()
+    match = re.search(r"request this after\s+(\d+)\s+seconds?", lowered)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _is_magic_link_rate_limit_error(error_text: str):
+    lowered = (error_text or "").lower()
+    return "email rate limit exceeded" in lowered or "for security purposes, you can only request this after" in lowered
 
 
 def _build_login_redirect_target(redirect_to: str, *, reason: str | None = None, request_id: str | None = None):
@@ -329,7 +365,7 @@ async def harden_response(response):
     origin = request.headers.get("Origin")
     if origin and _browser_cors_enabled() and _origin_allowed(origin):
         response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-CSRF-Token"
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-CSRF-Token"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Vary"] = "Origin"
@@ -375,13 +411,14 @@ async def auth_magic_link():
         except Exception as exc:
             sanitized_error = mascarar_segredos(str(exc))
             logger.warning(with_request_id({"event": "auth_magic_link_send_failed", "error": sanitized_error}))
-            if "email rate limit exceeded" in sanitized_error.lower():
+            if _is_magic_link_rate_limit_error(sanitized_error):
+                retry_after_seconds = _extract_magic_link_retry_after_seconds(sanitized_error) or 300
                 return _json_error(
                     "Too many login requests. Try again later.",
                     429,
                     code="AUTH_MAGIC_LINK_RATE_LIMIT",
                     retryable=True,
-                    retry_after_seconds=300,
+                    retry_after_seconds=retry_after_seconds,
                 )
             return _json_error(
                 "Unable to send the magic link right now.",
@@ -405,7 +442,7 @@ async def auth_callback():
 
     if request.method == "GET":
         try:
-            redirect_to = _sanitize_frontend_redirect_target(request.args.get("next"))
+            redirect_to = _sanitize_frontend_app_redirect_target(request.args.get("next"))
         except RuntimeError as exc:
             return _auth_redirect_config_error(exc)
         token_hash = (request.args.get("token_hash") or "").strip()
@@ -437,7 +474,7 @@ async def auth_callback():
     payload = await request.get_json(silent=True) or {}
     access_token = str(payload.get("access_token") or "").strip()
     try:
-        redirect_to = _sanitize_frontend_redirect_target(payload.get("redirectTo") or request.args.get("next"))
+        redirect_to = _sanitize_frontend_app_redirect_target(payload.get("redirectTo") or request.args.get("next"))
     except RuntimeError as exc:
         return _auth_redirect_config_error(exc)
     if not access_token:
@@ -513,6 +550,37 @@ async def auth_test_magic_link():
 
     magic_link = capture_magic_link(email=email, callback_url=callback_url, user_id=user_id)
     return _json_success({"magicLink": magic_link}, 200)
+
+
+@app.route("/__test__/auth/verify", methods=["GET"])
+async def auth_test_verify():
+    if not _test_support_request_allowed():
+        return _json_error("Not found.", 404)
+
+    redirect_to = (request.args.get("redirect_to") or "").strip() or _default_frontend_auth_callback_url()
+    token_hash = (request.args.get("token_hash") or "").strip()
+    magic_link = consume_magic_link(token_hash)
+
+    if not magic_link:
+        error_fragment = urlencode(
+            {
+                "error": "access_denied",
+                "error_code": "otp_expired",
+                "error_description": "Email link is invalid or has expired",
+            }
+        )
+        return redirect(f"{redirect_to}#{error_fragment}")
+
+    fragment = urlencode(
+        {
+            "access_token": str(magic_link.get("access_token") or ""),
+            "refresh_token": str(magic_link.get("refresh_token") or ""),
+            "type": "magiclink",
+            "auth_test_user_id": str(magic_link.get("user_id") or ""),
+            "auth_test_email": str(magic_link.get("email") or ""),
+        }
+    )
+    return redirect(f"{redirect_to}#{fragment}")
 
 
 @app.route("/auth/session", methods=["GET", "OPTIONS"])

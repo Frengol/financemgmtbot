@@ -1,8 +1,8 @@
 # 📜 Manifesto de Arquitetura: Finance Mgmt Bot
-**Versão:** V3.2.0 — *BFF Administrativo, Sessão Server-Side, Pendências Cifradas & Hardening de Transporte*
+**Versão:** V3.3.0 — *GitHub Pages com Sessão Supabase no Browser, Bearer Validado no Backend e Hardening Operacional*
 
 ## Visão Geral do Produto
-O sistema é um Assistente Pessoal (Copilot) Financeiro multimodal orientado a eventos. O núcleo operacional continua centrado no Telegram, onde textos, cupons fiscais e áudios são recebidos e processados via Webhook assíncrono. A evolução V3 introduziu uma segunda superfície oficial: um **Painel Administrativo Web** publicado estaticamente no GitHub Pages, delegando autenticação e operações sensíveis a um backend Python hospedado no Google Cloud Run. A versão atual V3.2 endurece essa borda administrativa com um **Backend-for-Frontend (BFF)**, **sessão server-side com cookie `HttpOnly`**, **proteção CSRF**, **pendências cifradas com TTL**, **headers anti-cache** e **CORS estritamente limitado por rota**, mantendo o painel estático e o backend como único ponto privilegiado.
+O sistema é um Assistente Pessoal (Copilot) Financeiro multimodal orientado a eventos. O núcleo operacional continua centrado no Telegram, onde textos, cupons fiscais e áudios são recebidos e processados via Webhook assíncrono. A evolução V3 introduziu uma segunda superfície oficial: um **Painel Administrativo Web** publicado estaticamente no GitHub Pages, delegando autenticação e operações sensíveis a um backend Python hospedado no Google Cloud Run. A versão atual V3.3 mantém o frontend estático e o backend sem custo extra, mas corrige o problema estrutural de cookie cross-site retornando o painel oficial para **sessão Supabase no browser** e **Bearer token validado server-side** nas rotas `/api/admin/*`, preservando o hardening que não depende de cookie de terceira parte: logs sanitizados, envelope de erro com `requestId`, `cache_aprovacao` cifrada com TTL, headers anti-cache e allowlists administrativas no backend.
 
 A arquitetura preserva os princípios de **Determinismo Local**, **Testabilidade Extrema** e **Segurança Ativa**, mas agora segmenta claramente o sistema em duas bordas:
 
@@ -45,14 +45,13 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 ### 2.2 Borda Administrativa (GitHub Pages → Cloud Run)
 1. O usuário acessa a SPA em um origin público controlado, por exemplo `https://admin.example.com/`.
 2. O frontend solicita o Magic Link ao backend em `POST /auth/magic-link`.
-3. O e-mail do Supabase redireciona para `GET /auth/callback`, onde o backend converte o retorno do Magic Link em sessão própria do app.
-4. O backend cria uma sessão opaca em `public.admin_web_sessions`, seta `fm_admin_session` (`HttpOnly`) e expõe o token CSRF derivado apenas por `GET /auth/session`.
-5. O frontend consulta `GET /auth/session` para descobrir se há sessão válida e para obter o `csrfToken`.
-6. O frontend chama o backend em `/api/admin/*` com `credentials: include`; mutações enviam `X-CSRF-Token` e não usam mais bearer token do Supabase no browser.
-7. O backend revalida a sessão própria, checa allowlists administrativas e executa a operação privilegiada com auditoria.
-8. O operador pode criar, editar, excluir, aprovar e rejeitar registros a partir do painel sem expor `service_role`, `access_token` nem `refresh_token` ao navegador.
+3. O backend valida allowlist/rate limit e pede ao Supabase o envio do Magic Link com `email_redirect_to` apontando para a rota pública do frontend, por exemplo `https://admin.example.com/auth/callback`.
+4. O frontend recebe `access_token` e `refresh_token` do Supabase na rota `/auth/callback` e persiste a sessão usando `supabase.auth.setSession(...)`.
+5. O contexto `useAuth` passa a refletir a sessão oficial do navegador via `supabase.auth.getSession()` e `onAuthStateChange(...)`, com fallback opcional para `GET /auth/session` apenas como compatibilidade legada/local.
+6. O frontend chama o backend em `/api/admin/*` com `Authorization: Bearer <access_token>`; o caminho cookie+CSRF deixa de ser o fluxo oficial do GitHub Pages.
+7. O backend valida o bearer token no lado servidor com Supabase, revalida allowlists administrativas e executa a operação privilegiada com auditoria.
+8. O operador continua podendo criar, editar, excluir, aprovar e rejeitar registros a partir do painel sem expor `service_role` ao navegador; o token web oficial passa a ser o token público do Supabase, compatível com o domínio separado do GitHub Pages.
 9. Falhas operacionais do painel usam envelope sanitizado com `code`, `requestId`, `retryable` e, quando aplicável, `retryAfterSeconds`, permitindo que a UI mostre erro real sem ecoar detalhes crus de provedores ou do banco.
-10. Se a persistência da sessão web estiver indisponível, o callback não volta mais silenciosamente para o painel: o backend redireciona explicitamente para `/login?reason=auth_unavailable&requestId=...`, e o frontend exibe erro visível de indisponibilidade temporária.
 
 ### 2.3 Separação de Superfícies
 * **GitHub Pages** hospeda apenas arquivos estáticos.
@@ -102,13 +101,13 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `public.admin_users`
   - função `public.is_admin()`
   - políticas de RLS para `gastos`, `cache_aprovacao` e `auditoria_admin`
-  - `public.admin_web_sessions` para a sessão server-side do BFF
+  - `public.admin_web_sessions` para compatibilidade operacional e fluxos internos/legados do backend
 
 ### 4.3 Operações Sensíveis
 * O frontend não executa mais `delete()` crítico diretamente em `gastos` ou `cache_aprovacao`.
-* As rotas administrativas exigem sessão própria do app via cookie `HttpOnly`.
-* Mutações administrativas exigem `X-CSRF-Token` válido além da sessão.
-* O backend revalida a sessão, a allowlist e a expiração antes de permitir exclusão, aprovação ou rejeição.
+* As rotas administrativas oficiais do GitHub Pages exigem `Authorization: Bearer <access_token>` emitido pelo Supabase no browser e validado novamente pelo backend.
+* O caminho `cookie HttpOnly + X-CSRF-Token` permanece apenas como compatibilidade interna/legada; ele não é mais o fluxo oficial do painel hospedado no GitHub Pages.
+* O backend revalida o bearer token, a allowlist e a expiração antes de permitir exclusão, aprovação ou rejeição.
 * O CRUD manual de transações passa pelas rotas administrativas:
   - `GET /api/admin/gastos`
   - `POST /api/admin/gastos`
@@ -120,10 +119,8 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `POST /api/admin/cache-aprovacao/<id>/reject`
 * O fluxo administrativo de autenticação passa pelo backend:
   - `POST /auth/magic-link`
-  - `GET /auth/callback`
-  - `POST /auth/callback`
-  - `GET /auth/session`
-  - `POST /auth/logout`
+  - callback oficial no frontend `/auth/callback`
+  - `GET /auth/session` e `POST /auth/logout` apenas como compatibilidade de sessão server-side
 
 ### 4.4 CORS e Fronteira Web
 * O backend restringe chamadas do navegador a `FRONTEND_ALLOWED_ORIGINS`.
@@ -139,7 +136,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 
 ### 4.5 Observabilidade Blindada
 * Logs seguem em JSON com masking de segredos.
-* Erros administrativos e de autenticação do BFF devem compartilhar um `requestId` entre resposta HTTP e logs estruturados, permitindo correlação de suporte sem expor stack trace, query SQL, mensagens cruas de provider ou tokens.
+* Erros administrativos e de autenticação devem compartilhar um `requestId` entre resposta HTTP e logs estruturados, permitindo correlação de suporte sem expor stack trace, query SQL, mensagens cruas de provider ou tokens.
 * Logs operacionais não devem registrar payloads brutos de IA, transcrições, conteúdo textual de transações, itens detalhados de cupons, dumps completos de inserts falhos, `access_token`, `refresh_token` ou payloads integrais de `cache_aprovacao`; devem registrar apenas metadados mínimos como evento, contagem, ids e nomes de campos.
 * A trilha `auditoria_admin` deve registrar contexto mínimo da operação administrativa, sem duplicar descrições completas de transações ou payloads integrais de aprovação.
 * Falhas de auditoria não devem expor credenciais ou corromper o fluxo principal sem log explícito.
@@ -177,9 +174,10 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `BASE_URL=/financemgmtbot/`
   - chamadas administrativas apontam para o Cloud Run público
   - login oficial via backend `/auth/magic-link`
-  - o backend constrói `email_redirect_to` do Supabase usando `AUTH_CALLBACK_PUBLIC_URL`
+  - o backend constrói `email_redirect_to` do Supabase usando a rota pública do frontend no GitHub Pages, por exemplo `/auth/callback`
   - o fallback seguro de retorno do painel usa `FRONTEND_PUBLIC_URL`, nunca `localhost`
-  - a SPA não manipula mais `access_token`/`refresh_token` do Supabase nem depende de cliente Supabase embarcado no bundle
+  - a SPA manipula apenas o token público de sessão do Supabase no navegador e envia `Authorization: Bearer` para o backend administrativo
+  - o frontend exige `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` no build oficial
 * A SPA usa `code splitting` por rota e por dependência pesada de frontend, carregando `Dashboard`, `Histórico`, `Aprovações`, `Login` e o modal transacional sob demanda, com `manualChunks` dedicados para gráficos, tabela e vendor base.
 * Em telas mobile, o layout principal expõe um acionador discreto no canto superior esquerdo que abre um drawer lateral esquerdo com a navegação entre Dashboard, Aprovações e Histórico, preservando o menu fixo em desktop.
 * O Dashboard usa widgets com seletor de mês compacto por card, evitando um filtro global único e permitindo leitura contextual do período.
@@ -197,20 +195,20 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - executa `npm audit --omit=dev`
   - executa `npm run test:coverage`
   - falha se a cobertura unitária do frontend ficar abaixo de `90%` em `Statements`, `Branches`, `Functions` ou `Lines`
-  - valida `npm run verify:build-env`, exigindo `VITE_API_BASE_URL` absoluto vindo de GitHub Actions `Variables` ou `Secrets`
+  - valida `npm run verify:build-env`, exigindo `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` vindos de GitHub Actions `Variables` ou `Secrets`
   - valida `npm run build`
-  - valida `npm run verify:bundle` para garantir que o artefato publicado continua no contrato `cookie + CSRF`, sem `Authorization` nem fluxo Supabase no browser
+  - valida `npm run verify:bundle` para garantir que o artefato publicado continua no contrato `Supabase browser session + Authorization Bearer`
   - varre o `dist` por strings sensíveis conhecidas antes de publicar artefatos
   - executa `npm run test:e2e` com Playwright em Chromium e Firefox
   - a suíte E2E combina:
     - smoke mockada para regressão rápida de UI
-    - integração local com backend Quart em `AUTH_TEST_MODE`, validando magic link, callback, cookie de sessão e carregamento de `/api/admin/gastos`
+    - integração local com backend Quart em `AUTH_TEST_MODE`, validando magic link, callback no frontend, sessão Supabase no browser e carregamento de `/api/admin/gastos` por bearer
   - executa `gitleaks` com histórico completo no clone da CI
   - publica artefatos de coverage e do relatório Playwright
 * `deploy-pages.yml`
   - instala dependências com `npm ci`
-  - valida `npm run verify:build-env` antes do build, aceitando `VITE_API_BASE_URL` vindo de Repository Variables ou Secrets
-  - builda o frontend com `VITE_API_BASE_URL` vindo de Repository Variables ou Secrets
+  - valida `npm run verify:build-env` antes do build, aceitando `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` vindos de Repository Variables ou Secrets
+  - builda o frontend com `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` vindos de Repository Variables ou Secrets
   - valida o bundle com `npm run verify:bundle` antes de publicar o artefato no GitHub Pages
   - publica automaticamente o SPA no GitHub Pages
 
@@ -239,7 +237,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 
 * **Frontend barato e simples de distribuir:** GitHub Pages resolve publicação do painel sem custo operacional de app server.
 * **Backend privilegiado isolado:** toda lógica sensível continua fora do navegador.
-* **Sessão administrativa mais resistente:** o navegador deixa de carregar bearer token operacional e passa a operar com cookie `HttpOnly` + CSRF.
+* **Login compatível com domínio separado:** o painel volta a operar de forma estável em `github.io` usando sessão pública do Supabase no browser e bearer validado novamente no backend.
 * **Fila de pendências mais segura:** `cache_aprovacao` deixa de expor payload bruto ao painel e passa a operar com preview mínimo, ciphertext e expiração.
 * **Segurança reproduzível:** RLS e estruturas administrativas deixam de existir só “no painel” e passam a ser versionadas.
 * **Menor acoplamento operacional:** frontend e backend evoluem e escalam em ritmos distintos.

@@ -1,32 +1,43 @@
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 
-export function validateApiBaseUrl(rawValue) {
+function validatePublicUrl(rawValue, variableName) {
   const value = typeof rawValue === 'string' ? rawValue.trim() : '';
 
   if (!value) {
-    throw new Error(
-      'Missing VITE_API_BASE_URL. Configure a GitHub Actions Repository Variable or Secret named VITE_API_BASE_URL before building the production frontend.',
-    );
+    throw new Error(`Missing ${variableName}. Configure a GitHub Actions Repository Variable or Secret named ${variableName} before building the production frontend.`);
   }
 
   let parsedUrl;
   try {
     parsedUrl = new URL(value);
   } catch {
-    throw new Error('VITE_API_BASE_URL must be an absolute http(s) URL.');
+    throw new Error(`${variableName} must be an absolute http(s) URL.`);
   }
 
   if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-    throw new Error('VITE_API_BASE_URL must use http or https.');
+    throw new Error(`${variableName} must use http or https.`);
   }
 
   return parsedUrl.toString().replace(/\/$/, '');
 }
 
+export function validateBuildEnv(env) {
+  const supabaseAnonKey = typeof env.VITE_SUPABASE_ANON_KEY === 'string' ? env.VITE_SUPABASE_ANON_KEY.trim() : '';
+  if (!supabaseAnonKey) {
+    throw new Error('Missing VITE_SUPABASE_ANON_KEY. Configure a GitHub Actions Repository Variable or Secret named VITE_SUPABASE_ANON_KEY before building the production frontend.');
+  }
+
+  return {
+    apiBaseUrl: validatePublicUrl(env.VITE_API_BASE_URL, 'VITE_API_BASE_URL'),
+    supabaseUrl: validatePublicUrl(env.VITE_SUPABASE_URL, 'VITE_SUPABASE_URL'),
+    supabaseAnonKey,
+  };
+}
+
 function runCli() {
-  const normalizedUrl = validateApiBaseUrl(process.env.VITE_API_BASE_URL);
-  console.log(`Build environment verification passed for ${normalizedUrl}`);
+  const result = validateBuildEnv(process.env);
+  console.log(`Build environment verification passed for ${result.apiBaseUrl} with Supabase ${result.supabaseUrl}`);
 }
 
 const isCli =

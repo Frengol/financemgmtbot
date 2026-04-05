@@ -69,9 +69,11 @@ class TestMainHelperCoverage:
     async def test_redirect_sanitization_and_test_support_helpers_cover_invalid_and_loopback_paths(self):
         async with main.app.test_request_context("/auth/magic-link"):
             with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"):
-                assert main._sanitize_frontend_redirect_target("") == "https://admin.example.com/app/"
+                assert main._sanitize_frontend_redirect_target("") == "https://admin.example.com/app/auth/callback"
                 assert main._sanitize_frontend_redirect_target("https://admin.example.com/app/historico") == "https://admin.example.com/app/historico"
-                assert main._sanitize_frontend_redirect_target("https://evil.example.com") == "https://admin.example.com/app/"
+                assert main._sanitize_frontend_redirect_target("https://evil.example.com") == "https://admin.example.com/app/auth/callback"
+                assert main._sanitize_frontend_app_redirect_target("") == "https://admin.example.com/app/"
+                assert main._sanitize_frontend_app_redirect_target("https://evil.example.com") == "https://admin.example.com/app/"
 
             with patch.object(main, "FRONTEND_PUBLIC_URL", ""), patch.object(main, "_is_loopback_request", return_value=True):
                 assert main._sanitize_frontend_redirect_target("http://localhost:3000/app") == "http://localhost:3000/app"
