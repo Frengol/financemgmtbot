@@ -22,6 +22,7 @@ test-backend:
 test-backend-coverage:
 	mkdir -p coverage/backend
 	pytest -q $(BACKEND_COVERAGE_ARGS)
+	python scripts/check_backend_coverage.py coverage/backend/coverage.xml --min-lines 90 --min-branches 90
 
 test-backend-live-db-smoke:
 	LIVE_DB_SMOKE=true pytest -q test_live_db_smoke.py

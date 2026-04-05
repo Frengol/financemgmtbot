@@ -64,4 +64,13 @@ describe('App', () => {
 
     expect(await screen.findByText('Login page')).toBeInTheDocument();
   });
+
+  it('renders the protected shell for admin routes', async () => {
+    window.history.pushState({}, '', '/historico');
+    const { default: App } = await import('./App');
+
+    render(<App />);
+
+    expect(await screen.findByText('Protected route shell')).toBeInTheDocument();
+  });
 });

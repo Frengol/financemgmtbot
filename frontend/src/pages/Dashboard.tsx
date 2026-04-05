@@ -27,6 +27,8 @@ export default function Dashboard() {
   const [chartData, setChartData] = useState<Array<{ date: string; Gasto: number }>>([]);
   const [donutData, setDonutData] = useState<Array<{ name: string; value: number }>>([]);
   const [heatmapData, setHeatmapData] = useState<Array<{ name: string; "Valor Acumulado": number }>>([]);
+  const [error, setError] = useState("");
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
     const fetchKPIs = async () => {
@@ -35,6 +37,7 @@ export default function Dashboard() {
         setChartData([]);
         setDonutData([]);
         setHeatmapData([]);
+        setError("");
         return;
       }
 
@@ -50,6 +53,7 @@ export default function Dashboard() {
           setChartData([]);
           setDonutData([]);
           setHeatmapData([]);
+          setError("");
           return;
         }
 
@@ -95,16 +99,18 @@ export default function Dashboard() {
         setDataGeral({ total, essencial, superfluous });
         setDonutData(Object.entries(catCount).map(([name, value]) => ({ name, value })));
         setHeatmapData(Object.entries(heatCount).map(([name, value]) => ({ name, "Valor Acumulado": value })));
-      } catch {
+        setError("");
+      } catch (fetchError) {
         setDataGeral({ total: 0, essencial: 0, superfluous: 0 });
         setChartData([]);
         setDonutData([]);
         setHeatmapData([]);
+        setError(fetchError instanceof Error ? fetchError.message : "Nao foi possivel carregar os dados agora.");
       }
     };
 
     void fetchKPIs();
-  }, [authenticated, localBypass, referenceMonth]);
+  }, [authenticated, localBypass, referenceMonth, reloadToken]);
 
   useEffect(() => {
     const refresh = () => {
@@ -117,6 +123,18 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
+      {error && (
+        <div className="flex flex-col gap-3 rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-700 md:flex-row md:items-center md:justify-between">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => setReloadToken((current) => current + 1)}
+            className="inline-flex items-center justify-center rounded-lg border border-rose-200 bg-white px-3 py-2 font-medium text-rose-700 transition hover:bg-rose-100"
+          >
+            Tentar novamente
+          </button>
+        </div>
+      )}
       <Grid numItemsSm={2} numItemsLg={3} className="gap-6">
         <Card decoration="top" decorationColor="blue">
           <div className="mb-4 flex items-start justify-between gap-3">

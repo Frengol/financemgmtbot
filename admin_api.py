@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Any
 import unicodedata
 
+from api_responses import json_error, json_success, with_request_id
 from postgrest.exceptions import APIError
 from quart import jsonify, request
 
@@ -44,16 +45,18 @@ def _build_field_summary(payload: dict[str, Any] | None):
     }
 
 
-def _json_error(message: str, status_code: int):
-    response = jsonify({"status": "error", "message": message})
-    response.status_code = status_code
-    return response
+def _json_error(message: str, status_code: int, *, code: str = "UNKNOWN_ERROR", retryable: bool | None = None, retry_after_seconds: int | None = None):
+    return json_error(
+        message,
+        status_code,
+        code=code,
+        retryable=retryable,
+        retry_after_seconds=retry_after_seconds,
+    )
 
 
 def _json_success(payload: dict[str, Any], status_code: int = 200):
-    response = jsonify({"status": "ok", **payload})
-    response.status_code = status_code
-    return response
+    return json_success(payload, status_code)
 
 
 def _extract_user_fields(user: Any):
@@ -83,29 +86,29 @@ def autenticar_admin_request():
         return {"id": "local-dev", "email": "local-dev@localhost"}, None
 
     if not session_token:
-        return None, _json_error("Missing admin session.", 401)
+        return None, _json_error("Missing admin session.", 401, code="AUTH_SESSION_INVALID")
 
     try:
         session = resolve_admin_session(session_token)
     except Exception as exc:
-        logger.warning({"event": "admin_session_lookup_failed", "error": mascarar_segredos(str(exc))})
-        return None, _json_error("Invalid or expired session.", 401)
+        logger.warning(with_request_id({"event": "admin_session_lookup_failed", "error": mascarar_segredos(str(exc))}))
+        return None, _json_error("Invalid or expired session.", 401, code="AUTH_SESSION_INVALID")
 
     if not session:
-        return None, _json_error("Invalid or expired session.", 401)
+        return None, _json_error("Invalid or expired session.", 401, code="AUTH_SESSION_INVALID")
 
     user_id = session.get("user_id")
     email = session.get("email")
     normalized_email = email.lower() if isinstance(email, str) else None
     if ADMIN_USER_IDS and user_id not in ADMIN_USER_IDS:
-        return None, _json_error("Authenticated user is not allowed to access this admin route.", 403)
+        return None, _json_error("Authenticated user is not allowed to access this admin route.", 403, code="AUTH_ACCESS_DENIED")
     if ADMIN_EMAILS and normalized_email not in ADMIN_EMAILS:
-        return None, _json_error("Authenticated user is not allowed to access this admin route.", 403)
+        return None, _json_error("Authenticated user is not allowed to access this admin route.", 403, code="AUTH_ACCESS_DENIED")
 
     if request.method in {"POST", "PATCH", "DELETE"}:
         csrf_token = request.headers.get("X-CSRF-Token")
         if not validate_csrf_token(session_token, csrf_token):
-            return None, _json_error("Missing or invalid CSRF token.", 403)
+            return None, _json_error("Missing or invalid CSRF token.", 403, code="AUTH_CSRF_INVALID")
 
     return {"id": user_id, "email": normalized_email}, None
 
@@ -213,8 +216,11 @@ def listar_gastos_admin():
         response = query.execute()
         return _json_success({"transactions": getattr(response, "data", [])}, 200)
     except APIError as exc:
-        logger.error({"event": "admin_list_transactions_failed", "error": mascarar_segredos(str(exc))})
-        return _json_error("Unable to load transactions right now.", 500)
+        logger.error(with_request_id({"event": "admin_list_transactions_failed", "error": mascarar_segredos(str(exc))}))
+        return _json_error("Unable to load transactions right now.", 503, code="ADMIN_DATA_LOAD_FAILED", retryable=True)
+    except Exception as exc:
+        logger.error(with_request_id({"event": "admin_list_transactions_unexpected", "error": mascarar_segredos(str(exc))}))
+        return _json_error("Unable to load transactions right now.", 503, code="ADMIN_DATA_LOAD_FAILED", retryable=True)
 
 
 def listar_cache_admin():
@@ -244,8 +250,11 @@ def listar_cache_admin():
             })
         return _json_success({"items": items}, 200)
     except APIError as exc:
-        logger.error({"event": "admin_list_pending_receipts_failed", "error": mascarar_segredos(str(exc))})
-        return _json_error("Unable to load pending receipts right now.", 500)
+        logger.error(with_request_id({"event": "admin_list_pending_receipts_failed", "error": mascarar_segredos(str(exc))}))
+        return _json_error("Unable to load pending receipts right now.", 503, code="ADMIN_DATA_LOAD_FAILED", retryable=True)
+    except Exception as exc:
+        logger.error(with_request_id({"event": "admin_list_pending_receipts_unexpected", "error": mascarar_segredos(str(exc))}))
+        return _json_error("Unable to load pending receipts right now.", 503, code="ADMIN_DATA_LOAD_FAILED", retryable=True)
 
 
 def criar_gasto_admin(payload: dict[str, Any] | None):
@@ -264,8 +273,8 @@ def criar_gasto_admin(payload: dict[str, Any] | None):
         registrar_auditoria_admin(actor, "create_transaction", "gastos", str(transaction_id or "unknown"), _build_field_summary(payload))
         return _json_success({"transaction": inserted}, 201)
     except APIError as exc:
-        logger.error({"event": "admin_create_transaction_failed", "error": mascarar_segredos(str(exc))})
-        return _json_error("Unable to create the transaction right now.", 500)
+        logger.error(with_request_id({"event": "admin_create_transaction_failed", "error": mascarar_segredos(str(exc))}))
+        return _json_error("Unable to create the transaction right now.", 503, code="ADMIN_ACTION_FAILED", retryable=True)
 
 
 def atualizar_gasto_admin(gasto_id: str, payload: dict[str, Any] | None):
@@ -287,8 +296,8 @@ def atualizar_gasto_admin(gasto_id: str, payload: dict[str, Any] | None):
         registrar_auditoria_admin(actor, "update_transaction", "gastos", gasto_id, _build_field_summary(payload))
         return _json_success({"transaction": updated}, 200)
     except APIError as exc:
-        logger.error({"event": "admin_update_transaction_failed", "id": gasto_id, "error": mascarar_segredos(str(exc))})
-        return _json_error("Unable to update the transaction right now.", 500)
+        logger.error(with_request_id({"event": "admin_update_transaction_failed", "id": gasto_id, "error": mascarar_segredos(str(exc))}))
+        return _json_error("Unable to update the transaction right now.", 503, code="ADMIN_ACTION_FAILED", retryable=True)
 
 
 def deletar_gasto_admin(gasto_id: str):
@@ -305,8 +314,8 @@ def deletar_gasto_admin(gasto_id: str):
         registrar_auditoria_admin(actor, "delete_transaction", "gastos", gasto_id)
         return _json_success({"id": gasto_id}, 200)
     except APIError as exc:
-        logger.error({"event": "admin_delete_transaction_failed", "id": gasto_id, "error": mascarar_segredos(str(exc))})
-        return _json_error("Unable to delete the transaction right now.", 500)
+        logger.error(with_request_id({"event": "admin_delete_transaction_failed", "id": gasto_id, "error": mascarar_segredos(str(exc))}))
+        return _json_error("Unable to delete the transaction right now.", 503, code="ADMIN_ACTION_FAILED", retryable=True)
 
 
 def aprovar_cache_admin(cache_id: str):
@@ -351,11 +360,11 @@ def aprovar_cache_admin(cache_id: str):
 
         return _json_success({"id": cache_id, "linhas": linhas, "total": total}, 200)
     except APIError as exc:
-        logger.error({"event": "admin_approve_pending_failed", "id": cache_id, "error": mascarar_segredos(str(exc))})
-        return _json_error("Unable to approve the pending receipt right now.", 500)
+        logger.error(with_request_id({"event": "admin_approve_pending_failed", "id": cache_id, "error": mascarar_segredos(str(exc))}))
+        return _json_error("Unable to approve the pending receipt right now.", 503, code="ADMIN_ACTION_FAILED", retryable=True)
     except Exception as exc:
-        logger.error({"event": "admin_approve_pending_unexpected", "id": cache_id, "error": mascarar_segredos(str(exc))})
-        return _json_error("Unable to approve the pending receipt right now.", 500)
+        logger.error(with_request_id({"event": "admin_approve_pending_unexpected", "id": cache_id, "error": mascarar_segredos(str(exc))}))
+        return _json_error("Unable to approve the pending receipt right now.", 503, code="ADMIN_ACTION_FAILED", retryable=True)
 
 
 def rejeitar_cache_admin(cache_id: str):
@@ -372,5 +381,5 @@ def rejeitar_cache_admin(cache_id: str):
         registrar_auditoria_admin(actor, "reject_pending_receipt", "cache_aprovacao", cache_id)
         return _json_success({"id": cache_id}, 200)
     except APIError as exc:
-        logger.error({"event": "admin_reject_pending_failed", "id": cache_id, "error": mascarar_segredos(str(exc))})
-        return _json_error("Unable to reject the pending receipt right now.", 500)
+        logger.error(with_request_id({"event": "admin_reject_pending_failed", "id": cache_id, "error": mascarar_segredos(str(exc))}))
+        return _json_error("Unable to reject the pending receipt right now.", 503, code="ADMIN_ACTION_FAILED", retryable=True)

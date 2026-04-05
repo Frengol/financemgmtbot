@@ -63,6 +63,36 @@ describe('ProtectedRoute', () => {
     expect(await screen.findByText('Secure content')).toBeInTheDocument();
   });
 
+  it('renders the protected outlet when local bypass is enabled', async () => {
+    mockUseAuth.mockReturnValue({
+      authenticated: false,
+      user: null,
+      loading: false,
+      localBypass: true,
+      signOut: vi.fn(),
+    });
+    mockIsAllowedAdminEmail.mockReturnValue(false);
+
+    renderProtected();
+
+    expect(await screen.findByText('Secure content')).toBeInTheDocument();
+  });
+
+  it('redirects unauthenticated users to the login screen', async () => {
+    mockUseAuth.mockReturnValue({
+      authenticated: false,
+      user: null,
+      loading: false,
+      localBypass: false,
+      signOut: vi.fn(),
+    });
+    mockIsAllowedAdminEmail.mockReturnValue(false);
+
+    renderProtected();
+
+    expect(await screen.findByText('Login screen')).toBeInTheDocument();
+  });
+
   it('redirects unauthorized users and revokes the session', async () => {
     const signOut = vi.fn().mockResolvedValue(undefined);
     mockUseAuth.mockReturnValue({

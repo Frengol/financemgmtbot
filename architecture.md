@@ -25,7 +25,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - **Speech-to-Text:** Groq (`whisper-large-v3`) — Transcrição de áudio `.ogg`.
 * **Integração Telegram:** `httpx` — Cliente HTTP assíncrono para Telegram Bot API.
 * **Entrega Contínua:** `GitHub Actions` — CI para coverage do backend, coverage unitário do frontend, smoke E2E determinístico com Playwright, E2E integrado de autenticação com backend local, auditoria de dependências (`pip-audit`, `npm audit`), secret scanning com `gitleaks`, build/frontend build e deploy automatizado do frontend no GitHub Pages.
-* **Fundação de Testes:** `pytest`, `pytest-asyncio`, `pytest-cov`, `coverage.py`, `Vitest`, `@vitest/coverage-v8`, `Playwright` e `unittest.mock` — Cobertura regressiva local do backend e das rotas administrativas, métricas estruturais reais, smoke E2E local com mocks de `/auth/*` e `/api/admin/*` e uma suíte integrada local que percorre `magic-link -> callback -> sessão -> leitura de dados`.
+* **Fundação de Testes:** `pytest`, `pytest-asyncio`, `pytest-cov`, `coverage.py`, `Vitest`, `@vitest/coverage-v8`, `Playwright` e `unittest.mock` — Cobertura regressiva local do backend e das rotas administrativas, métricas estruturais reais com gate mínimo de `90%`, smoke E2E local com mocks de `/auth/*` e `/api/admin/*` e uma suíte integrada local que percorre `magic-link -> callback -> sessão -> leitura de dados`.
 
 ---
 
@@ -51,6 +51,8 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 6. O frontend chama o backend em `/api/admin/*` com `credentials: include`; mutações enviam `X-CSRF-Token` e não usam mais bearer token do Supabase no browser.
 7. O backend revalida a sessão própria, checa allowlists administrativas e executa a operação privilegiada com auditoria.
 8. O operador pode criar, editar, excluir, aprovar e rejeitar registros a partir do painel sem expor `service_role`, `access_token` nem `refresh_token` ao navegador.
+9. Falhas operacionais do painel usam envelope sanitizado com `code`, `requestId`, `retryable` e, quando aplicável, `retryAfterSeconds`, permitindo que a UI mostre erro real sem ecoar detalhes crus de provedores ou do banco.
+10. Se a persistência da sessão web estiver indisponível, o callback não volta mais silenciosamente para o painel: o backend redireciona explicitamente para `/login?reason=auth_unavailable&requestId=...`, e o frontend exibe erro visível de indisponibilidade temporária.
 
 ### 2.3 Separação de Superfícies
 * **GitHub Pages** hospeda apenas arquivos estáticos.
@@ -137,6 +139,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 
 ### 4.5 Observabilidade Blindada
 * Logs seguem em JSON com masking de segredos.
+* Erros administrativos e de autenticação do BFF devem compartilhar um `requestId` entre resposta HTTP e logs estruturados, permitindo correlação de suporte sem expor stack trace, query SQL, mensagens cruas de provider ou tokens.
 * Logs operacionais não devem registrar payloads brutos de IA, transcrições, conteúdo textual de transações, itens detalhados de cupons, dumps completos de inserts falhos, `access_token`, `refresh_token` ou payloads integrais de `cache_aprovacao`; devem registrar apenas metadados mínimos como evento, contagem, ids e nomes de campos.
 * A trilha `auditoria_admin` deve registrar contexto mínimo da operação administrativa, sem duplicar descrições completas de transações ou payloads integrais de aprovação.
 * Falhas de auditoria não devem expor credenciais ou corromper o fluxo principal sem log explícito.
@@ -188,10 +191,12 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 ### 5.3 CI/CD
 * `ci.yml`
   - executa `make test-backend-coverage`
+  - falha se o relatório do backend ficar abaixo de `90%` em `Lines` ou `Branches`
   - executa `pip-audit` sobre `requirements.txt` e `requirements-dev.txt`
   - instala dependências do frontend
   - executa `npm audit --omit=dev`
   - executa `npm run test:coverage`
+  - falha se a cobertura unitária do frontend ficar abaixo de `90%` em `Statements`, `Branches`, `Functions` ou `Lines`
   - valida `npm run verify:build-env`, exigindo `VITE_API_BASE_URL` absoluto vindo de GitHub Actions `Variables` ou `Secrets`
   - valida `npm run build`
   - valida `npm run verify:bundle` para garantir que o artefato publicado continua no contrato `cookie + CSRF`, sem `Authorization` nem fluxo Supabase no browser

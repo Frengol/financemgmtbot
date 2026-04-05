@@ -4,7 +4,9 @@ import { localDevBypassEnabled, requestMagicLink } from '@/lib/adminApi';
 
 export default function Login() {
   const redirectTarget = new URL(import.meta.env.BASE_URL, window.location.origin).toString();
-  const reason = new URLSearchParams(window.location.search).get('reason');
+  const searchParams = new URLSearchParams(window.location.search);
+  const reason = searchParams.get('reason');
+  const requestId = searchParams.get('requestId');
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -53,6 +55,12 @@ export default function Login() {
             {reason === 'unauthorized' && (
               <div className="bg-amber-50 text-amber-700 p-3 rounded-lg text-sm border border-amber-100">
                 Este usuario autenticou, mas nao esta autorizado a acessar o painel administrativo.
+              </div>
+            )}
+            {reason === 'auth_unavailable' && (
+              <div className="bg-amber-50 text-amber-700 p-3 rounded-lg text-sm border border-amber-100">
+                <p>O login esta temporariamente indisponivel. Tente novamente em instantes.</p>
+                {requestId && <p className="mt-1 text-xs">Codigo de suporte: {requestId}</p>}
               </div>
             )}
             {error && (

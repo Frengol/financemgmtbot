@@ -36,6 +36,7 @@ Local auth integration test mode:
 ## GitHub Actions
 
 - [`.github/workflows/ci.yml`](.github/workflows/ci.yml) now runs backend coverage, frontend unit coverage, frontend build and deterministic Playwright smoke tests on pushes and pull requests.
+- Backend coverage now fails below `90%` for both `Lines` and `Branches`, and frontend unit coverage now fails below `90%` for `Statements`, `Branches`, `Functions` and `Lines`.
 - The CI workflow also runs `pip-audit`, `npm audit --omit=dev`, a built-asset string scan and a full-history `gitleaks` job when the repository is checked out in GitHub Actions.
 - [`.github/workflows/deploy-pages.yml`](.github/workflows/deploy-pages.yml) validates the build environment, builds the frontend and deploys `frontend/dist` to GitHub Pages.
 - In the repository settings, set the Pages source to `GitHub Actions`.
@@ -57,6 +58,7 @@ Backend:
 - `make test-backend-coverage`
 - `make test-backend-live-db-smoke`
 - `make audit-backend-deps`
+- `make test-backend-coverage` now enforces `Lines >= 90%` and `Branches >= 90%`
 
 Frontend:
 - `make test-frontend`
@@ -67,6 +69,7 @@ Frontend:
 - `npm run test:e2e --prefix frontend`
 - `npm run test:e2e:smoke --prefix frontend`
 - `npm run test:e2e:integration --prefix frontend`
+- `make test-frontend-coverage` now enforces `Statements >= 90%`, `Branches >= 90%`, `Functions >= 90%` and `Lines >= 90%`
 
 Playwright:
 - install Chromium and Firefox locally with `npm run test:e2e:install --prefix frontend`

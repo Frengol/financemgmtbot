@@ -12,6 +12,7 @@ export default function Aprovacoes() {
   const fetchCache = async () => {
     if (!authenticated && !localBypass) {
       setItems([]);
+      setError("");
       return;
     }
 
@@ -20,8 +21,9 @@ export default function Aprovacoes() {
       if (data) {
         setItems(data as PendingApprovalItem[]);
       }
-    } catch {
-      setError("Nao foi possivel carregar as aprovacoes agora.");
+      setError("");
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : "Nao foi possivel carregar as aprovacoes agora.");
     }
   };
 
@@ -76,7 +78,7 @@ export default function Aprovacoes() {
     }
   };
 
-  if (items.length === 0) {
+  if (items.length === 0 && !error) {
     return (
       <div className="flex flex-col items-center justify-center h-64 text-slate-500">
         <Check className="h-12 w-12 text-slate-300 mb-4" />
@@ -92,6 +94,7 @@ export default function Aprovacoes() {
           {error}
         </div>
       )}
+      {items.length === 0 ? null : (
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
         {items.map((item) => {
           const preview = item.preview || {};
@@ -161,6 +164,7 @@ export default function Aprovacoes() {
           );
         })}
       </div>
+      )}
     </div>
   );
 }

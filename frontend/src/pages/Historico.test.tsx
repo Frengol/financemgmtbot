@@ -129,4 +129,114 @@ describe('Historico', () => {
       descricao: 'Cinema com amigos',
     }));
   });
+
+  it('shows the mapped backend error when the history cannot be loaded', async () => {
+    mockGetTransactions.mockRejectedValue(new Error('Nao foi possivel carregar os dados agora. Codigo de suporte: req_hist_1'));
+
+    render(<Historico />);
+
+    expect(await screen.findByText(/Nao foi possivel carregar os dados agora/i)).toBeInTheDocument();
+    expect(screen.getByText(/Codigo de suporte: req_hist_1/i)).toBeInTheDocument();
+  });
+
+  it('skips loading history when the session is unavailable', async () => {
+    mockUseAuth.mockReturnValue({
+      authenticated: false,
+      csrfToken: '',
+      loading: false,
+      localBypass: false,
+    });
+
+    render(<Historico />);
+
+    expect(await screen.findByText('Mostrando 0 registros')).toBeInTheDocument();
+    expect(mockGetTransactions).not.toHaveBeenCalled();
+  });
+
+  it('does not delete when the confirmation dialog is cancelled', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => false));
+    mockGetTransactions.mockResolvedValue({
+      transactions: [{
+        id: 'tx-3',
+        data: '2026-03-19',
+        natureza: 'Essencial',
+        categoria: 'Mercado',
+        descricao: 'Compra protegida',
+        valor: 10,
+        conta: 'Nubank',
+        metodo_pagamento: 'Pix',
+      }],
+    });
+
+    render(<Historico />);
+
+    expect(await screen.findByText('Compra protegida')).toBeInTheDocument();
+    await userEvent.click(screen.getAllByTitle('Excluir')[0]);
+    expect(mockDeleteTransaction).not.toHaveBeenCalled();
+  });
+
+  it('shows an auth loading error before deleting', async () => {
+    mockUseAuth.mockReturnValue({
+      authenticated: true,
+      csrfToken: 'csrf-token',
+      loading: true,
+      localBypass: false,
+    });
+    mockGetTransactions.mockResolvedValue({
+      transactions: [{
+        id: 'tx-4',
+        data: '2026-03-19',
+        natureza: 'Essencial',
+        categoria: 'Mercado',
+        descricao: 'Compra aguardando auth',
+        valor: 10,
+        conta: 'Nubank',
+        metodo_pagamento: 'Pix',
+      }],
+    });
+
+    render(<Historico />);
+    expect(await screen.findByText('Compra aguardando auth')).toBeInTheDocument();
+    await userEvent.click(screen.getAllByTitle('Excluir')[0]);
+    expect(await screen.findByText('Sua autenticacao ainda esta sendo carregada. Tente novamente em alguns segundos.')).toBeInTheDocument();
+  });
+
+  it('filters, paginates and allows local bypass deletes', async () => {
+    mockUseAuth.mockReturnValue({
+      authenticated: false,
+      csrfToken: '',
+      loading: false,
+      localBypass: true,
+    });
+    mockGetTransactions.mockResolvedValue({
+      transactions: Array.from({ length: 11 }, (_, index) => ({
+        id: `tx-${index + 1}`,
+        data: `2026-03-${String(index + 1).padStart(2, '0')}`,
+        natureza: 'Essencial',
+        categoria: index === 10 ? 'Viagem' : 'Mercado',
+        descricao: index === 10 ? 'Viagem especial' : `Compra ${index + 1}`,
+        valor: index + 1,
+        conta: 'Nubank',
+        metodo_pagamento: 'Pix',
+      })),
+    });
+    mockDeleteTransaction.mockResolvedValue({ id: 'tx-11' });
+
+    render(<Historico />);
+
+    expect(await screen.findByText('Compra 1')).toBeInTheDocument();
+    expect(screen.getByText('Mostrando 10 registros')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Próxima' }));
+    expect(await screen.findByText('Viagem especial')).toBeInTheDocument();
+
+    await userEvent.type(screen.getByPlaceholderText('Buscar (ex: Mercado)...'), 'Viagem');
+    expect(await screen.findByText('Viagem especial')).toBeInTheDocument();
+    expect(screen.queryByText('Compra 1')).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getAllByTitle('Excluir')[0]);
+    await waitFor(() => {
+      expect(mockDeleteTransaction).toHaveBeenCalledWith('tx-11', '');
+    });
+  });
 });

@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Dashboard from './Dashboard';
 
@@ -27,7 +28,7 @@ vi.mock('@tremor/react', () => ({
 describe('Dashboard', () => {
   beforeEach(() => {
     mockGetTransactions.mockReset();
-    mockUseAuth.mockReturnValue({ authenticated: true });
+    mockUseAuth.mockReturnValue({ authenticated: true, localBypass: false });
   });
 
   it('loads KPI totals and chart data for the selected month', async () => {
@@ -69,10 +70,58 @@ describe('Dashboard', () => {
   });
 
   it('falls back to zeroed metrics when the request fails', async () => {
-    mockGetTransactions.mockRejectedValue(new Error('network'));
+    mockGetTransactions.mockRejectedValue(new Error('Nao foi possivel carregar os dados agora. Codigo de suporte: req_dash_1'));
+
+    render(<Dashboard />);
+
+    expect(await screen.findByText(/Nao foi possivel carregar os dados agora/i)).toBeInTheDocument();
+    expect(screen.getByText(/Codigo de suporte: req_dash_1/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Tentar novamente' })).toBeInTheDocument();
+  });
+
+  it('uses the generic dashboard error when the rejection is not an Error instance', async () => {
+    mockGetTransactions.mockRejectedValue('falha-crua');
+
+    render(<Dashboard />);
+
+    expect(await screen.findByText('Nao foi possivel carregar os dados agora.')).toBeInTheDocument();
+  });
+
+  it('shows zeroed charts when the backend returns no transaction payload', async () => {
+    mockGetTransactions.mockResolvedValue({});
 
     render(<Dashboard />);
 
     expect(await screen.findAllByText('R$ 0,00')).toHaveLength(3);
+    expect(screen.getByTestId('area-chart')).toHaveTextContent('0');
+    expect(screen.getByTestId('donut-chart')).toHaveTextContent('0');
+    expect(screen.getByTestId('bar-chart')).toHaveTextContent('0');
+  });
+
+  it('skips dashboard loading when the admin session is not available', async () => {
+    mockUseAuth.mockReturnValue({ authenticated: false, localBypass: false });
+
+    render(<Dashboard />);
+
+    expect(await screen.findAllByText('R$ 0,00')).toHaveLength(3);
+    expect(mockGetTransactions).not.toHaveBeenCalled();
+  });
+
+  it('retries the request after an error', async () => {
+    mockGetTransactions
+      .mockRejectedValueOnce(new Error('Nao foi possivel carregar os dados agora. Codigo de suporte: req_dash_retry'))
+      .mockResolvedValueOnce({
+        transactions: [{ data: '2026-03-02', natureza: 'Essencial', categoria: 'Mercado', valor: 42 }],
+      });
+
+    render(<Dashboard />);
+
+    expect(await screen.findByText(/Codigo de suporte: req_dash_retry/i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Tentar novamente' }));
+
+    await waitFor(() => {
+      expect(screen.getAllByText('R$ 42,00')).toHaveLength(2);
+    });
   });
 });

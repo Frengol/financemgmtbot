@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
+from postgrest.exceptions import APIError
 
 from config import logger, mascarar_segredos, supabase
 from test_support import auth_test_mode_enabled, load_admin_session, revoke_admin_session as revoke_test_admin_session, store_admin_session, update_admin_session
@@ -27,6 +28,32 @@ MAX_TELEGRAM_IMAGE_BYTES = int(os.environ.get("MAX_TELEGRAM_IMAGE_BYTES") or 8_0
 MAX_TELEGRAM_AUDIO_BYTES = int(os.environ.get("MAX_TELEGRAM_AUDIO_BYTES") or 12_000_000)
 
 _RATE_LIMIT_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
+
+
+class AdminSessionStorageUnavailableError(RuntimeError):
+    def __init__(self, message: str, *, upstream_code: str | None = None):
+        super().__init__(message)
+        self.upstream_code = upstream_code
+
+
+def _extract_upstream_error_code(exc: Exception):
+    code = getattr(exc, "code", None)
+    if code:
+        return str(code)
+
+    payload = getattr(exc, "json", None)
+    if isinstance(payload, dict) and payload.get("code"):
+        return str(payload["code"])
+
+    return None
+
+
+def _is_missing_admin_session_storage(exc: Exception):
+    message = mascarar_segredos(str(exc)).lower()
+    code = (_extract_upstream_error_code(exc) or "").upper()
+    return code == "PGRST205" or (
+        "admin_web_sessions" in message and "schema cache" in message
+    )
 
 
 def _derive_secret(label: str):
@@ -131,7 +158,15 @@ def create_admin_session(user_id: str, email: str | None, user_agent: str | None
             "user_agent_hash": hash_optional(user_agent),
             "ip_hash": hash_optional(ip_address),
         }
-        supabase.table("admin_web_sessions").insert(payload).execute()
+        try:
+            supabase.table("admin_web_sessions").insert(payload).execute()
+        except APIError as exc:
+            if _is_missing_admin_session_storage(exc):
+                raise AdminSessionStorageUnavailableError(
+                    "admin_web_sessions storage unavailable.",
+                    upstream_code=_extract_upstream_error_code(exc),
+                ) from exc
+            raise
     return {
         "token": session_token,
         "csrf_token": build_csrf_token(session_token),

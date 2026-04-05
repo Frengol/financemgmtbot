@@ -71,4 +71,24 @@ describe('useTransactionComposer', () => {
     expect(result.current.isOpen).toBe(false);
     expect(result.current.editingId).toBeNull();
   });
+
+  it('allows manual draft updates and rejects usage outside the provider', () => {
+    const { result } = renderHook(() => useTransactionComposer(), { wrapper });
+
+    act(() => {
+      result.current.openCreate();
+      result.current.setDraft({
+        ...result.current.draft,
+        descricao: 'Compra ajustada',
+        valor: 99,
+      });
+    });
+
+    expect(result.current.draft.descricao).toBe('Compra ajustada');
+    expect(result.current.draft.valor).toBe(99);
+
+    expect(() => renderHook(() => useTransactionComposer())).toThrow(
+      'useTransactionComposer must be used within TransactionComposerProvider.',
+    );
+  });
 });

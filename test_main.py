@@ -9,7 +9,7 @@ import json
 import asyncio
 import calendar
 from datetime import datetime, timedelta
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 from collections import defaultdict
 from typing import Dict, List, Any
@@ -72,8 +72,17 @@ import test_support
 
 # Restore correct references so tests can interact
 config.supabase = _mock_supabase_client
+db_repository.supabase = _mock_supabase_client
+admin_api.supabase = _mock_supabase_client
+handlers.supabase = _mock_supabase_client
+security.supabase = _mock_supabase_client
+main.supabase = _mock_supabase_client
 config.groq_client = _mock_groq
 config.deepseek_client = _mock_deepseek
+ai_service.groq_client = _mock_groq
+ai_service.deepseek_client = _mock_deepseek
+config.SECRET_TOKEN = ENV_VARS["TELEGRAM_SECRET_TOKEN"]
+main.SECRET_TOKEN = ENV_VARS["TELEGRAM_SECRET_TOKEN"]
 
 
 # ============================================================
@@ -1302,6 +1311,45 @@ class TestAdminRoutes:
         assert sent_payload["options"]["email_redirect_to"] == "https://api.example.com/auth/callback?next=https%3A%2F%2Fadmin.example.com%2Fapp%2F"
 
     @pytest.mark.asyncio
+    async def test_auth_magic_link_returns_rate_limit_error_with_request_id(self):
+        config.supabase.auth.sign_in_with_otp = MagicMock(side_effect=Exception("email rate limit exceeded"))
+
+        async with main.app.test_client() as client:
+            with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), patch.object(main, "AUTH_CALLBACK_PUBLIC_URL", "https://api.example.com/auth/callback"), patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})):
+                resp = await client.post(
+                    "/auth/magic-link",
+                    json={"email": "admin@example.com", "redirectTo": "https://admin.example.com/app/login"},
+                )
+
+        assert resp.status_code == 429
+        payload = await resp.get_json()
+        assert payload["code"] == "AUTH_MAGIC_LINK_RATE_LIMIT"
+        assert payload["retryable"] is True
+        assert payload["retryAfterSeconds"] == 300
+        assert payload["requestId"].startswith("req_")
+        assert resp.headers["X-Request-ID"] == payload["requestId"]
+        assert resp.headers["Retry-After"] == "300"
+
+    @pytest.mark.asyncio
+    async def test_auth_magic_link_returns_sanitized_send_failure_for_allowed_email(self):
+        config.supabase.auth.sign_in_with_otp = MagicMock(side_effect=Exception("smtp backend exploded"))
+
+        async with main.app.test_client() as client:
+            with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), patch.object(main, "AUTH_CALLBACK_PUBLIC_URL", "https://api.example.com/auth/callback"), patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})):
+                resp = await client.post(
+                    "/auth/magic-link",
+                    json={"email": "admin@example.com", "redirectTo": "https://admin.example.com/app/login"},
+                )
+
+        assert resp.status_code == 503
+        payload = await resp.get_json()
+        assert payload["code"] == "AUTH_MAGIC_LINK_SEND_FAILED"
+        assert payload["retryable"] is True
+        assert "smtp backend exploded" not in payload["message"].lower()
+        assert payload["requestId"].startswith("req_")
+        assert resp.headers["X-Request-ID"] == payload["requestId"]
+
+    @pytest.mark.asyncio
     async def test_auth_callback_creates_cookie_session_and_session_endpoint_resolves_user(self):
         self._mock_admin_user()
 
@@ -1421,6 +1469,9 @@ class TestAdminRoutes:
         assert resp.status_code == 401
         payload = await resp.get_json()
         assert payload["message"] == "Missing admin session."
+        assert payload["code"] == "AUTH_SESSION_INVALID"
+        assert payload["requestId"].startswith("req_")
+        assert resp.headers["X-Request-ID"] == payload["requestId"]
 
     @pytest.mark.asyncio
     async def test_admin_create_transaction_requires_csrf(self):
@@ -2114,6 +2165,25 @@ class TestSecurityCoverage:
         with patch.object(security.supabase, "table", return_value=mock_sessions):
             assert security.resolve_admin_session("opaque-token") is None
 
+    def test_create_admin_session_maps_missing_storage_table_to_specific_error(self):
+        from postgrest.exceptions import APIError
+
+        failing_sessions = MagicMock()
+        failing_sessions.insert.return_value.execute.side_effect = APIError(
+            {
+                "message": "Could not find the table 'public.admin_web_sessions' in the schema cache",
+                "code": "PGRST205",
+                "details": "",
+                "hint": "",
+            }
+        )
+
+        with patch.object(security.supabase, "table", return_value=failing_sessions):
+            with pytest.raises(security.AdminSessionStorageUnavailableError) as exc_info:
+                security.create_admin_session("user-1", "admin@example.com", "Mozilla", "127.0.0.1")
+
+        assert exc_info.value.upstream_code == "PGRST205"
+
 
 class TestAdminRoutesAdditional:
     @pytest.mark.asyncio
@@ -2144,6 +2214,9 @@ class TestAdminRoutesAdditional:
         assert "Finalizing secure sign-in" in body
         assert "history.replaceState" in body
         assert "https://admin.example.com/app/" in body
+        assert "AUTH_SESSION_STORAGE_UNAVAILABLE" in body
+        assert "auth_unavailable" in body
+        assert "AUTH_ACCESS_DENIED" in body
         assert resp.headers["Cache-Control"] == "no-store, private"
 
     @pytest.mark.asyncio
@@ -2173,6 +2246,96 @@ class TestAdminRoutesAdditional:
         assert payload["message"] == "Missing access token."
 
     @pytest.mark.asyncio
+    async def test_auth_callback_get_redirects_auth_unavailable_when_session_storage_is_missing(self):
+        authorized_user = MagicMock()
+        authorized_user.id = "user-1"
+        authorized_user.email = "admin@example.com"
+        config.supabase.auth.verify_otp = MagicMock(return_value=authorized_user)
+
+        log_calls = []
+
+        def record_log(payload):
+            log_calls.append(payload)
+
+        async with main.app.test_client() as client:
+            with (
+                patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})),
+                patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"),
+                patch.object(
+                    main,
+                    "create_admin_session",
+                    side_effect=security.AdminSessionStorageUnavailableError(
+                        "admin_web_sessions storage unavailable.",
+                        upstream_code="PGRST205",
+                    ),
+                ),
+                patch.object(main.logger, "error", side_effect=record_log),
+            ):
+                resp = await client.get("/auth/callback?token_hash=fakehash&type=magiclink")
+
+        assert resp.status_code == 302
+        redirected = urlsplit(resp.headers["Location"])
+        assert redirected.scheme == "https"
+        assert redirected.netloc == "admin.example.com"
+        assert redirected.path == "/app/login"
+        query = parse_qs(redirected.query)
+        assert query["reason"] == ["auth_unavailable"]
+        assert query["requestId"][0].startswith("req_")
+        assert log_calls
+        assert log_calls[-1]["event"] == "auth_session_storage_unavailable"
+        assert log_calls[-1]["storage"] == "admin_web_sessions"
+        assert log_calls[-1]["upstream_code"] == "PGRST205"
+        assert log_calls[-1]["request_id"] == query["requestId"][0]
+
+    @pytest.mark.asyncio
+    async def test_auth_callback_post_returns_sanitized_storage_error_with_request_id(self):
+        auth_response = MagicMock()
+        auth_response.user = {"id": "user-1", "email": "admin@example.com"}
+        config.supabase.auth.get_user = MagicMock(return_value=auth_response)
+
+        log_calls = []
+
+        def record_log(payload):
+            log_calls.append(payload)
+
+        async with main.app.test_client() as client:
+            with (
+                patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})),
+                patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"),
+                patch.object(
+                    main,
+                    "create_admin_session",
+                    side_effect=security.AdminSessionStorageUnavailableError(
+                        "Could not find the table 'public.admin_web_sessions' in the schema cache",
+                        upstream_code="PGRST205",
+                    ),
+                ),
+                patch.object(main.logger, "error", side_effect=record_log),
+            ):
+                resp = await client.post(
+                    "/auth/callback",
+                    json={
+                        "access_token": "upstream-token",
+                        "redirectTo": "https://admin.example.com/app/",
+                    },
+                )
+
+        assert resp.status_code == 503
+        payload = await resp.get_json()
+        assert payload["code"] == "AUTH_SESSION_STORAGE_UNAVAILABLE"
+        assert payload["retryable"] is True
+        assert payload["requestId"].startswith("req_")
+        assert resp.headers["X-Request-ID"] == payload["requestId"]
+        assert "admin_web_sessions" not in payload["message"]
+        assert "schema cache" not in payload["message"]
+        assert "PGRST205" not in payload["message"]
+        assert log_calls
+        assert log_calls[-1]["event"] == "auth_session_storage_unavailable"
+        assert log_calls[-1]["storage"] == "admin_web_sessions"
+        assert log_calls[-1]["upstream_code"] == "PGRST205"
+        assert log_calls[-1]["request_id"] == payload["requestId"]
+
+    @pytest.mark.asyncio
     async def test_auth_routes_fail_explicitly_without_public_urls_outside_localhost(self):
         async with main.app.test_client() as client:
             with patch.object(main, "FRONTEND_PUBLIC_URL", ""), patch.object(main, "AUTH_CALLBACK_PUBLIC_URL", ""), patch.object(main, "_is_loopback_request", return_value=False):
@@ -2184,6 +2347,8 @@ class TestAdminRoutesAdditional:
         assert resp.status_code == 500
         payload = await resp.get_json()
         assert payload["message"] == "Auth redirect configuration is invalid."
+        assert payload["code"] == "AUTH_CONFIGURATION_INVALID"
+        assert payload["requestId"].startswith("req_")
 
     @pytest.mark.asyncio
     async def test_auth_logout_clears_cookies_even_when_revoke_fails(self):
@@ -2199,6 +2364,45 @@ class TestAdminRoutesAdditional:
         set_cookie_headers = resp.headers.getlist("Set-Cookie")
         assert any("fm_admin_session=;" in header for header in set_cookie_headers)
         assert any("fm_csrf=;" in header for header in set_cookie_headers)
+
+    @pytest.mark.asyncio
+    async def test_admin_list_transactions_returns_stable_error_contract_when_database_fails(self):
+        from postgrest.exceptions import APIError
+
+        helper = TestAdminRoutes()
+        helper._mock_admin_user()
+
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[helper._build_session_row()]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+
+        failing_gastos = MagicMock()
+        failing_gastos.select.return_value.order.return_value.execute.side_effect = APIError(
+            {"message": "DB fail", "code": "500", "details": "", "hint": ""}
+        )
+
+        def table_switch(name):
+            if name == "admin_web_sessions":
+                return mock_sessions
+            if name == "gastos":
+                return failing_gastos
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        async with main.app.test_client() as client:
+            await helper._authenticate_session(client)
+            resp = await client.get("/api/admin/gastos")
+
+        assert resp.status_code == 503
+        payload = await resp.get_json()
+        assert payload["code"] == "ADMIN_DATA_LOAD_FAILED"
+        assert payload["retryable"] is True
+        assert payload["requestId"].startswith("req_")
+        assert resp.headers["X-Request-ID"] == payload["requestId"]
 
     @pytest.mark.asyncio
     async def test_webhook_rejects_oversized_payload(self):

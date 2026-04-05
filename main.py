@@ -1,9 +1,10 @@
 import json
 import os
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 from quart import Quart, Response, jsonify, redirect, request
 
+from api_responses import attach_request_id, current_request_id, json_error, json_success, with_request_id
 from admin_api import (
     aprovar_cache_admin,
     atualizar_gasto_admin,
@@ -16,6 +17,7 @@ from admin_api import (
 from config import ADMIN_EMAILS, ADMIN_USER_IDS, AUTH_CALLBACK_PUBLIC_URL, FRONTEND_ALLOWED_ORIGINS, FRONTEND_PUBLIC_URL, SECRET_TOKEN, logger, mascarar_segredos, normalize_frontend_origin, supabase
 from handlers import processar_update_assincrono
 from security import (
+    AdminSessionStorageUnavailableError,
     CSRF_COOKIE_NAME,
     MAX_WEBHOOK_BODY_BYTES,
     SESSION_ABSOLUTE_HOURS,
@@ -31,16 +33,18 @@ from test_support import auth_test_mode_enabled, capture_magic_link, consume_mag
 app = Quart(__name__)
 
 
-def _json_error(message: str, status_code: int):
-    response = jsonify({"status": "error", "message": message})
-    response.status_code = status_code
-    return response
+def _json_error(message: str, status_code: int, *, code: str = "UNKNOWN_ERROR", retryable: bool | None = None, retry_after_seconds: int | None = None):
+    return json_error(
+        message,
+        status_code,
+        code=code,
+        retryable=retryable,
+        retry_after_seconds=retry_after_seconds,
+    )
 
 
 def _json_success(payload: dict[str, object], status_code: int = 200):
-    response = jsonify({"status": "ok", **payload})
-    response.status_code = status_code
-    return response
+    return json_success(payload, status_code)
 
 
 def _extract_user_fields(user):
@@ -124,8 +128,8 @@ def _default_auth_callback_public_url():
 
 
 def _auth_redirect_config_error(exc: Exception):
-    logger.error({"event": "auth_redirect_configuration_invalid", "error": mascarar_segredos(str(exc))})
-    return _json_error("Auth redirect configuration is invalid.", 500)
+    logger.error(with_request_id({"event": "auth_redirect_configuration_invalid", "error": mascarar_segredos(str(exc))}))
+    return _json_error("Auth redirect configuration is invalid.", 500, code="AUTH_CONFIGURATION_INVALID")
 
 
 def _set_session_cookies(response, session_token: str, csrf_token: str):
@@ -185,6 +189,31 @@ def _build_callback_url(frontend_redirect: str):
     return f"{callback_base}?next={quote(frontend_redirect, safe='')}"
 
 
+def _build_login_redirect_target(redirect_to: str, *, reason: str | None = None, request_id: str | None = None):
+    login_url = f"{redirect_to.rstrip('/')}/login"
+    params = {}
+    if reason:
+        params["reason"] = reason
+    if request_id:
+        params["requestId"] = request_id
+    if not params:
+        return login_url
+    return f"{login_url}?{urlencode(params)}"
+
+
+def _log_auth_session_storage_unavailable(exc: AdminSessionStorageUnavailableError):
+    request_id = current_request_id()
+    log_payload = {
+        "event": "auth_session_storage_unavailable",
+        "storage": "admin_web_sessions",
+        "request_id": request_id,
+    }
+    if exc.upstream_code:
+        log_payload["upstream_code"] = exc.upstream_code
+    logger.error(with_request_id(log_payload))
+    return request_id
+
+
 def _test_support_request_allowed():
     if not auth_test_mode_enabled():
         return False
@@ -228,21 +257,60 @@ def _build_fragment_bridge_html(redirect_to: str):
         }});
 
         const payload = await response.json().catch(() => ({{ redirectTo }}));
+        const buildLoginUrl = function (reason, requestId) {{
+          const loginUrl = new URL('login', redirectTo);
+          if (reason) {{
+            loginUrl.searchParams.set('reason', reason);
+          }}
+          if (requestId) {{
+            loginUrl.searchParams.set('requestId', requestId);
+          }}
+          return loginUrl.toString();
+        }};
+
+        if (!response.ok) {{
+          history.replaceState(null, '', window.location.pathname + window.location.search);
+          if (payload.code === 'AUTH_ACCESS_DENIED') {{
+            window.location.replace(buildLoginUrl('unauthorized'));
+            return;
+          }}
+          if (payload.code === 'AUTH_SESSION_STORAGE_UNAVAILABLE') {{
+            window.location.replace(buildLoginUrl('auth_unavailable', payload.requestId));
+            return;
+          }}
+          window.location.replace(buildLoginUrl('auth_unavailable', payload.requestId));
+          return;
+        }}
+
         const nextUrl = payload.redirectTo || redirectTo;
         history.replaceState(null, '', window.location.pathname + window.location.search);
         window.location.replace(nextUrl);
       }})().catch(function () {{
-        window.location.replace({serialized_redirect});
+        window.location.replace(new URL('login', {serialized_redirect}).toString());
       }});
     </script>
   </body>
 </html>"""
 
 
-def _rate_limited(scope: str, key: str, *, limit: int, window_seconds: int):
+def _rate_limited(
+    scope: str,
+    key: str,
+    *,
+    limit: int,
+    window_seconds: int,
+    code: str = "RATE_LIMITED",
+    message: str = "Too many requests. Try again later.",
+):
     if allow_request(scope, key, limit=limit, window_seconds=window_seconds):
         return None
-    return _json_error("Too many requests. Try again later.", 429)
+    return _json_error(
+        message,
+        429,
+        code=code,
+        retryable=True,
+        retry_after_seconds=window_seconds,
+    )
 
 
 @app.before_serving
@@ -257,6 +325,7 @@ async def shutdown():
 
 @app.after_request
 async def harden_response(response):
+    attach_request_id(response)
     origin = request.headers.get("Origin")
     if origin and _browser_cors_enabled() and _origin_allowed(origin):
         response.headers["Access-Control-Allow-Origin"] = origin
@@ -304,7 +373,22 @@ async def auth_magic_link():
                     },
                 })
         except Exception as exc:
-            logger.warning({"event": "auth_magic_link_send_failed", "error": mascarar_segredos(str(exc))})
+            sanitized_error = mascarar_segredos(str(exc))
+            logger.warning(with_request_id({"event": "auth_magic_link_send_failed", "error": sanitized_error}))
+            if "email rate limit exceeded" in sanitized_error.lower():
+                return _json_error(
+                    "Too many login requests. Try again later.",
+                    429,
+                    code="AUTH_MAGIC_LINK_RATE_LIMIT",
+                    retryable=True,
+                    retry_after_seconds=300,
+                )
+            return _json_error(
+                "Unable to send the magic link right now.",
+                503,
+                code="AUTH_MAGIC_LINK_SEND_FAILED",
+                retryable=True,
+            )
 
     return _json_success({"message": "If the e-mail is authorized, a magic link will be sent shortly."}, 200)
 
@@ -338,14 +422,17 @@ async def auth_callback():
                 auth_response = supabase.auth.verify_otp({"token_hash": token_hash, "type": otp_type})
                 user_id, email = _extract_user_fields(auth_response)
             if not user_id or not _is_allowed_admin_identity(email, user_id):
-                return redirect(_sanitize_frontend_redirect_target(f"{redirect_to.rstrip('/')}/login?reason=unauthorized"))
+                return redirect(_build_login_redirect_target(redirect_to, reason="unauthorized"))
 
             session = create_admin_session(user_id, email, request.headers.get("User-Agent"), request.remote_addr)
             response = redirect(redirect_to)
             return _set_session_cookies(response, session["token"], session["csrf_token"])
+        except AdminSessionStorageUnavailableError as exc:
+            request_id = _log_auth_session_storage_unavailable(exc)
+            return redirect(_build_login_redirect_target(redirect_to, reason="auth_unavailable", request_id=request_id))
         except Exception as exc:
-            logger.warning({"event": "auth_callback_verify_failed", "error": mascarar_segredos(str(exc))})
-            return redirect(_sanitize_frontend_redirect_target(f"{redirect_to.rstrip('/')}/login"))
+            logger.warning(with_request_id({"event": "auth_callback_verify_failed", "error": mascarar_segredos(str(exc))}))
+            return redirect(_build_login_redirect_target(redirect_to))
 
     payload = await request.get_json(silent=True) or {}
     access_token = str(payload.get("access_token") or "").strip()
@@ -354,19 +441,28 @@ async def auth_callback():
     except RuntimeError as exc:
         return _auth_redirect_config_error(exc)
     if not access_token:
-        return _json_error("Missing access token.", 400)
+        return _json_error("Missing access token.", 400, code="AUTH_SESSION_INVALID")
 
     try:
         auth_response = supabase.auth.get_user(access_token)
     except Exception as exc:
-        logger.warning({"event": "auth_callback_get_user_failed", "error": mascarar_segredos(str(exc))})
-        return _json_error("Invalid or expired upstream session.", 401)
+        logger.warning(with_request_id({"event": "auth_callback_get_user_failed", "error": mascarar_segredos(str(exc))}))
+        return _json_error("Invalid or expired upstream session.", 401, code="AUTH_SESSION_INVALID")
 
     user_id, email = _extract_user_fields(getattr(auth_response, "user", auth_response))
     if not user_id or not _is_allowed_admin_identity(email, user_id):
-        return _json_error("Authenticated user is not allowed to access this admin route.", 403)
+        return _json_error("Authenticated user is not allowed to access this admin route.", 403, code="AUTH_ACCESS_DENIED")
 
-    session = create_admin_session(user_id, email, request.headers.get("User-Agent"), request.remote_addr)
+    try:
+        session = create_admin_session(user_id, email, request.headers.get("User-Agent"), request.remote_addr)
+    except AdminSessionStorageUnavailableError as exc:
+        _log_auth_session_storage_unavailable(exc)
+        return _json_error(
+            "Login is temporarily unavailable. Try again later.",
+            503,
+            code="AUTH_SESSION_STORAGE_UNAVAILABLE",
+            retryable=True,
+        )
     response = _json_success({"redirectTo": redirect_to, "csrfToken": session["csrf_token"]}, 200)
     return _set_session_cookies(response, session["token"], session["csrf_token"])
 
@@ -433,7 +529,7 @@ async def auth_session():
     try:
         session = resolve_admin_session(session_token)
     except Exception as exc:
-        logger.warning({"event": "auth_session_lookup_failed", "error": mascarar_segredos(str(exc))})
+        logger.warning(with_request_id({"event": "auth_session_lookup_failed", "error": mascarar_segredos(str(exc))}))
         session = None
 
     if not session:
@@ -462,7 +558,7 @@ async def auth_logout():
     try:
         revoke_admin_session(session_token)
     except Exception as exc:
-        logger.warning({"event": "auth_logout_revoke_failed", "error": mascarar_segredos(str(exc))})
+        logger.warning(with_request_id({"event": "auth_logout_revoke_failed", "error": mascarar_segredos(str(exc))}))
 
     response = _json_success({"loggedOut": True}, 200)
     return _clear_session_cookies(response)
@@ -486,13 +582,13 @@ async def telegram_webhook():
 
     try:
         request_body = await request.get_json()
-        logger.info({"event": "webhook_received_raw", "module": "main"})
+        logger.info(with_request_id({"event": "webhook_received_raw", "module": "main"}))
 
         await processar_update_assincrono(request_body)
 
         return jsonify({"status": "ok"}), 200
     except Exception as exc:
-        logger.error({"event": "webhook_processing_error", "error": mascarar_segredos(str(exc))})
+        logger.error(with_request_id({"event": "webhook_processing_error", "error": mascarar_segredos(str(exc))}))
         return _json_error("Internal processing error.", 500)
 
 

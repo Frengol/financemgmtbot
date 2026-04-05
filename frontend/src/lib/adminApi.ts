@@ -6,7 +6,66 @@ export const localDevBypassEnabled = import.meta.env.DEV && import.meta.env.VITE
 type ApiResponse<T> = {
   status: string;
   message?: string;
+  code?: string;
+  requestId?: string;
+  retryable?: boolean;
+  retryAfterSeconds?: number;
 } & T;
+
+type ApiErrorPayload = {
+  message?: string;
+  error?: string;
+  code?: string;
+  requestId?: string;
+  retryable?: boolean;
+  retryAfterSeconds?: number;
+};
+
+const ERROR_MESSAGES: Record<string, string> = {
+  ADMIN_ACTION_FAILED: 'Nao foi possivel concluir a operacao agora.',
+  ADMIN_DATA_LOAD_FAILED: 'Nao foi possivel carregar os dados agora.',
+  AUTH_ACCESS_DENIED: 'Seu usuario nao esta autorizado a acessar o painel.',
+  AUTH_CONFIGURATION_INVALID: 'A configuracao de login esta indisponivel no momento. Tente novamente mais tarde.',
+  AUTH_CSRF_INVALID: 'Sua sessão não pôde ser validada. Atualize a pagina e tente novamente.',
+  AUTH_MAGIC_LINK_RATE_LIMIT: 'Muitos pedidos de login em pouco tempo. Aguarde alguns minutos e tente novamente.',
+  AUTH_MAGIC_LINK_SEND_FAILED: 'Nao foi possivel enviar o link de acesso agora. Tente novamente em instantes.',
+  AUTH_SESSION_INVALID: 'Sua sessao expirou. Faca login novamente.',
+  AUTH_SESSION_STORAGE_UNAVAILABLE: 'O login esta temporariamente indisponivel. Tente novamente em instantes.',
+  NETWORK_ERROR: 'Nao foi possivel conectar ao servidor agora. Verifique sua conexao e tente novamente.',
+};
+
+export class ApiError extends Error {
+  code: string;
+  status: number;
+  requestId?: string;
+  retryable: boolean;
+  retryAfterSeconds?: number;
+
+  constructor(
+    message: string,
+    {
+      code,
+      status,
+      requestId,
+      retryable = false,
+      retryAfterSeconds,
+    }: {
+      code: string;
+      status: number;
+      requestId?: string;
+      retryable?: boolean;
+      retryAfterSeconds?: number;
+    },
+  ) {
+    super(message);
+    this.name = 'ApiError';
+    this.code = code;
+    this.status = status;
+    this.requestId = requestId;
+    this.retryable = retryable;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
 
 export type AuthSessionPayload = {
   authenticated: boolean;
@@ -39,12 +98,26 @@ function buildApiUrl(path: string) {
 }
 
 async function parseError(response: Response) {
+  let payload: ApiErrorPayload = {};
   try {
-    const data = await response.json() as { message?: string; error?: string };
-    return data.message || data.error || `Request failed with status ${response.status}`;
+    payload = await response.json() as ApiErrorPayload;
   } catch {
-    return `Request failed with status ${response.status}`;
+    payload = {};
   }
+
+  const requestId = payload.requestId || response.headers.get('X-Request-ID') || undefined;
+  const code = payload.code || 'UNKNOWN_ERROR';
+  const fallbackMessage = payload.message || payload.error || `Request failed with status ${response.status}`;
+  const mappedMessage = ERROR_MESSAGES[code] || fallbackMessage;
+  const supportMessage = requestId ? `${mappedMessage} Codigo de suporte: ${requestId}` : mappedMessage;
+
+  return new ApiError(supportMessage, {
+    code,
+    status: response.status,
+    requestId,
+    retryable: payload.retryable ?? false,
+    retryAfterSeconds: payload.retryAfterSeconds,
+  });
 }
 
 async function apiRequest<T>(path: string, init: RequestInit = {}, csrfToken?: string): Promise<ApiResponse<T>> {
@@ -59,14 +132,23 @@ async function apiRequest<T>(path: string, init: RequestInit = {}, csrfToken?: s
     headers.set('X-CSRF-Token', csrfToken);
   }
 
-  const response = await fetch(buildApiUrl(path), {
-    ...init,
-    credentials: 'include',
-    headers,
-  });
+  let response: Response;
+  try {
+    response = await fetch(buildApiUrl(path), {
+      ...init,
+      credentials: 'include',
+      headers,
+    });
+  } catch {
+    throw new ApiError(ERROR_MESSAGES.NETWORK_ERROR, {
+      code: 'NETWORK_ERROR',
+      status: 0,
+      retryable: true,
+    });
+  }
 
   if (!response.ok) {
-    throw new Error(await parseError(response));
+    throw await parseError(response);
   }
 
   return response.json() as Promise<ApiResponse<T>>;

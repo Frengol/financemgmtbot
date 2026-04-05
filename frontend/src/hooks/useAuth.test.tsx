@@ -111,4 +111,87 @@ describe('useAuth', () => {
     expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
     expect(screen.getByTestId('csrf')).toHaveTextContent('');
   });
+
+  it('allows manual refresh and throws outside the provider', async () => {
+    mockGetAuthSession
+      .mockResolvedValueOnce({
+        authenticated: false,
+      })
+      .mockResolvedValueOnce({
+        authenticated: true,
+        user: { id: 'user-2', email: 'admin2@example.com' },
+        csrfToken: 'csrf-2',
+      });
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('yes');
+    });
+
+    function InvalidHarness() {
+      useAuth();
+      return null;
+    }
+
+    expect(() => render(<InvalidHarness />)).toThrow('useAuth must be used within AuthProvider.');
+  });
+
+  it('supports local development bypass without calling the backend logout route', async () => {
+    vi.resetModules();
+    const bypassGetSession = vi.fn();
+    const bypassLogout = vi.fn();
+
+    vi.doMock('@/lib/adminApi', () => ({
+      getAuthSession: (...args: unknown[]) => bypassGetSession(...args),
+      logoutAuthSession: (...args: unknown[]) => bypassLogout(...args),
+      localDevBypassEnabled: true,
+    }));
+
+    const authModule = await import('./useAuth');
+
+    function BypassHarness() {
+      const { authenticated, user, csrfToken, loading, signOut } = authModule.useAuth();
+      return (
+        <div>
+          <div data-testid="bypass-loading">{loading ? 'loading' : 'ready'}</div>
+          <div data-testid="bypass-authenticated">{authenticated ? 'yes' : 'no'}</div>
+          <div data-testid="bypass-email">{user?.email || ''}</div>
+          <div data-testid="bypass-csrf">{csrfToken}</div>
+          <button type="button" onClick={() => void signOut()}>
+            Bypass sign out
+          </button>
+        </div>
+      );
+    }
+
+    render(
+      <authModule.AuthProvider>
+        <BypassHarness />
+      </authModule.AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('bypass-loading')).toHaveTextContent('ready');
+    });
+
+    expect(screen.getByTestId('bypass-authenticated')).toHaveTextContent('yes');
+    expect(screen.getByTestId('bypass-email')).toHaveTextContent('local-dev@localhost');
+    expect(screen.getByTestId('bypass-csrf')).toHaveTextContent('local-dev-csrf');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Bypass sign out' }));
+
+    expect(bypassGetSession).not.toHaveBeenCalled();
+    expect(bypassLogout).not.toHaveBeenCalled();
+    expect(screen.getByTestId('bypass-authenticated')).toHaveTextContent('no');
+  });
 });

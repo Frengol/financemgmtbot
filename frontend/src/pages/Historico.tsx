@@ -36,8 +36,8 @@ export default function Historico() {
         conta: item.conta || 'Nao Informada',
       })));
       setError("");
-    } catch {
-      setError("Nao foi possivel carregar o historico agora.");
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : "Nao foi possivel carregar o historico agora.");
     }
     setFetching(false);
   };
