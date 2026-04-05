@@ -10,7 +10,7 @@ Backend local:
 
 Frontend local:
 - create `frontend/.env.development` based on `frontend/.env.development.example`
-- keep `VITE_API_BASE_URL=` empty in local development to use the Vite proxy
+- keep `VITE_API_BASE_URL=` empty in local development to use the Vite proxy for `/api`, `/auth` and local test-support routes
 
 GitHub Pages:
 - create `frontend/.env.production` based on `frontend/.env.production.example`
@@ -22,6 +22,10 @@ Supabase Auth:
 - in `Authentication -> URL Configuration`, set `Site URL` to your public backend callback, for example `https://api.example.com/auth/callback`
 - add both the backend callback URL and the published frontend URL to `Redirect URLs`
 - do not leave `localhost` as the production Site URL, or Supabase can generate expired/invalid links pointing at a local address
+
+Local auth integration test mode:
+- `AUTH_TEST_MODE=true` is reserved for local Playwright/backend integration and must never be enabled in Cloud Run production
+- in this mode, the backend captures deterministic magic links and keeps test sessions/data in memory instead of calling upstream auth or the real `admin_web_sessions` table
 
 ## Deployment model
 
@@ -51,6 +55,7 @@ Supabase Auth:
 Backend:
 - `make test-backend`
 - `make test-backend-coverage`
+- `make test-backend-live-db-smoke`
 - `make audit-backend-deps`
 
 Frontend:
@@ -60,7 +65,11 @@ Frontend:
 - `npm run verify:build-env --prefix frontend`
 - `npm run verify:bundle --prefix frontend`
 - `npm run test:e2e --prefix frontend`
+- `npm run test:e2e:smoke --prefix frontend`
+- `npm run test:e2e:integration --prefix frontend`
 
 Playwright:
-- install Chromium locally with `npm run test:e2e:install --prefix frontend`
-- the E2E suite runs against the local Vite app and mocks `/auth/*` and `/api/admin/*`, so it does not depend on Supabase, Telegram or Cloud Run
+- install Chromium and Firefox locally with `npm run test:e2e:install --prefix frontend`
+- the smoke suite keeps mocking `/auth/*` and `/api/admin/*` for deterministic UI regression coverage
+- the integration suite starts the local Quart backend in `AUTH_TEST_MODE`, requests a real magic link through the login form, follows the backend callback and validates that authenticated data loading works end to end
+- the live database smoke stays opt-in via `LIVE_DB_SMOKE=true` and only exercises read-only access to `/api/admin/gastos`

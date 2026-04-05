@@ -17,6 +17,7 @@ from security import (
     sanitize_plain_text,
     validate_csrf_token,
 )
+from test_support import auth_test_mode_enabled, list_seeded_transactions
 from utils import CATEGORIA_MAP, inferir_natureza
 
 AUDIT_TABLE = "auditoria_admin"
@@ -196,9 +197,13 @@ def listar_gastos_admin():
         return auth_error
 
     try:
-        query = supabase.table("gastos").select("id, data, natureza, categoria, descricao, valor, conta, metodo_pagamento").order("data", desc=True)
         date_from = (request.args.get("date_from") or "").strip()
         date_to = (request.args.get("date_to") or "").strip()
+
+        if auth_test_mode_enabled():
+            return _json_success({"transactions": list_seeded_transactions(date_from, date_to)}, 200)
+
+        query = supabase.table("gastos").select("id, data, natureza, categoria, descricao, valor, conta, metodo_pagamento").order("data", desc=True)
 
         if date_from:
             query = query.gte("data", date_from)

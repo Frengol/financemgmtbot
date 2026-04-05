@@ -24,8 +24,8 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - **OCR Tabular:** Google Gemini 2.5 Flash — Extrai itens, descontos e forma de pagamento de cupons.
   - **Speech-to-Text:** Groq (`whisper-large-v3`) — Transcrição de áudio `.ogg`.
 * **Integração Telegram:** `httpx` — Cliente HTTP assíncrono para Telegram Bot API.
-* **Entrega Contínua:** `GitHub Actions` — CI para coverage do backend, coverage unitário do frontend, smoke E2E determinístico com Playwright, auditoria de dependências (`pip-audit`, `npm audit`), secret scanning com `gitleaks`, build/frontend build e deploy automatizado do frontend no GitHub Pages.
-* **Fundação de Testes:** `pytest`, `pytest-asyncio`, `pytest-cov`, `coverage.py`, `Vitest`, `@vitest/coverage-v8`, `Playwright` e `unittest.mock` — Cobertura regressiva local do backend e das rotas administrativas, métricas estruturais reais e smoke E2E local com mocks de `/auth/*` e `/api/admin/*`.
+* **Entrega Contínua:** `GitHub Actions` — CI para coverage do backend, coverage unitário do frontend, smoke E2E determinístico com Playwright, E2E integrado de autenticação com backend local, auditoria de dependências (`pip-audit`, `npm audit`), secret scanning com `gitleaks`, build/frontend build e deploy automatizado do frontend no GitHub Pages.
+* **Fundação de Testes:** `pytest`, `pytest-asyncio`, `pytest-cov`, `coverage.py`, `Vitest`, `@vitest/coverage-v8`, `Playwright` e `unittest.mock` — Cobertura regressiva local do backend e das rotas administrativas, métricas estruturais reais, smoke E2E local com mocks de `/auth/*` e `/api/admin/*` e uma suíte integrada local que percorre `magic-link -> callback -> sessão -> leitura de dados`.
 
 ---
 
@@ -168,7 +168,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 * O artefato `frontend/dist` é publicado no GitHub Pages.
 * Em desenvolvimento:
   - `BASE_URL=/`
-  - proxy `/api` → backend local `127.0.0.1:8080`
+  - proxy `/api`, `/auth` e `/__test__` → backend local `127.0.0.1:8080`
   - bypass local opcional para autenticação de UI sem OTP
 * Em produção:
   - `BASE_URL=/financemgmtbot/`
@@ -196,7 +196,10 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - valida `npm run build`
   - valida `npm run verify:bundle` para garantir que o artefato publicado continua no contrato `cookie + CSRF`, sem `Authorization` nem fluxo Supabase no browser
   - varre o `dist` por strings sensíveis conhecidas antes de publicar artefatos
-  - executa `npm run test:e2e` com Playwright e rotas mockadas
+  - executa `npm run test:e2e` com Playwright em Chromium e Firefox
+  - a suíte E2E combina:
+    - smoke mockada para regressão rápida de UI
+    - integração local com backend Quart em `AUTH_TEST_MODE`, validando magic link, callback, cookie de sessão e carregamento de `/api/admin/gastos`
   - executa `gitleaks` com histórico completo no clone da CI
   - publica artefatos de coverage e do relatório Playwright
 * `deploy-pages.yml`
@@ -238,4 +241,5 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 * **Observabilidade e auditoria superiores:** ações administrativas ganham trilha persistente.
 * **Operação administrativa completa:** o painel deixa de ser apenas de leitura e passa a suportar manutenção manual segura de lançamentos.
 * **Experiência local mais fluida:** desenvolvimento não depende de rate limit do Magic Link, sem comprometer o modelo de segurança de produção.
+* **Cobertura real do fluxo crítico:** o login administrativo e a leitura de dados deixam de depender apenas de mocks e passam a ter regressão automatizada de ponta a ponta em ambiente local controlado.
 * **Base sólida para evolução futura:** a próxima etapa natural é adicionar domínio próprio + edge reverso para CSP/anti-clickjacking completos sem reestruturar o sistema inteiro.

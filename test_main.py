@@ -9,6 +9,7 @@ import json
 import asyncio
 import calendar
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 from collections import defaultdict
 from typing import Dict, List, Any
@@ -67,6 +68,7 @@ import handlers
 import main  # noqa: E402
 import admin_api
 import security
+import test_support
 
 # Restore correct references so tests can interact
 config.supabase = _mock_supabase_client
@@ -77,6 +79,13 @@ config.deepseek_client = _mock_deepseek
 # ============================================================
 # FIXTURES
 # ============================================================
+@pytest.fixture(autouse=True)
+def _reset_auth_test_support():
+    test_support.reset_auth_test_state()
+    yield
+    test_support.reset_auth_test_state()
+
+
 @pytest.fixture
 def mock_http_client():
     client = AsyncMock()
@@ -1331,6 +1340,78 @@ class TestAdminRoutes:
         assert session_payload["csrfToken"]
         assert session_resp.headers["Cache-Control"] == "no-store, private"
         assert session_resp.headers["X-Content-Type-Options"] == "nosniff"
+
+    @pytest.mark.asyncio
+    async def test_auth_magic_link_callback_and_admin_list_work_with_proxy_aware_secure_cookie(self):
+        mock_sessions = MagicMock()
+        mock_sessions.insert.return_value.execute.return_value = MagicMock(data=[])
+        mock_sessions.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[self._build_session_row()]
+        )
+        mock_sessions.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+
+        def table_switch(name):
+            if name == "admin_web_sessions":
+                return mock_sessions
+            return MagicMock()
+
+        config.supabase.table = MagicMock(side_effect=table_switch)
+
+        seeded_transactions = [
+            {
+                "id": "tx-auth-1",
+                "data": "2026-04-04",
+                "natureza": "Essencial",
+                "categoria": "Mercado",
+                "descricao": "Mercado autenticado",
+                "valor": 42.5,
+                "conta": "Nubank",
+                "metodo_pagamento": "Pix",
+            }
+        ]
+
+        with patch.dict(os.environ, {"AUTH_TEST_MODE": "true"}, clear=False):
+            test_support.seed_transactions(seeded_transactions)
+
+            async with main.app.test_client() as client:
+                with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), patch.object(main, "AUTH_CALLBACK_PUBLIC_URL", "https://api.example.com/auth/callback"), patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})), patch.object(admin_api, "ADMIN_EMAILS", frozenset({"admin@example.com"})), patch.object(main, "_test_support_request_allowed", return_value=True):
+                    magic_resp = await client.post(
+                        "/auth/magic-link",
+                        json={"email": "admin@example.com", "redirectTo": "https://admin.example.com/app/"},
+                    )
+                    assert magic_resp.status_code == 200
+
+                    magic_link_resp = await client.get("/__test__/auth/magic-link?email=admin@example.com")
+                    assert magic_link_resp.status_code == 200
+                    magic_link_payload = await magic_link_resp.get_json()
+                    callback_target = urlsplit(magic_link_payload["magicLink"]["link"])
+
+                    callback_resp = await client.get(
+                        f"{callback_target.path}?{callback_target.query}",
+                        headers={"X-Forwarded-Proto": "https"},
+                    )
+
+                    assert callback_resp.status_code == 302
+                    assert callback_resp.headers["Location"] == "https://admin.example.com/app/"
+                    set_cookie = callback_resp.headers["Set-Cookie"]
+                    assert "Secure" in set_cookie
+                    assert "SameSite=None" in set_cookie
+
+                    session_resp = await client.get("/auth/session", headers={"X-Forwarded-Proto": "https"})
+                    assert session_resp.status_code == 200
+                    session_payload = await session_resp.get_json()
+                    assert session_payload["authenticated"] is True
+                    assert session_payload["user"]["email"] == "admin@example.com"
+
+                    transactions_resp = await client.get(
+                        "/api/admin/gastos?date_from=2026-04-01&date_to=2026-04-30",
+                        headers={"X-Forwarded-Proto": "https"},
+                    )
+
+        assert transactions_resp.status_code == 200
+        transactions_payload = await transactions_resp.get_json()
+        assert transactions_payload["status"] == "ok"
+        assert transactions_payload["transactions"] == seeded_transactions
 
     @pytest.mark.asyncio
     async def test_admin_delete_requires_session_cookie(self):

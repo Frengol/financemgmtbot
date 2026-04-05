@@ -112,13 +112,17 @@ jobs:
   frontend-e2e:
     runs-on: ubuntu-latest
 
-    defaults:
-      run:
-        working-directory: frontend
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies for local auth server
+        run: pip install -r requirements-dev.txt
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -128,12 +132,15 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
+        working-directory: frontend
         run: npm ci
 
-      - name: Install Playwright browser
-        run: npx playwright install --with-deps chromium
+      - name: Install Playwright browsers
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium firefox
 
-      - name: Run frontend smoke E2E
+      - name: Run frontend smoke and auth E2E
+        working-directory: frontend
         run: npm run test:e2e
 
       - name: Upload Playwright report

@@ -1,4 +1,4 @@
-.PHONY: test-backend test-backend-coverage test-frontend test-frontend-coverage test-frontend-e2e audit-backend-deps audit-frontend-deps
+.PHONY: test-backend test-backend-coverage test-backend-live-db-smoke test-frontend test-frontend-coverage test-frontend-e2e audit-backend-deps audit-frontend-deps
 
 BACKEND_COVERAGE_ARGS = \
 	--cov=admin_api \
@@ -22,6 +22,9 @@ test-backend:
 test-backend-coverage:
 	mkdir -p coverage/backend
 	pytest -q $(BACKEND_COVERAGE_ARGS)
+
+test-backend-live-db-smoke:
+	LIVE_DB_SMOKE=true pytest -q test_live_db_smoke.py
 
 test-frontend:
 	npm test --prefix frontend

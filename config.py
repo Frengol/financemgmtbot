@@ -4,6 +4,7 @@ import traceback
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
+from unittest.mock import MagicMock
 from pythonjsonlogger import jsonlogger
 from supabase import create_client, Client
 from openai import AsyncOpenAI
@@ -102,6 +103,7 @@ FRONTEND_ALLOWED_ORIGINS = parse_frontend_allowed_origins(os.environ.get("FRONTE
 FRONTEND_PUBLIC_URL = normalize_public_url(os.environ.get("FRONTEND_PUBLIC_URL"), trailing_slash=True)
 AUTH_CALLBACK_PUBLIC_URL = normalize_public_url(os.environ.get("AUTH_CALLBACK_PUBLIC_URL"))
 ALLOW_LOCAL_DEV_AUTH = (os.environ.get("ALLOW_LOCAL_DEV_AUTH") or "").strip().lower() == "true"
+AUTH_TEST_MODE = (os.environ.get("AUTH_TEST_MODE") or "").strip().lower() == "true"
 
 def mascarar_segredos(texto):
     if not isinstance(texto, str): return texto
@@ -114,7 +116,10 @@ def mascarar_segredos(texto):
 try:
     supa_url = os.environ.get("SUPABASE_URL") or ""
     supa_key = os.environ.get("SUPABASE_KEY") or ""
-    supabase: Client = create_client(supa_url, supa_key)
+    if AUTH_TEST_MODE:
+        supabase = MagicMock(name="auth_test_supabase")
+    else:
+        supabase: Client = create_client(supa_url, supa_key)
     groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY") or "")
     deepseek_client = AsyncOpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY") or "", base_url="https://api.deepseek.com")
     genai.configure(api_key=os.environ.get("GEMINI_API_KEY") or "")

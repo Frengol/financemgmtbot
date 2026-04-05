@@ -21,7 +21,13 @@ describe('Login', () => {
 
     render(<Login />);
 
-    await userEvent.type(screen.getByLabelText('E-mail de Acesso'), 'admin@example.com');
+    const emailInput = screen.getByLabelText('E-mail de Acesso');
+    expect(emailInput).toHaveAttribute('name', 'email');
+    expect(emailInput).toHaveAttribute('autocomplete', 'email');
+    expect(emailInput).toHaveAttribute('autocapitalize', 'none');
+    expect(emailInput).toHaveAttribute('autocorrect', 'off');
+
+    await userEvent.type(emailInput, 'admin@example.com');
     await userEvent.click(screen.getByRole('button', { name: 'Enviar Magic Link' }));
 
     await waitFor(() => {

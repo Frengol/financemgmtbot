@@ -1,4 +1,5 @@
 import json
+import os
 from urllib.parse import quote, urlsplit
 
 from quart import Quart, Response, jsonify, redirect, request
@@ -25,6 +26,7 @@ from security import (
     sanitize_plain_text,
 )
 from telegram_service import close_http_client, init_http_client
+from test_support import auth_test_mode_enabled, capture_magic_link, consume_magic_link, peek_magic_link, reset_auth_test_state, seed_transactions
 
 app = Quart(__name__)
 
@@ -83,6 +85,28 @@ def _is_loopback_request():
     return _is_loopback_url(request.url_root)
 
 
+def _request_effective_scheme():
+    forwarded = (request.headers.get("Forwarded") or "").strip()
+    if forwarded:
+        first_hop = forwarded.split(",", 1)[0]
+        for part in first_hop.split(";"):
+            key, _, value = part.partition("=")
+            if key.strip().lower() == "proto":
+                candidate = value.strip().strip('"').lower()
+                if candidate:
+                    return candidate
+
+    forwarded_proto = (request.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip().lower()
+    if forwarded_proto:
+        return forwarded_proto
+
+    return request.scheme
+
+
+def _request_is_effectively_secure():
+    return _request_effective_scheme() == "https"
+
+
 def _default_frontend_public_url():
     if FRONTEND_PUBLIC_URL:
         return FRONTEND_PUBLIC_URL
@@ -105,7 +129,7 @@ def _auth_redirect_config_error(exc: Exception):
 
 
 def _set_session_cookies(response, session_token: str, csrf_token: str):
-    secure_cookie = request.scheme == "https"
+    secure_cookie = _request_is_effectively_secure()
     cookie_settings = {
         "max_age": SESSION_ABSOLUTE_HOURS * 60 * 60,
         "secure": secure_cookie,
@@ -118,7 +142,7 @@ def _set_session_cookies(response, session_token: str, csrf_token: str):
 
 
 def _clear_session_cookies(response):
-    secure_cookie = request.scheme == "https"
+    secure_cookie = _request_is_effectively_secure()
     response.delete_cookie(SESSION_COOKIE_NAME, path="/", secure=secure_cookie, samesite="None" if secure_cookie else "Lax")
     response.delete_cookie(CSRF_COOKIE_NAME, path="/", secure=secure_cookie, samesite="None" if secure_cookie else "Lax")
     return response
@@ -159,6 +183,13 @@ def _sanitize_frontend_redirect_target(candidate: str | None):
 def _build_callback_url(frontend_redirect: str):
     callback_base = _default_auth_callback_public_url()
     return f"{callback_base}?next={quote(frontend_redirect, safe='')}"
+
+
+def _test_support_request_allowed():
+    if not auth_test_mode_enabled():
+        return False
+    remote_addr = (request.remote_addr or "").strip()
+    return remote_addr in {"127.0.0.1", "::1", "localhost"} or remote_addr.startswith("127.") or remote_addr.startswith("::ffff:127.")
 
 
 def _build_fragment_bridge_html(redirect_to: str):
@@ -263,12 +294,15 @@ async def auth_magic_link():
 
     if email and "@" in email and _is_magic_link_email_allowed(email):
         try:
-            supabase.auth.sign_in_with_otp({
-                "email": email,
-                "options": {
-                    "email_redirect_to": callback_url,
-                },
-            })
+            if auth_test_mode_enabled():
+                capture_magic_link(email=email, callback_url=callback_url)
+            else:
+                supabase.auth.sign_in_with_otp({
+                    "email": email,
+                    "options": {
+                        "email_redirect_to": callback_url,
+                    },
+                })
         except Exception as exc:
             logger.warning({"event": "auth_magic_link_send_failed", "error": mascarar_segredos(str(exc))})
 
@@ -296,8 +330,13 @@ async def auth_callback():
             return Response(_build_fragment_bridge_html(redirect_to), mimetype="text/html")
 
         try:
-            auth_response = supabase.auth.verify_otp({"token_hash": token_hash, "type": otp_type})
-            user_id, email = _extract_user_fields(auth_response)
+            auth_payload = consume_magic_link(token_hash) if auth_test_mode_enabled() else None
+            if auth_payload:
+                user_id = str(auth_payload.get("user_id") or "").strip()
+                email = str(auth_payload.get("email") or "").strip().lower()
+            else:
+                auth_response = supabase.auth.verify_otp({"token_hash": token_hash, "type": otp_type})
+                user_id, email = _extract_user_fields(auth_response)
             if not user_id or not _is_allowed_admin_identity(email, user_id):
                 return redirect(_sanitize_frontend_redirect_target(f"{redirect_to.rstrip('/')}/login?reason=unauthorized"))
 
@@ -330,6 +369,54 @@ async def auth_callback():
     session = create_admin_session(user_id, email, request.headers.get("User-Agent"), request.remote_addr)
     response = _json_success({"redirectTo": redirect_to, "csrfToken": session["csrf_token"]}, 200)
     return _set_session_cookies(response, session["token"], session["csrf_token"])
+
+
+@app.route("/__test__/auth/reset", methods=["POST"])
+async def auth_test_reset():
+    if not _test_support_request_allowed():
+        return _json_error("Not found.", 404)
+
+    reset_auth_test_state()
+    return _json_success({"reset": True}, 200)
+
+
+@app.route("/__test__/auth/transactions", methods=["POST"])
+async def auth_test_transactions():
+    if not _test_support_request_allowed():
+        return _json_error("Not found.", 404)
+
+    payload = await request.get_json(silent=True) or {}
+    transactions = payload.get("transactions") if isinstance(payload, dict) else None
+    if transactions is not None and not isinstance(transactions, list):
+        return _json_error("Transactions payload must be a list.", 400)
+
+    seeded = seed_transactions(transactions if isinstance(transactions, list) else [])
+    return _json_success({"transactions": seeded}, 200)
+
+
+@app.route("/__test__/auth/magic-link", methods=["GET", "POST"])
+async def auth_test_magic_link():
+    if not _test_support_request_allowed():
+        return _json_error("Not found.", 404)
+
+    if request.method == "GET":
+        email = sanitize_plain_text(request.args.get("email"), 160).lower()
+        payload = peek_magic_link(email)
+        if not payload:
+            return _json_error("Magic link not found.", 404)
+        return _json_success({"magicLink": payload}, 200)
+
+    payload = await request.get_json(silent=True) or {}
+    email = sanitize_plain_text(payload.get("email"), 160).lower()
+    user_id = sanitize_plain_text(payload.get("userId"), 120) or None
+    try:
+        redirect_to = _sanitize_frontend_redirect_target(payload.get("redirectTo"))
+        callback_url = _build_callback_url(redirect_to)
+    except RuntimeError as exc:
+        return _auth_redirect_config_error(exc)
+
+    magic_link = capture_magic_link(email=email, callback_url=callback_url, user_id=user_id)
+    return _json_success({"magicLink": magic_link}, 200)
 
 
 @app.route("/auth/session", methods=["GET", "OPTIONS"])

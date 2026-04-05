@@ -13,6 +13,7 @@ from typing import Any
 from cryptography.fernet import Fernet, InvalidToken
 
 from config import logger, mascarar_segredos, supabase
+from test_support import auth_test_mode_enabled, load_admin_session, revoke_admin_session as revoke_test_admin_session, store_admin_session, update_admin_session
 from utils import get_brasilia_time
 
 SESSION_COOKIE_NAME = "fm_admin_session"
@@ -108,18 +109,29 @@ def create_admin_session(user_id: str, email: str | None, user_agent: str | None
     session_token = generate_session_token()
     now = get_brasilia_time()
     expires_at = now + timedelta(hours=SESSION_IDLE_HOURS)
-    payload = {
-        "session_id_hash": hash_session_token(session_token),
-        "user_id": user_id,
-        "email": (email or "").lower() or None,
-        "created_at": now.isoformat(),
-        "last_seen_at": now.isoformat(),
-        "expires_at": expires_at.isoformat(),
-        "revoked_at": None,
-        "user_agent_hash": hash_optional(user_agent),
-        "ip_hash": hash_optional(ip_address),
-    }
-    supabase.table("admin_web_sessions").insert(payload).execute()
+    session_id_hash = hash_session_token(session_token)
+    if auth_test_mode_enabled():
+        store_admin_session(
+            session_id_hash=session_id_hash,
+            user_id=user_id,
+            email=(email or "").lower() or None,
+            created_at=now.isoformat(),
+            last_seen_at=now.isoformat(),
+            expires_at=expires_at.isoformat(),
+        )
+    else:
+        payload = {
+            "session_id_hash": session_id_hash,
+            "user_id": user_id,
+            "email": (email or "").lower() or None,
+            "created_at": now.isoformat(),
+            "last_seen_at": now.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "revoked_at": None,
+            "user_agent_hash": hash_optional(user_agent),
+            "ip_hash": hash_optional(ip_address),
+        }
+        supabase.table("admin_web_sessions").insert(payload).execute()
     return {
         "token": session_token,
         "csrf_token": build_csrf_token(session_token),
@@ -131,17 +143,23 @@ def resolve_admin_session(session_token: str | None):
     if not session_token:
         return None
 
-    response = (
-        supabase
-        .table("admin_web_sessions")
-        .select("session_id_hash, user_id, email, created_at, last_seen_at, expires_at, revoked_at")
-        .eq("session_id_hash", hash_session_token(session_token))
-        .execute()
-    )
-    if not getattr(response, "data", None):
-        return None
+    session_id_hash = hash_session_token(session_token)
+    if auth_test_mode_enabled():
+        session_row = load_admin_session(session_id_hash)
+        if not session_row:
+            return None
+    else:
+        response = (
+            supabase
+            .table("admin_web_sessions")
+            .select("session_id_hash, user_id, email, created_at, last_seen_at, expires_at, revoked_at")
+            .eq("session_id_hash", session_id_hash)
+            .execute()
+        )
+        if not getattr(response, "data", None):
+            return None
 
-    session_row = response.data[0]
+        session_row = response.data[0]
     now = get_brasilia_time()
     created_at = _parse_timestamp(session_row.get("created_at")) or now
     expires_at = _parse_timestamp(session_row.get("expires_at")) or created_at
@@ -153,13 +171,20 @@ def resolve_admin_session(session_token: str | None):
 
     refreshed_expiry = min(now + timedelta(hours=SESSION_IDLE_HOURS), absolute_expiry)
     try:
-        (
-            supabase
-            .table("admin_web_sessions")
-            .update({"last_seen_at": now.isoformat(), "expires_at": refreshed_expiry.isoformat()})
-            .eq("session_id_hash", hash_session_token(session_token))
-            .execute()
-        )
+        if auth_test_mode_enabled():
+            update_admin_session(
+                session_id_hash,
+                last_seen_at=now.isoformat(),
+                expires_at=refreshed_expiry.isoformat(),
+            )
+        else:
+            (
+                supabase
+                .table("admin_web_sessions")
+                .update({"last_seen_at": now.isoformat(), "expires_at": refreshed_expiry.isoformat()})
+                .eq("session_id_hash", session_id_hash)
+                .execute()
+            )
     except Exception as exc:
         logger.warning({"event": "admin_session_refresh_failed", "error": mascarar_segredos(str(exc))})
 
@@ -176,11 +201,16 @@ def revoke_admin_session(session_token: str | None):
         return
 
     now = get_brasilia_time().isoformat()
+    session_id_hash = hash_session_token(session_token)
+    if auth_test_mode_enabled():
+        revoke_test_admin_session(session_id_hash, revoked_at=now, expires_at=now)
+        return
+
     (
         supabase
         .table("admin_web_sessions")
         .update({"revoked_at": now, "expires_at": now})
-        .eq("session_id_hash", hash_session_token(session_token))
+        .eq("session_id_hash", session_id_hash)
         .execute()
     )
 
