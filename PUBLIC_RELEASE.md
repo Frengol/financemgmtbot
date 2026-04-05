@@ -21,6 +21,8 @@ Use this checklist before publishing the repository to a public remote.
   - `make test-frontend-e2e`
   - `make audit-frontend-deps`
   - `make audit-backend-deps`
+  - `npm run verify:build-env --prefix frontend`
+  - `npm run verify:bundle --prefix frontend`
 
 ## 3. Audit the Git history
 

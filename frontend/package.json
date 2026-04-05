@@ -10,6 +10,7 @@
     "test:e2e": "playwright test",
     "test:e2e:install": "playwright install chromium",
     "build": "tsc && vite build",
+    "verify:build-env": "node ./scripts/validate-build-env.mjs",
     "verify:bundle": "node ./scripts/verify-bundle.mjs",
     "preview": "vite preview"
   },

@@ -39,6 +39,10 @@ def test_ci_and_pages_deploy_workflows_only_require_backend_api_base_url():
     assert "VITE_SUPABASE_ANON_KEY" not in deploy_workflow
     assert "VITE_API_BASE_URL" in ci_workflow
     assert "VITE_API_BASE_URL" in deploy_workflow
+    assert "vars.VITE_API_BASE_URL || secrets.VITE_API_BASE_URL" in ci_workflow
+    assert "vars.VITE_API_BASE_URL || secrets.VITE_API_BASE_URL" in deploy_workflow
+    assert "npm run verify:build-env" in ci_workflow
+    assert "npm run verify:build-env" in deploy_workflow
     assert "npm run verify:bundle" in ci_workflow
     assert "npm run verify:bundle" in deploy_workflow
     assert "      - '.github/workflows/deploy-pages.yml'" in deploy_workflow

@@ -47,7 +47,7 @@ export default defineConfig(({ mode }) => ({
   test: {
     environment: 'jsdom',
     setupFiles: './src/test/setup.ts',
-    include: ['src/**/*.test.{ts,tsx}'],
+    include: ['src/**/*.test.{ts,tsx}', 'scripts/**/*.test.{ts,js,mjs}'],
     exclude: ['node_modules/**', 'e2e/**', 'playwright.config.ts'],
     coverage: {
       provider: 'v8',

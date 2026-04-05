@@ -188,6 +188,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - instala dependências do frontend
   - executa `npm audit --omit=dev`
   - executa `npm run test:coverage`
+  - valida `npm run verify:build-env`, exigindo `VITE_API_BASE_URL` absoluto vindo de GitHub Actions `Variables` ou `Secrets`
   - valida `npm run build`
   - valida `npm run verify:bundle` para garantir que o artefato publicado continua no contrato `cookie + CSRF`, sem `Authorization` nem fluxo Supabase no browser
   - varre o `dist` por strings sensíveis conhecidas antes de publicar artefatos
@@ -196,7 +197,8 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - publica artefatos de coverage e do relatório Playwright
 * `deploy-pages.yml`
   - instala dependências com `npm ci`
-  - builda o frontend com `VITE_API_BASE_URL` vindo de Repository Variables
+  - valida `npm run verify:build-env` antes do build, aceitando `VITE_API_BASE_URL` vindo de Repository Variables ou Secrets
+  - builda o frontend com `VITE_API_BASE_URL` vindo de Repository Variables ou Secrets
   - valida o bundle com `npm run verify:bundle` antes de publicar o artefato no GitHub Pages
   - publica automaticamente o SPA no GitHub Pages
 
