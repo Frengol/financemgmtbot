@@ -26,6 +26,7 @@ describe('Login', () => {
     expect(emailInput).toHaveAttribute('autocomplete', 'email');
     expect(emailInput).toHaveAttribute('autocapitalize', 'none');
     expect(emailInput).toHaveAttribute('autocorrect', 'off');
+    expect(emailInput).toHaveAttribute('placeholder', 'seu e-mail');
 
     await userEvent.type(emailInput, 'admin@example.com');
     await userEvent.click(screen.getByRole('button', { name: 'Enviar Magic Link' }));

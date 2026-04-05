@@ -18,6 +18,10 @@ build/
 .env
 .env.*
 *.env
+!.env.example
+!frontend/.env.example
+!frontend/.env.development.example
+!frontend/.env.production.example
 secrets/
 *.key
 *.pem

@@ -29,6 +29,15 @@ def test_public_frontend_contract_files_no_longer_require_supabase_env():
         assert "VITE_SUPABASE_ANON_KEY" not in content
 
 
+def test_gitignore_allows_public_env_examples():
+    gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    assert "!.env.example" in gitignore
+    assert "!frontend/.env.example" in gitignore
+    assert "!frontend/.env.development.example" in gitignore
+    assert "!frontend/.env.production.example" in gitignore
+
+
 def test_ci_and_pages_deploy_workflows_only_require_backend_api_base_url():
     ci_workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     deploy_workflow = (REPO_ROOT / ".github" / "workflows" / "deploy-pages.yml").read_text(encoding="utf-8")
