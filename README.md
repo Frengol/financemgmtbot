@@ -40,7 +40,7 @@ Local auth integration test mode:
 
 - [`.github/workflows/ci.yml`](.github/workflows/ci.yml) now runs backend coverage, frontend unit coverage, frontend build and deterministic Playwright smoke tests on pushes and pull requests.
 - Backend coverage now fails below `90%` for both `Lines` and `Branches`, and frontend unit coverage now fails below `90%` for `Statements`, `Branches`, `Functions` and `Lines`.
-- The CI workflow also runs `pip-audit`, `npm audit --omit=dev`, a built-asset string scan and a full-history `gitleaks` job when the repository is checked out in GitHub Actions.
+- The CI workflow also runs `pip-audit`, `npm audit --omit=dev`, a built-asset scan that allows only the expected public Supabase frontend values while blocking backend secrets/unexpected JWTs, and a full-history `gitleaks` job when the repository is checked out in GitHub Actions.
 - [`.github/workflows/deploy-pages.yml`](.github/workflows/deploy-pages.yml) validates the build environment, builds the frontend and deploys `frontend/dist` to GitHub Pages.
 - In the repository settings, set the Pages source to `GitHub Actions`.
 - Create these GitHub Actions settings before merging:

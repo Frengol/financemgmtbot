@@ -98,14 +98,12 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
         run: npm run build
 
-      - name: Verify built frontend contract
+      - name: Verify built frontend contract and scan
+        env:
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || secrets.VITE_API_BASE_URL }}
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
         run: npm run verify:bundle
-
-      - name: Scan built frontend for sensitive strings
-        run: |
-          ! grep -R -n -E \
-            'service_role|SUPABASE_KEY|APP_SESSION_SECRET|DATA_ENCRYPTION_KEY|TELEGRAM_BOT_TOKEN|TELEGRAM_SECRET_TOKEN|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}' \
-            dist
 
       - name: Upload frontend coverage artifacts
         uses: actions/upload-artifact@v4

@@ -202,7 +202,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - valida `npm run verify:build-env`, exigindo `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` vindos de GitHub Actions `Variables` ou `Secrets`
   - valida `npm run build`
   - valida `npm run verify:bundle` para garantir que o artefato publicado continua no contrato `Supabase browser session + Authorization Bearer`
-  - varre o `dist` por strings sensíveis conhecidas antes de publicar artefatos
+  - o scanner do bundle permite apenas os valores públicos esperados do frontend (`VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY`) e continua bloqueando segredos backend, e-mails inesperados e JWTs não reconhecidos
   - executa `npm run test:e2e` com Playwright em Chromium e Firefox
   - a suíte E2E combina:
     - smoke mockada para regressão rápida de UI
@@ -213,7 +213,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - instala dependências com `npm ci`
   - valida `npm run verify:build-env` antes do build, aceitando `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` vindos de Repository Variables ou Secrets
   - builda o frontend com `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` vindos de Repository Variables ou Secrets
-  - valida o bundle com `npm run verify:bundle` antes de publicar o artefato no GitHub Pages
+  - valida o bundle com `npm run verify:bundle` antes de publicar o artefato no GitHub Pages, reutilizando exatamente a mesma política de scan da CI
   - publica automaticamente o SPA no GitHub Pages
 
 ---
