@@ -2,16 +2,21 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockSetSession = vi.fn();
+const mockExchangeCodeForSession = vi.fn();
+const mockGetSession = vi.fn();
 const mockSaveBrowserAdminProfile = vi.fn();
 const mockSaveBrowserAdminTestSession = vi.fn();
 const mockClearBrowserAdminProfile = vi.fn();
 const mockClearBrowserAdminTestSession = vi.fn();
 const mockDecodeAccessTokenIdentity = vi.fn();
+const mockLoadBrowserAdminTestSession = vi.fn();
 
 vi.mock('@/lib/supabase', () => ({
   supabase: {
     auth: {
       setSession: (...args: unknown[]) => mockSetSession(...args),
+      exchangeCodeForSession: (...args: unknown[]) => mockExchangeCodeForSession(...args),
+      getSession: (...args: unknown[]) => mockGetSession(...args),
     },
   },
 }));
@@ -25,17 +30,23 @@ vi.mock('@/lib/auth', async () => {
     clearBrowserAdminProfile: (...args: unknown[]) => mockClearBrowserAdminProfile(...args),
     clearBrowserAdminTestSession: (...args: unknown[]) => mockClearBrowserAdminTestSession(...args),
     decodeAccessTokenIdentity: (...args: unknown[]) => mockDecodeAccessTokenIdentity(...args),
+    loadBrowserAdminTestSession: (...args: unknown[]) => mockLoadBrowserAdminTestSession(...args),
   };
 });
 
 describe('AuthCallback', () => {
   beforeEach(() => {
     mockSetSession.mockReset();
+    mockExchangeCodeForSession.mockReset();
+    mockGetSession.mockReset();
     mockSaveBrowserAdminProfile.mockReset();
     mockSaveBrowserAdminTestSession.mockReset();
     mockClearBrowserAdminProfile.mockReset();
     mockClearBrowserAdminTestSession.mockReset();
     mockDecodeAccessTokenIdentity.mockReset();
+    mockLoadBrowserAdminTestSession.mockReset();
+    mockGetSession.mockResolvedValue({ data: { session: null } });
+    mockLoadBrowserAdminTestSession.mockReturnValue(null);
     window.history.pushState({}, '', '/auth/callback#access_token=token-1&refresh_token=refresh-1&type=magiclink');
   });
 
@@ -75,6 +86,7 @@ describe('AuthCallback', () => {
     expect(mockSetSession).not.toHaveBeenCalled();
     expect(mockClearBrowserAdminProfile).toHaveBeenCalled();
     expect(mockClearBrowserAdminTestSession).toHaveBeenCalled();
+    expect(window.location.hash).toContain('otp_expired');
   });
 
   it('shows an explicit error when the callback does not contain usable tokens', async () => {
@@ -86,6 +98,53 @@ describe('AuthCallback', () => {
 
     expect(await screen.findByText(/nao foi possivel concluir o login/i)).toBeInTheDocument();
     expect(mockSetSession).not.toHaveBeenCalled();
+  });
+
+  it('exchanges query code callbacks for a browser session and redirects to the app root', async () => {
+    window.history.pushState({}, '', '/auth/callback?code=pkce-code-1');
+    const replaceSpy = vi.fn();
+    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
+    mockExchangeCodeForSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: 'token-from-code',
+          user: {
+            id: 'user-1',
+            email: 'admin@example.com',
+          },
+        },
+      },
+      error: null,
+    });
+    mockDecodeAccessTokenIdentity.mockReturnValue({ id: 'user-1', email: 'admin@example.com' });
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+
+    render(<AuthCallback />);
+
+    await waitFor(() => {
+      expect(mockExchangeCodeForSession).toHaveBeenCalledWith('pkce-code-1');
+    });
+    expect(mockSetSession).not.toHaveBeenCalled();
+    expect(mockSaveBrowserAdminProfile).toHaveBeenCalledWith({ id: 'user-1', email: 'admin@example.com' });
+    expect(replaceSpy).toHaveBeenCalledWith(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
+  });
+
+  it('shows an explicit error when a query-based callback cannot exchange the session', async () => {
+    window.history.pushState({}, '', '/auth/callback?code=expired-code');
+    mockExchangeCodeForSession.mockResolvedValue({
+      data: { session: null },
+      error: { message: 'invalid flow state' },
+    });
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+
+    render(<AuthCallback />);
+
+    expect(await screen.findByText(/nao foi possivel concluir o login/i)).toBeInTheDocument();
+    expect(mockSetSession).not.toHaveBeenCalled();
+    expect(mockClearBrowserAdminProfile).toHaveBeenCalled();
+    expect(mockClearBrowserAdminTestSession).toHaveBeenCalled();
   });
 
   it('stores a minimal browser auth profile derived from the access token claims', async () => {
@@ -126,5 +185,56 @@ describe('AuthCallback', () => {
       },
     });
     expect(mockSetSession).not.toHaveBeenCalled();
+  });
+
+  it('reuses an existing browser auth test session when the callback effect is replayed without hash tokens', async () => {
+    window.history.pushState({}, '', '/auth/callback');
+    const replaceSpy = vi.fn();
+    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
+    mockLoadBrowserAdminTestSession.mockReturnValue({
+      accessToken: 'existing-auth-test-token',
+      refreshToken: 'existing-auth-test-refresh',
+      user: {
+        id: 'user-1',
+        email: 'admin@example.com',
+      },
+    });
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+
+    render(<AuthCallback />);
+
+    await waitFor(() => {
+      expect(replaceSpy).toHaveBeenCalledWith(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
+    });
+    expect(mockClearBrowserAdminTestSession).not.toHaveBeenCalled();
+    expect(mockSetSession).not.toHaveBeenCalled();
+  });
+
+  it('reuses an existing Supabase browser session when the callback reloads without tokens', async () => {
+    window.history.pushState({}, '', '/auth/callback?email=admin%40example.com');
+    const replaceSpy = vi.fn();
+    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: 'existing-session-token',
+          user: {
+            id: 'user-1',
+            email: 'admin@example.com',
+          },
+        },
+      },
+    });
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+
+    render(<AuthCallback />);
+
+    await waitFor(() => {
+      expect(mockSaveBrowserAdminProfile).toHaveBeenCalledWith({ id: 'user-1', email: 'admin@example.com' });
+    });
+    expect(replaceSpy).toHaveBeenCalledWith(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
+    expect(mockClearBrowserAdminTestSession).not.toHaveBeenCalled();
   });
 });

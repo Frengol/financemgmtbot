@@ -85,6 +85,69 @@ class TestMainHelperCoverage:
                 assert main._test_support_request_allowed() is True
 
     @pytest.mark.asyncio
+    async def test_main_helper_branches_cover_runtime_errors_allowed_identities_and_loopback_overrides(self):
+        async with main.app.test_request_context(
+            "/auth/session",
+            headers={"Forwarded": 'for=1.1.1.1;proto=""', "X-Forwarded-Proto": "https"},
+        ):
+            assert main._request_effective_scheme() == "https"
+
+        async with main.app.test_request_context("/auth/session"):
+            with patch.object(main, "FRONTEND_PUBLIC_URL", ""), \
+                 patch.object(main, "AUTH_CALLBACK_PUBLIC_URL", ""), \
+                 patch.object(main, "_is_loopback_request", return_value=False):
+                with pytest.raises(RuntimeError):
+                    main._default_frontend_public_url()
+                with pytest.raises(RuntimeError):
+                    main._default_auth_callback_public_url()
+
+            with patch.object(main, "ADMIN_USER_IDS", frozenset({"user-1"})), \
+                 patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})):
+                assert main._is_allowed_admin_identity("admin@example.com", "user-1") is True
+                assert main._is_allowed_admin_identity("admin@example.com", "blocked-user") is False
+                assert main._is_allowed_admin_identity("blocked@example.com", "user-1") is False
+                assert main._is_magic_link_email_allowed("blocked@example.com") is False
+
+            with patch.object(main, "FRONTEND_PUBLIC_URL", ""), \
+                 patch.object(main, "FRONTEND_ALLOWED_ORIGINS", frozenset({"https://preview.example.com"})), \
+                 patch.object(main, "_is_loopback_request", return_value=True):
+                assert main._sanitize_local_frontend_redirect_target("https://preview.example.com/app") == "https://preview.example.com/app"
+                assert main._sanitize_frontend_app_redirect_target("http://localhost:3000/app") == "http://localhost:3000/app"
+
+            assert main._build_login_redirect_target("https://admin.example.com/app/") == "https://admin.example.com/app/login"
+            assert main._build_login_redirect_target(
+                "https://admin.example.com/app/",
+                reason="expired",
+                request_id="req_123",
+            ) == "https://admin.example.com/app/login?reason=expired&requestId=req_123"
+            assert main._extract_magic_link_retry_after_seconds("no cooldown in this message") is None
+
+            fake_match = SimpleNamespace(group=lambda _index: "NaN")
+            with patch.object(main.re, "search", return_value=fake_match):
+                assert main._extract_magic_link_retry_after_seconds("request this after NaN seconds") is None
+
+    @pytest.mark.asyncio
+    async def test_main_runtime_helpers_cover_startup_shutdown_and_harden_response(self):
+        init_http_client = AsyncMock()
+        close_http_client = AsyncMock()
+        with patch.object(main, "init_http_client", init_http_client), patch.object(main, "close_http_client", close_http_client):
+            await main.startup()
+            await main.shutdown()
+        init_http_client.assert_awaited_once()
+        close_http_client.assert_awaited_once()
+
+        async with main.app.test_request_context("/api/admin/gastos", headers={"Origin": "https://admin.example.com"}):
+            with patch.object(main, "FRONTEND_ALLOWED_ORIGINS", frozenset({"https://admin.example.com"})):
+                response = await main.harden_response(main.Response("ok"))
+            assert response.headers["Access-Control-Allow-Origin"] == "https://admin.example.com"
+            assert response.headers["Access-Control-Allow-Headers"] == "Authorization, Content-Type, X-CSRF-Token"
+            assert response.headers["Cache-Control"] == "no-store, private"
+
+        async with main.app.test_request_context("/plain"):
+            response = await main.harden_response(main.Response("ok"))
+            assert "Access-Control-Allow-Origin" not in response.headers
+
+    @pytest.mark.asyncio
     async def test_auth_session_and_test_support_routes_cover_error_paths(self):
         async with main.app.test_client() as client:
             session_resp = await client.get("/auth/session")
@@ -110,6 +173,63 @@ class TestMainHelperCoverage:
                 assert missing_link.status_code == 404
 
     @pytest.mark.asyncio
+    async def test_main_routes_cover_rate_limits_test_support_and_logout_fallbacks(self):
+        async with main.app.test_client() as client:
+            rate_limited_response = lambda *args, **kwargs: main._json_error("Slow down.", 429, code="RATE_LIMITED")
+            with patch.object(main, "_rate_limited", side_effect=rate_limited_response):
+                magic_link_limited = await client.post("/auth/magic-link", json={"email": "admin@example.com"})
+                assert magic_link_limited.status_code == 429
+                callback_limited = await client.get("/auth/callback")
+                assert callback_limited.status_code == 429
+
+            with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), \
+                 patch.object(main, "_build_frontend_callback_relay_target", side_effect=RuntimeError("missing frontend")):
+                relay_error = await client.get("/auth/callback")
+                assert relay_error.status_code == 500
+                assert (await relay_error.get_json())["code"] == "AUTH_CONFIGURATION_INVALID"
+
+            with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), \
+                 patch.object(main, "_sanitize_frontend_app_redirect_target", side_effect=RuntimeError("bad redirect")):
+                callback_error = await client.post("/auth/callback", json={"access_token": "token"})
+                assert callback_error.status_code == 500
+                assert (await callback_error.get_json())["code"] == "AUTH_CONFIGURATION_INVALID"
+
+            with patch.object(main, "_test_support_request_allowed", return_value=True):
+                seeded = await client.post("/__test__/auth/transactions", json={"transactions": [{"id": "tx-1", "data": "2026-04-01"}]})
+                assert seeded.status_code == 200
+                verify_expired = await client.get("/__test__/auth/verify?redirect_to=https://admin.example.com/app/auth/callback&token_hash=missing")
+                assert verify_expired.status_code == 302
+                assert "otp_expired" in verify_expired.headers["Location"]
+
+                with patch.object(main, "_sanitize_frontend_redirect_target", side_effect=RuntimeError("bad redirect")):
+                    magic_link_error = await client.post("/__test__/auth/magic-link", json={"email": "admin@example.com"})
+                    assert magic_link_error.status_code == 500
+                    assert (await magic_link_error.get_json())["code"] == "AUTH_CONFIGURATION_INVALID"
+
+            with patch.object(main, "_test_support_request_allowed", return_value=False):
+                verify_disabled = await client.get("/__test__/auth/verify?token_hash=missing")
+                assert verify_disabled.status_code == 404
+
+            client.set_cookie("localhost", security.SESSION_COOKIE_NAME, "opaque")
+            with patch.object(main, "revoke_admin_session", side_effect=RuntimeError("boom")):
+                logout_resp = await client.post("/auth/logout")
+                assert logout_resp.status_code == 200
+
+            assert (await client.options("/auth/magic-link")).status_code == 204
+            assert (await client.options("/auth/logout")).status_code == 204
+            assert (await client.options("/api/admin/cache-aprovacao/test-id/approve")).status_code == 204
+            assert (await client.options("/api/admin/cache-aprovacao/test-id/reject")).status_code == 204
+
+            webhook_rate_limited = lambda *args, **kwargs: main._json_error("Too many webhook requests.", 429, code="RATE_LIMITED")
+            with patch.object(main, "_rate_limited", side_effect=webhook_rate_limited):
+                webhook_limited = await client.post(
+                    "/",
+                    json={"update_id": 1},
+                    headers={"X-Telegram-Bot-Api-Secret-Token": main.SECRET_TOKEN},
+                )
+                assert webhook_limited.status_code == 429
+
+    @pytest.mark.asyncio
     async def test_rate_limited_helper_returns_retry_metadata(self):
         async with main.app.test_request_context("/auth/magic-link"):
             with patch.object(main, "allow_request", return_value=False):
@@ -133,9 +253,15 @@ class TestMainHelperCoverage:
         async with main.app.test_client() as client:
             with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), \
                  patch.object(main, "AUTH_CALLBACK_PUBLIC_URL", "https://api.example.com/auth/callback"):
-                fragment_resp = await client.get("/auth/callback?next=https://admin.example.com/app/")
+                fragment_resp = await client.get("/auth/callback")
                 assert fragment_resp.status_code == 200
-                assert "Finalizing secure sign-in" in (await fragment_resp.get_data(as_text=True))
+                fragment_html = await fragment_resp.get_data(as_text=True)
+                assert "Finalizing secure sign-in" in fragment_html
+                assert "fetch(" not in fragment_html
+
+                relay_resp = await client.get("/auth/callback?next=https://admin.example.com/app/")
+                assert relay_resp.status_code == 302
+                assert relay_resp.headers["Location"] == "https://admin.example.com/app/auth/callback?next=https://admin.example.com/app/"
 
                 invalid_post = await client.post("/auth/callback", json={"redirectTo": "https://admin.example.com/app/"})
                 assert invalid_post.status_code == 400
@@ -157,27 +283,18 @@ class TestMainHelperCoverage:
                 assert cache_options.status_code == 204
 
     @pytest.mark.asyncio
-    async def test_auth_callback_covers_verify_failure_access_denied_and_test_support_success_paths(self):
+    async def test_auth_callback_covers_relay_and_test_support_success_paths(self):
         async with main.app.test_client() as client:
             with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), \
-                 patch.object(main, "AUTH_CALLBACK_PUBLIC_URL", "https://api.example.com/auth/callback"), \
-                 patch.object(main, "ADMIN_EMAILS", frozenset({"admin@example.com"})), \
-                 patch.object(main, "ADMIN_USER_IDS", frozenset({"user-1"})), \
-                 patch.object(main.supabase.auth, "verify_otp", return_value={"id": "blocked", "email": "blocked@example.com"}):
-                denied = await client.get(
+                 patch.object(main, "AUTH_CALLBACK_PUBLIC_URL", "https://api.example.com/auth/callback"):
+                relayed = await client.get(
                     "/auth/callback?token_hash=token-1&type=magiclink&next=https://admin.example.com/app/"
                 )
-                assert denied.status_code == 302
-                assert denied.headers["Location"].endswith("/login?reason=unauthorized")
-
-            with patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), \
-                 patch.object(main, "AUTH_CALLBACK_PUBLIC_URL", "https://api.example.com/auth/callback"), \
-                 patch.object(main.supabase.auth, "verify_otp", side_effect=RuntimeError("verify failed")):
-                failed = await client.get(
-                    "/auth/callback?token_hash=token-1&type=magiclink&next=https://admin.example.com/app/"
+                assert relayed.status_code == 302
+                assert relayed.headers["Location"] == (
+                    "https://admin.example.com/app/auth/callback"
+                    "?token_hash=token-1&type=magiclink&next=https://admin.example.com/app/"
                 )
-                assert failed.status_code == 302
-                assert failed.headers["Location"].endswith("/login")
 
             with patch.object(main, "_test_support_request_allowed", return_value=True), \
                  patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), \

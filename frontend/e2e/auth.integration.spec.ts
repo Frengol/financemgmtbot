@@ -1,7 +1,7 @@
 import { expect, test, type APIRequestContext } from '@playwright/test';
 
 const backendBaseUrl = process.env.E2E_API_BASE_URL || 'http://127.0.0.1:8080';
-const frontendBaseUrl = process.env.E2E_FRONTEND_BASE_URL || 'http://127.0.0.1:4173';
+const frontendBaseUrl = process.env.E2E_FRONTEND_BASE_URL || `http://127.0.0.1:${process.env.E2E_FRONTEND_PORT || '4173'}`;
 
 test.describe.configure({ mode: 'serial' });
 
@@ -69,13 +69,14 @@ test('requests a magic link, completes the callback and loads seeded transaction
   await expect(page.getByText('Mercado Playwright')).toBeVisible();
 });
 
-test('redirects unauthorized identities back to login with reason and without looping', async ({ page, request, browserName }) => {
-  const email = `blocked+${browserName}@example.com`;
+test('completes login when the email link still targets the legacy backend callback relay', async ({ page, request, browserName }) => {
+  const email = `admin+${browserName}@example.com`;
+  await seedTransactions(request);
+
   const response = await request.post(`${backendBaseUrl}/__test__/auth/magic-link`, {
     data: {
       email,
-      userId: 'blocked-user',
-      redirectTo: 'http://127.0.0.1:4173/auth/callback',
+      redirectTo: `${backendBaseUrl}/auth/callback`,
     },
   });
 
@@ -94,5 +95,13 @@ test('redirects unauthorized identities back to login with reason and without lo
   }).not.toBeNull();
   await expect(page).toHaveURL(new RegExp(`${frontendBaseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`));
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
-  await expect(page.getByText(/nao esta autorizado/i)).toBeVisible();
+  await page.goto('/historico');
+  await expect(page.getByText('Mercado Playwright')).toBeVisible();
+});
+
+test('shows an explicit error for an expired or invalid callback link', async ({ page }) => {
+  await page.goto('/auth/callback#error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired');
+
+  await expect(page.getByText(/link de acesso invalido ou expirado/i)).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`${frontendBaseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/auth/callback`));
 });

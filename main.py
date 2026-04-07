@@ -189,6 +189,35 @@ def _sanitize_frontend_redirect_target(candidate: str | None):
     return default_target
 
 
+def _allow_frontend_redirect_override():
+    return auth_test_mode_enabled() or _is_loopback_request()
+
+
+def _sanitize_local_frontend_redirect_target(candidate: str | None):
+    default_target = _default_frontend_auth_callback_url()
+    raw_value = (candidate or "").strip()
+    if not raw_value:
+        return default_target
+
+    parsed = urlsplit(raw_value)
+    if parsed.scheme in {"http", "https"}:
+        normalized_origin = normalize_frontend_origin(raw_value)
+        if normalized_origin == normalize_frontend_origin(default_target):
+            return raw_value
+        if _is_loopback_url(raw_value):
+            return raw_value
+        if normalized_origin in FRONTEND_ALLOWED_ORIGINS:
+            return raw_value
+
+    return default_target
+
+
+def _resolve_magic_link_callback_url(candidate: str | None):
+    if _allow_frontend_redirect_override():
+        return _sanitize_local_frontend_redirect_target(candidate), "local_override"
+    return _default_frontend_auth_callback_url(), "canonical"
+
+
 def _sanitize_frontend_app_redirect_target(candidate: str | None):
     default_target = _default_frontend_public_url()
     raw_value = (candidate or "").strip()
@@ -207,6 +236,14 @@ def _sanitize_frontend_app_redirect_target(candidate: str | None):
 
 def _build_callback_url(frontend_redirect: str):
     return frontend_redirect
+
+
+def _build_frontend_callback_relay_target():
+    query_string = request.query_string.decode("utf-8", errors="ignore").strip()
+    redirect_to = _default_frontend_auth_callback_url()
+    if not query_string:
+        return redirect_to
+    return f"{redirect_to}?{query_string}"
 
 
 def _extract_magic_link_retry_after_seconds(error_text: str):
@@ -271,59 +308,16 @@ def _build_fragment_bridge_html(redirect_to: str):
     <p>Finalizing secure sign-in...</p>
     <script>
       (async function () {{
-        const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-        const accessToken = params.get('access_token');
-        const refreshToken = params.get('refresh_token');
-        const redirectTo = {serialized_redirect};
-
-        if (!accessToken) {{
-          window.location.replace(redirectTo);
-          return;
+        const redirectTo = new URL({serialized_redirect});
+        if (window.location.search) {{
+          redirectTo.search = window.location.search;
         }}
-
-        const response = await fetch(window.location.pathname + window.location.search, {{
-          method: 'POST',
-          credentials: 'include',
-          headers: {{ 'Content-Type': 'application/json' }},
-          body: JSON.stringify({{
-            access_token: accessToken,
-            refresh_token: refreshToken,
-            redirectTo
-          }})
-        }});
-
-        const payload = await response.json().catch(() => ({{ redirectTo }}));
-        const buildLoginUrl = function (reason, requestId) {{
-          const loginUrl = new URL('login', redirectTo);
-          if (reason) {{
-            loginUrl.searchParams.set('reason', reason);
-          }}
-          if (requestId) {{
-            loginUrl.searchParams.set('requestId', requestId);
-          }}
-          return loginUrl.toString();
-        }};
-
-        if (!response.ok) {{
-          history.replaceState(null, '', window.location.pathname + window.location.search);
-          if (payload.code === 'AUTH_ACCESS_DENIED') {{
-            window.location.replace(buildLoginUrl('unauthorized'));
-            return;
-          }}
-          if (payload.code === 'AUTH_SESSION_STORAGE_UNAVAILABLE') {{
-            window.location.replace(buildLoginUrl('auth_unavailable', payload.requestId));
-            return;
-          }}
-          window.location.replace(buildLoginUrl('auth_unavailable', payload.requestId));
-          return;
+        if (window.location.hash) {{
+          redirectTo.hash = window.location.hash;
         }}
-
-        const nextUrl = payload.redirectTo || redirectTo;
         history.replaceState(null, '', window.location.pathname + window.location.search);
-        window.location.replace(nextUrl);
-      }})().catch(function () {{
-        window.location.replace(new URL('login', {serialized_redirect}).toString());
-      }});
+        window.location.replace(redirectTo.toString());
+      }})();
     </script>
   </body>
 </html>"""
@@ -387,11 +381,20 @@ async def auth_magic_link():
     payload = await request.get_json(silent=True) or {}
     email = sanitize_plain_text(payload.get("email"), 160).lower()
     try:
-        redirect_to = _sanitize_frontend_redirect_target(payload.get("redirectTo"))
+        redirect_to, redirect_mode = _resolve_magic_link_callback_url(payload.get("redirectTo"))
         callback_url = _build_callback_url(redirect_to)
     except RuntimeError as exc:
         return _auth_redirect_config_error(exc)
     remote_addr = request.remote_addr or "unknown"
+    logger.info(
+        with_request_id(
+            {
+                "event": "auth_magic_link_callback_selected",
+                "mode": redirect_mode,
+                "callback_url": callback_url,
+            }
+        )
+    )
 
     rate_limited = _rate_limited("auth_magic_link", f"{remote_addr}:{email}", limit=5, window_seconds=300)
     if rate_limited:
@@ -442,34 +445,12 @@ async def auth_callback():
 
     if request.method == "GET":
         try:
-            redirect_to = _sanitize_frontend_app_redirect_target(request.args.get("next"))
+            redirect_to = _build_frontend_callback_relay_target()
         except RuntimeError as exc:
             return _auth_redirect_config_error(exc)
-        token_hash = (request.args.get("token_hash") or "").strip()
-        otp_type = (request.args.get("type") or "").strip()
-        if not token_hash or not otp_type:
-            return Response(_build_fragment_bridge_html(redirect_to), mimetype="text/html")
-
-        try:
-            auth_payload = consume_magic_link(token_hash) if auth_test_mode_enabled() else None
-            if auth_payload:
-                user_id = str(auth_payload.get("user_id") or "").strip()
-                email = str(auth_payload.get("email") or "").strip().lower()
-            else:
-                auth_response = supabase.auth.verify_otp({"token_hash": token_hash, "type": otp_type})
-                user_id, email = _extract_user_fields(auth_response)
-            if not user_id or not _is_allowed_admin_identity(email, user_id):
-                return redirect(_build_login_redirect_target(redirect_to, reason="unauthorized"))
-
-            session = create_admin_session(user_id, email, request.headers.get("User-Agent"), request.remote_addr)
-            response = redirect(redirect_to)
-            return _set_session_cookies(response, session["token"], session["csrf_token"])
-        except AdminSessionStorageUnavailableError as exc:
-            request_id = _log_auth_session_storage_unavailable(exc)
-            return redirect(_build_login_redirect_target(redirect_to, reason="auth_unavailable", request_id=request_id))
-        except Exception as exc:
-            logger.warning(with_request_id({"event": "auth_callback_verify_failed", "error": mascarar_segredos(str(exc))}))
-            return redirect(_build_login_redirect_target(redirect_to))
+        if request.query_string:
+            return redirect(redirect_to)
+        return Response(_build_fragment_bridge_html(redirect_to), mimetype="text/html")
 
     payload = await request.get_json(silent=True) or {}
     access_token = str(payload.get("access_token") or "").strip()

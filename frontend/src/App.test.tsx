@@ -86,4 +86,14 @@ describe('App', () => {
 
     expect(await screen.findByText('Auth callback page')).toBeInTheDocument();
   });
+
+  it('uses the configured basename when BASE_URL is not root', async () => {
+    vi.stubEnv('BASE_URL', '/financemgmtbot/');
+    window.history.pushState({}, '', '/financemgmtbot/login');
+    const { default: App } = await import('./App');
+
+    render(<App />);
+
+    expect(await screen.findByText('Login page')).toBeInTheDocument();
+  });
 });

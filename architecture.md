@@ -1,5 +1,5 @@
 # 📜 Manifesto de Arquitetura: Finance Mgmt Bot
-**Versão:** V3.3.0 — *GitHub Pages com Sessão Supabase no Browser, Bearer Validado no Backend e Hardening Operacional*
+**Versão:** V3.3.1 — *GitHub Pages com Sessão Supabase no Browser, Callback Canônico no Frontend e Relay Seguro de Compatibilidade*
 
 ## Visão Geral do Produto
 O sistema é um Assistente Pessoal (Copilot) Financeiro multimodal orientado a eventos. O núcleo operacional continua centrado no Telegram, onde textos, cupons fiscais e áudios são recebidos e processados via Webhook assíncrono. A evolução V3 introduziu uma segunda superfície oficial: um **Painel Administrativo Web** publicado estaticamente no GitHub Pages, delegando autenticação e operações sensíveis a um backend Python hospedado no Google Cloud Run. A versão atual V3.3 mantém o frontend estático e o backend sem custo extra, mas corrige o problema estrutural de cookie cross-site retornando o painel oficial para **sessão Supabase no browser** e **Bearer token validado server-side** nas rotas `/api/admin/*`, preservando o hardening que não depende de cookie de terceira parte: logs sanitizados, envelope de erro com `requestId`, `cache_aprovacao` cifrada com TTL, headers anti-cache e allowlists administrativas no backend.
@@ -45,13 +45,14 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 ### 2.2 Borda Administrativa (GitHub Pages → Cloud Run)
 1. O usuário acessa a SPA em um origin público controlado, por exemplo `https://admin.example.com/`.
 2. O frontend solicita o Magic Link ao backend em `POST /auth/magic-link`.
-3. O backend valida allowlist/rate limit e pede ao Supabase o envio do Magic Link com `email_redirect_to` apontando para a rota pública do frontend, por exemplo `https://admin.example.com/auth/callback`.
-4. O frontend recebe `access_token` e `refresh_token` do Supabase na rota `/auth/callback` e persiste a sessão usando `supabase.auth.setSession(...)`.
+3. O backend valida allowlist/rate limit e pede ao Supabase o envio do Magic Link com `email_redirect_to` canônico apontando para a rota pública do frontend, por exemplo `https://admin.example.com/auth/callback`; em produção, esse callback não depende mais do `redirectTo` informado pelo navegador.
+4. O frontend recebe `access_token` e `refresh_token` do Supabase na rota `/auth/callback` e persiste a sessão usando `supabase.auth.setSession(...)`, ou troca um `code` por sessão com `supabase.auth.exchangeCodeForSession(...)` quando o provedor responder nesse formato.
 5. O contexto `useAuth` passa a refletir a sessão oficial do navegador via `supabase.auth.getSession()` e `onAuthStateChange(...)`, com fallback opcional para `GET /auth/session` apenas como compatibilidade legada/local.
 6. O frontend chama o backend em `/api/admin/*` com `Authorization: Bearer <access_token>`; o caminho cookie+CSRF deixa de ser o fluxo oficial do GitHub Pages.
 7. O backend valida o bearer token no lado servidor com Supabase, revalida allowlists administrativas e executa a operação privilegiada com auditoria.
 8. O operador continua podendo criar, editar, excluir, aprovar e rejeitar registros a partir do painel sem expor `service_role` ao navegador; o token web oficial passa a ser o token público do Supabase, compatível com o domínio separado do GitHub Pages.
-9. Falhas operacionais do painel usam envelope sanitizado com `code`, `requestId`, `retryable` e, quando aplicável, `retryAfterSeconds`, permitindo que a UI mostre erro real sem ecoar detalhes crus de provedores ou do banco.
+9. O callback legado do backend (`GET /auth/callback`) passa a atuar apenas como relay de compatibilidade: ele preserva `hash` ou `query string` vindos do Supabase e redireciona o navegador para o callback do frontend, sem mais criar sessão cookie para o fluxo oficial do Pages.
+10. Falhas operacionais do painel usam envelope sanitizado com `code`, `requestId`, `retryable` e, quando aplicável, `retryAfterSeconds`, permitindo que a UI mostre erro real sem ecoar detalhes crus de provedores ou do banco.
 
 ### 2.3 Separação de Superfícies
 * **GitHub Pages** hospeda apenas arquivos estáticos.
@@ -90,10 +91,10 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - ambos só existem para desenvolvimento e não substituem o fluxo oficial de autenticação em produção
 
 ### 4.2 Supabase & RLS
-* O acesso web é controlado por Supabase Auth apenas como identidade upstream; a sessão operacional do painel é controlada pelo backend.
+* O acesso web é controlado por Supabase Auth como identidade upstream e como sessão oficial do navegador no GitHub Pages; o backend mantém `admin_web_sessions` apenas para compatibilidade operacional, testes locais e fluxos legados.
 * A autorização administrativa é reforçada em quatro níveis:
-  1. Magic Link do Supabase validado no backend
-  2. sessão opaca válida em `admin_web_sessions`
+  1. Magic Link do Supabase emitido com callback canônico do frontend
+  2. bearer token do Supabase validado server-side no backend
   3. políticas RLS no banco
   4. allowlist opcional por email e/ou `user_id` no backend
 * O frontend também pode aplicar uma allowlist leve por email (`VITE_ALLOWED_ADMIN_EMAILS`) para melhorar UX e bloquear acesso indevido antes de acionar a camada privilegiada, sem substituir backend/RLS.
@@ -120,6 +121,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 * O fluxo administrativo de autenticação passa pelo backend:
   - `POST /auth/magic-link`
   - callback oficial no frontend `/auth/callback`
+  - `GET /auth/callback` no backend apenas como relay seguro de compatibilidade para links antigos ou configuração desalinhada
   - `GET /auth/session` e `POST /auth/logout` apenas como compatibilidade de sessão server-side
 
 ### 4.4 CORS e Fronteira Web
@@ -174,8 +176,10 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `BASE_URL=/financemgmtbot/`
   - chamadas administrativas apontam para o Cloud Run público
   - login oficial via backend `/auth/magic-link`
-  - o backend constrói `email_redirect_to` do Supabase usando a rota pública do frontend no GitHub Pages, por exemplo `/auth/callback`
+  - o backend constrói `email_redirect_to` do Supabase usando sempre a rota pública canônica do frontend no GitHub Pages, por exemplo `/auth/callback`
+  - `redirectTo` vindo do browser só é aceito em desenvolvimento local ou `AUTH_TEST_MODE`
   - o fallback seguro de retorno do painel usa `FRONTEND_PUBLIC_URL`, nunca `localhost`
+  - `GET /auth/callback` do backend preserva `hash`/`query string` e redireciona para o callback do frontend quando um link antigo ainda cair no `run.app`
   - a SPA manipula apenas o token público de sessão do Supabase no navegador e envia `Authorization: Bearer` para o backend administrativo
   - o frontend exige `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` no build oficial
 * A SPA usa `code splitting` por rota e por dependência pesada de frontend, carregando `Dashboard`, `Histórico`, `Aprovações`, `Login` e o modal transacional sob demanda, com `manualChunks` dedicados para gráficos, tabela e vendor base.

@@ -54,6 +54,10 @@ function stripTokenFragment() {
   window.history.replaceState({}, document.title, cleanUrl);
 }
 
+function isAuthCallbackRoute() {
+  return typeof window !== 'undefined' && window.location.pathname.endsWith('/auth/callback');
+}
+
 function buildAuthUser(session: SessionLike): AuthUser | null {
   if (!session?.access_token) {
     return null;
@@ -81,6 +85,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   const refreshSession = async () => {
+    const authCallbackRoute = isAuthCallbackRoute();
+
     if (localDevBypassEnabled) {
       startTransition(() => {
         setAuthenticated(true);
@@ -120,6 +126,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
+      if (authCallbackRoute) {
+        startTransition(() => {
+          setAuthenticated(false);
+          setUser(null);
+          setCsrfToken('');
+          setLoading(false);
+        });
+        return;
+      }
+
       const payload = await getAuthSession();
       if (!payload.authenticated) {
         clearBrowserAdminProfile();
@@ -132,8 +148,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setLoading(false);
       });
     } catch {
-      clearBrowserAdminProfile();
-      clearBrowserAdminTestSession();
+      if (!authCallbackRoute) {
+        clearBrowserAdminProfile();
+        clearBrowserAdminTestSession();
+      }
       startTransition(() => {
         setAuthenticated(false);
         setUser(null);

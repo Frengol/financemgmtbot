@@ -4,6 +4,7 @@ import {
   clearBrowserAdminProfile,
   clearBrowserAdminTestSession,
   decodeAccessTokenIdentity,
+  loadBrowserAdminTestSession,
   saveBrowserAdminProfile,
   saveBrowserAdminTestSession,
 } from '@/lib/auth';
@@ -69,6 +70,32 @@ function clearTokenFragment() {
   window.history.replaceState({}, document.title, cleanUrl);
 }
 
+function resolveAuthProfile(options: {
+  accessToken?: string | null;
+  user?: {
+    id?: string | null;
+    email?: string | null;
+  } | null;
+  fallbackProfile?: {
+    id: string;
+    email: string | null;
+  } | null;
+}) {
+  const { accessToken, user, fallbackProfile } = options;
+  const claims = decodeAccessTokenIdentity(accessToken);
+  const userId = user?.id || claims?.id || fallbackProfile?.id || null;
+  const email = user?.email ?? claims?.email ?? fallbackProfile?.email ?? null;
+
+  if (!userId) {
+    return null;
+  }
+
+  return {
+    id: userId,
+    email,
+  };
+}
+
 export default function AuthCallback() {
   const [error, setError] = useState('');
 
@@ -85,12 +112,58 @@ export default function AuthCallback() {
         clearBrowserAdminProfile();
         clearBrowserAdminTestSession();
         setError(mapUpstreamAuthError(upstreamError, upstreamCode));
-        clearTokenFragment();
+        return;
+      }
+
+      const callbackProfile = fallbackProfileFromCallback(queryParams, hashParams);
+      const code = (queryParams.get('code') || '').trim();
+      if (code) {
+        const { data, error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
+
+        if (cancelled) {
+          return;
+        }
+
+        if (exchangeError || !data.session?.access_token) {
+          clearBrowserAdminProfile();
+          clearBrowserAdminTestSession();
+          setError('Nao foi possivel concluir o login com este link. Solicite um novo magic link.');
+          return;
+        }
+
+        const resolvedProfile = resolveAuthProfile({
+          accessToken: data.session.access_token,
+          user: data.session.user,
+          fallbackProfile: callbackProfile,
+        });
+        saveBrowserAdminProfile(resolvedProfile);
+        window.location.replace(buildHomeUrl());
         return;
       }
 
       const accessToken = hashParams.get('access_token');
       const refreshToken = hashParams.get('refresh_token');
+      if (!accessToken || !refreshToken) {
+        const existingBrowserAuthTestSession = loadBrowserAdminTestSession();
+        if (existingBrowserAuthTestSession?.accessToken && existingBrowserAuthTestSession.user?.id) {
+          saveBrowserAdminProfile(existingBrowserAuthTestSession.user);
+          window.location.replace(buildHomeUrl());
+          return;
+        }
+
+        const { data } = await supabase.auth.getSession();
+        const existingProfile = resolveAuthProfile({
+          accessToken: data.session?.access_token,
+          user: data.session?.user,
+          fallbackProfile: callbackProfile,
+        });
+        if (data.session?.access_token && existingProfile) {
+          saveBrowserAdminProfile(existingProfile);
+          window.location.replace(buildHomeUrl());
+          return;
+        }
+      }
+
       if (!accessToken || !refreshToken) {
         clearBrowserAdminProfile();
         clearBrowserAdminTestSession();
@@ -99,7 +172,6 @@ export default function AuthCallback() {
         return;
       }
 
-      const callbackProfile = fallbackProfileFromCallback(queryParams, hashParams);
       if (callbackProfile) {
         saveBrowserAdminProfile(callbackProfile);
         saveBrowserAdminTestSession({
@@ -130,7 +202,7 @@ export default function AuthCallback() {
         return;
       }
 
-      saveBrowserAdminProfile(decodeAccessTokenIdentity(accessToken));
+      saveBrowserAdminProfile(resolveAuthProfile({ accessToken, fallbackProfile: callbackProfile }));
       window.location.replace(buildHomeUrl());
     };
 

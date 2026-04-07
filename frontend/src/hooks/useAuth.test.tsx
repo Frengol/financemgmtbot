@@ -302,6 +302,101 @@ describe('useAuth', () => {
     expect(() => render(<InvalidHarness />)).toThrow('useAuth must be used within AuthProvider.');
   });
 
+  it('falls back to refreshSession when the auth state change does not resolve a usable user', async () => {
+    let authStateHandler: ((event: string, session: { access_token?: string; user?: { id?: string; email?: string | null } | null } | null) => void) | undefined;
+    mockOnAuthStateChange.mockImplementation((handler: typeof authStateHandler) => {
+      authStateHandler = handler;
+      return {
+        data: {
+          subscription: {
+            unsubscribe: vi.fn(),
+          },
+        },
+      };
+    });
+    mockGetSession
+      .mockResolvedValueOnce({
+        data: {
+          session: null,
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          session: null,
+        },
+      });
+    mockGetAuthSession
+      .mockResolvedValueOnce({
+        authenticated: false,
+      })
+      .mockResolvedValueOnce({
+        authenticated: false,
+      });
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    });
+
+    authStateHandler?.('SIGNED_IN', {
+      access_token: 'token-without-user',
+      user: null,
+    });
+
+    await waitFor(() => {
+      expect(mockGetSession).toHaveBeenCalledTimes(2);
+    });
+    expect(mockGetAuthSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('hydrates the authenticated state directly from a valid auth state change session', async () => {
+    let authStateHandler: ((event: string, session: { access_token?: string; user?: { id?: string; email?: string | null } | null } | null) => void) | undefined;
+    mockOnAuthStateChange.mockImplementation((handler: typeof authStateHandler) => {
+      authStateHandler = handler;
+      return {
+        data: {
+          subscription: {
+            unsubscribe: vi.fn(),
+          },
+        },
+      };
+    });
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: null,
+      },
+    });
+    mockGetAuthSession.mockResolvedValue({
+      authenticated: false,
+    });
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    });
+
+    authStateHandler?.('SIGNED_IN', {
+      access_token: 'token-3',
+      user: { id: 'user-3', email: 'admin3@example.com' },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('yes');
+    });
+    expect(screen.getByTestId('email')).toHaveTextContent('admin3@example.com');
+    expect(screen.getByTestId('csrf')).toHaveTextContent('');
+  });
+
   it('preserves the magic-link token fragment while the auth callback route is mounting', async () => {
     window.history.pushState({}, '', '/auth/callback#access_token=abc&refresh_token=def');
     mockGetSession.mockResolvedValue({
@@ -325,6 +420,7 @@ describe('useAuth', () => {
 
     expect(window.location.hash).toContain('access_token=abc');
     expect(window.location.hash).toContain('refresh_token=def');
+    expect(mockGetAuthSession).not.toHaveBeenCalled();
   });
 
   it('supports local development bypass without calling the backend logout route', async () => {
