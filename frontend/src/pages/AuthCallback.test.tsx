@@ -8,6 +8,7 @@ function buildJwtLikeToken(...segments: string[]) {
 const mockSetSession = vi.fn();
 const mockExchangeCodeForSession = vi.fn();
 const mockGetSession = vi.fn();
+const mockClearBrowserAuthState = vi.fn();
 const mockSaveBrowserAdminProfile = vi.fn();
 const mockSaveBrowserAdminTestSession = vi.fn();
 const mockClearBrowserAdminProfile = vi.fn();
@@ -16,6 +17,7 @@ const mockDecodeAccessTokenIdentity = vi.fn();
 const mockLoadBrowserAdminTestSession = vi.fn();
 
 vi.mock('@/lib/supabase', () => ({
+  clearBrowserAuthState: (...args: unknown[]) => mockClearBrowserAuthState(...args),
   supabase: {
     auth: {
       setSession: (...args: unknown[]) => mockSetSession(...args),
@@ -43,6 +45,7 @@ describe('AuthCallback', () => {
     mockSetSession.mockReset();
     mockExchangeCodeForSession.mockReset();
     mockGetSession.mockReset();
+    mockClearBrowserAuthState.mockReset();
     mockSaveBrowserAdminProfile.mockReset();
     mockSaveBrowserAdminTestSession.mockReset();
     mockClearBrowserAdminProfile.mockReset();
@@ -68,6 +71,17 @@ describe('AuthCallback', () => {
     const replaceSpy = vi.fn();
     vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
     mockSetSession.mockResolvedValue({ data: {}, error: null });
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: {
+            id: 'user-1',
+            email: 'admin@example.com',
+          },
+        },
+      },
+    });
     mockDecodeAccessTokenIdentity.mockReturnValue({ id: 'user-1', email: 'admin@example.com' });
 
     const { default: AuthCallback } = await import('./AuthCallback');
@@ -113,10 +127,11 @@ describe('AuthCallback', () => {
     window.history.pushState({}, '', '/auth/callback?code=pkce-code-1');
     const replaceSpy = vi.fn();
     vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
+    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-code', 'signature-segment');
     mockExchangeCodeForSession.mockResolvedValue({
       data: {
         session: {
-          access_token: 'token-from-code',
+          access_token: accessToken,
           user: {
             id: 'user-1',
             email: 'admin@example.com',
@@ -124,6 +139,17 @@ describe('AuthCallback', () => {
         },
       },
       error: null,
+    });
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: {
+            id: 'user-1',
+            email: 'admin@example.com',
+          },
+        },
+      },
     });
     mockDecodeAccessTokenIdentity.mockReturnValue({ id: 'user-1', email: 'admin@example.com' });
 
@@ -152,8 +178,41 @@ describe('AuthCallback', () => {
 
     expect(await screen.findByText(/nao foi possivel concluir o login/i)).toBeInTheDocument();
     expect(mockSetSession).not.toHaveBeenCalled();
-    expect(mockClearBrowserAdminProfile).toHaveBeenCalled();
-    expect(mockClearBrowserAdminTestSession).toHaveBeenCalled();
+    expect(mockClearBrowserAuthState).toHaveBeenCalled();
+  });
+
+  it('shows a short diagnostic when the exchanged session cannot be persisted safely', async () => {
+    window.history.pushState({}, '', '/auth/callback?code=pkce-code-invalid');
+    mockExchangeCodeForSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: buildJwtLikeToken('header-segment', 'payload-segment-code-invalid', 'signature-segment'),
+          user: {
+            id: 'user-1',
+            email: 'admin@example.com',
+          },
+        },
+      },
+      error: null,
+    });
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: 'not-a-jwt',
+          user: {
+            id: 'user-1',
+            email: 'admin@example.com',
+          },
+        },
+      },
+    });
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+
+    render(<AuthCallback />);
+
+    expect(await screen.findByText(/diagnostico: session_store_invalid/i)).toBeInTheDocument();
+    expect(mockClearBrowserAuthState).toHaveBeenCalled();
   });
 
   it('stores a minimal browser auth profile derived from the access token claims', async () => {
@@ -224,10 +283,11 @@ describe('AuthCallback', () => {
     window.history.pushState({}, '', '/auth/callback?email=admin%40example.com');
     const replaceSpy = vi.fn();
     vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
+    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-existing', 'signature-segment');
     mockGetSession.mockResolvedValue({
       data: {
         session: {
-          access_token: 'existing-session-token',
+          access_token: accessToken,
           user: {
             id: 'user-1',
             email: 'admin@example.com',
@@ -245,5 +305,27 @@ describe('AuthCallback', () => {
     });
     expect(replaceSpy).toHaveBeenCalledWith(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
     expect(mockClearBrowserAdminTestSession).not.toHaveBeenCalled();
+  });
+
+  it('shows a diagnostic when an existing persisted session is unusable during callback replay', async () => {
+    window.history.pushState({}, '', '/auth/callback?email=admin%40example.com');
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: 'not-a-jwt',
+          user: {
+            id: 'user-1',
+            email: 'admin@example.com',
+          },
+        },
+      },
+    });
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+
+    render(<AuthCallback />);
+
+    expect(await screen.findByText(/diagnostico: auth_state_unusable/i)).toBeInTheDocument();
+    expect(mockClearBrowserAuthState).toHaveBeenCalled();
   });
 });

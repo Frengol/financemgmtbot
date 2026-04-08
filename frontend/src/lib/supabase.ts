@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import {
+  browserAdminTestSessionAllowed,
   clearBrowserAdminArtifacts,
   isJwtShapeValid,
   loadBrowserAdminTestSession,
@@ -7,17 +8,21 @@ import {
 
 const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL || 'http://127.0.0.1:54321').trim().replace(/\/$/, '');
 const supabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || 'public-anon-key-for-local-tests').trim();
+export const supabaseBrowserSessionStorageKey = 'financemgmtbot-admin-auth';
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     autoRefreshToken: true,
     detectSessionInUrl: false,
     persistSession: true,
-    storageKey: 'financemgmtbot-admin-auth',
+    storageKey: supabaseBrowserSessionStorageKey,
   },
 });
 
 export async function clearBrowserAuthState() {
+  if (typeof window !== 'undefined') {
+    window.localStorage.removeItem(supabaseBrowserSessionStorageKey);
+  }
   clearBrowserAdminArtifacts();
   try {
     await supabase.auth.signOut();
@@ -27,7 +32,7 @@ export async function clearBrowserAuthState() {
 }
 
 export async function getAccessToken() {
-  const browserAuthTestSession = loadBrowserAdminTestSession();
+  const browserAuthTestSession = browserAdminTestSessionAllowed() ? loadBrowserAdminTestSession() : null;
   if (browserAuthTestSession?.accessToken) {
     return browserAuthTestSession.accessToken;
   }

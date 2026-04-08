@@ -9,6 +9,7 @@ const mockOnAuthStateChange = vi.fn();
 const mockSignOut = vi.fn();
 const mockClearBrowserAuthState = vi.fn();
 const mockLogoutAuthSession = vi.fn();
+const mockBrowserAdminTestSessionAllowed = vi.fn();
 
 function buildJwtLikeToken(...segments: string[]) {
   return segments.join('.');
@@ -24,6 +25,14 @@ vi.mock('@/lib/supabase', () => ({
     },
   },
 }));
+
+vi.mock('@/lib/auth', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/auth')>('@/lib/auth');
+  return {
+    ...actual,
+    browserAdminTestSessionAllowed: (...args: unknown[]) => mockBrowserAdminTestSessionAllowed(...args),
+  };
+});
 
 vi.mock('@/lib/adminApi', () => ({
   getAuthSession: (...args: unknown[]) => mockGetAuthSession(...args),
@@ -58,6 +67,8 @@ describe('useAuth', () => {
     mockSignOut.mockReset();
     mockClearBrowserAuthState.mockReset();
     mockLogoutAuthSession.mockReset();
+    mockBrowserAdminTestSessionAllowed.mockReset();
+    mockBrowserAdminTestSessionAllowed.mockReturnValue(true);
     window.localStorage.clear();
     window.history.pushState({}, '', '/#access_token=abc&refresh_token=def');
     mockOnAuthStateChange.mockReturnValue({
@@ -127,6 +138,28 @@ describe('useAuth', () => {
     expect(screen.getByTestId('authenticated')).toHaveTextContent('yes');
     expect(screen.getByTestId('email')).toHaveTextContent('admin@example.com');
     expect(screen.getByTestId('csrf')).toHaveTextContent('csrf-token');
+  });
+
+  it('does not call the legacy backend auth session fallback on the published Pages runtime', async () => {
+    mockBrowserAdminTestSessionAllowed.mockReturnValue(false);
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: null,
+      },
+    });
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading')).toHaveTextContent('ready');
+    });
+
+    expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    expect(mockGetAuthSession).not.toHaveBeenCalled();
   });
 
   it('clears malformed browser auth state before falling back to the backend session', async () => {

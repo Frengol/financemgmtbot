@@ -1,5 +1,6 @@
 import type { TransactionDraft, TransactionRecord } from '@/lib/transactions';
-import { getAccessToken } from '@/lib/supabase';
+import { browserAdminTestSessionAllowed } from '@/lib/auth';
+import { clearBrowserAuthState, getAccessToken } from '@/lib/supabase';
 
 const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 export const localDevBypassEnabled = import.meta.env.DEV && import.meta.env.VITE_LOCAL_DEV_BYPASS_AUTH === 'true';
@@ -46,6 +47,7 @@ const AUTH_RECOVERY_ERROR_CODES = new Set([
 export class ApiError extends Error {
   code: string;
   detail?: string;
+  diagnostic?: string;
   status: number;
   requestId?: string;
   retryable: boolean;
@@ -56,6 +58,7 @@ export class ApiError extends Error {
     {
       code,
       detail,
+      diagnostic,
       status,
       requestId,
       retryable = false,
@@ -63,6 +66,7 @@ export class ApiError extends Error {
     }: {
       code: string;
       detail?: string;
+      diagnostic?: string;
       status: number;
       requestId?: string;
       retryable?: boolean;
@@ -73,6 +77,7 @@ export class ApiError extends Error {
     this.name = 'ApiError';
     this.code = code;
     this.detail = detail;
+    this.diagnostic = diagnostic;
     this.status = status;
     this.requestId = requestId;
     this.retryable = retryable;
@@ -114,6 +119,54 @@ function isAdminApiPath(path: string) {
   return path.startsWith('/api/admin/');
 }
 
+function buildSupportMessage({
+  message,
+  requestId,
+  detail,
+  diagnostic,
+}: {
+  message: string;
+  requestId?: string;
+  detail?: string;
+  diagnostic?: string;
+}) {
+  const supportMessageParts = [message];
+  if (requestId) {
+    supportMessageParts.push(`Codigo de suporte: ${requestId}`);
+  }
+  if (detail) {
+    supportMessageParts.push(`Detalhe: ${detail}`);
+  }
+  if (diagnostic) {
+    supportMessageParts.push(`Diagnostico: ${diagnostic}`);
+  }
+  return supportMessageParts.join(' ');
+}
+
+function createClientApiError({
+  code,
+  status,
+  message,
+  diagnostic,
+  retryable = false,
+}: {
+  code: string;
+  status: number;
+  message: string;
+  diagnostic?: string;
+  retryable?: boolean;
+}) {
+  return new ApiError(
+    buildSupportMessage({ message, diagnostic }),
+    {
+      code,
+      diagnostic,
+      status,
+      retryable,
+    },
+  );
+}
+
 async function parseError(response: Response) {
   let payload: ApiErrorPayload = {};
   try {
@@ -129,14 +182,7 @@ async function parseError(response: Response) {
     : undefined;
   const fallbackMessage = payload.message || payload.error || `Request failed with status ${response.status}`;
   const mappedMessage = ERROR_MESSAGES[code] || fallbackMessage;
-  const supportMessageParts = [mappedMessage];
-  if (requestId) {
-    supportMessageParts.push(`Codigo de suporte: ${requestId}`);
-  }
-  if (detail) {
-    supportMessageParts.push(`Detalhe: ${detail}`);
-  }
-  const supportMessage = supportMessageParts.join(' ');
+  const supportMessage = buildSupportMessage({ message: mappedMessage, requestId, detail });
 
   return new ApiError(supportMessage, {
     code,
@@ -157,6 +203,7 @@ async function apiRequest<T>(path: string, init: RequestInit = {}, csrfToken?: s
   const method = (init.method || 'GET').toUpperCase();
   const isAdminRoute = isAdminApiPath(path);
   const accessToken = isAdminRoute ? await getAccessToken() : null;
+  const allowLegacyCookieFallback = browserAdminTestSessionAllowed();
 
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
@@ -164,6 +211,14 @@ async function apiRequest<T>(path: string, init: RequestInit = {}, csrfToken?: s
 
   if (accessToken) {
     headers.set('Authorization', `Bearer ${accessToken}`);
+  } else if (isAdminRoute && !allowLegacyCookieFallback) {
+    await clearBrowserAuthState();
+    throw createClientApiError({
+      code: 'AUTH_SESSION_INVALID',
+      status: 401,
+      message: ERROR_MESSAGES.AUTH_SESSION_INVALID,
+      diagnostic: 'auth_state_unusable',
+    });
   } else if (csrfToken && ['POST', 'PATCH', 'DELETE'].includes(method)) {
     headers.set('X-CSRF-Token', csrfToken);
   }

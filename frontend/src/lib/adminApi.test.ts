@@ -16,15 +16,25 @@ import {
 
 const fetchMock = vi.fn();
 const mockGetAccessToken = vi.fn();
+const mockClearBrowserAuthState = vi.fn();
+const mockBrowserAdminTestSessionAllowed = vi.fn();
 
 vi.mock('@/lib/supabase', () => ({
+  clearBrowserAuthState: (...args: unknown[]) => mockClearBrowserAuthState(...args),
   getAccessToken: (...args: unknown[]) => mockGetAccessToken(...args),
+}));
+
+vi.mock('@/lib/auth', () => ({
+  browserAdminTestSessionAllowed: (...args: unknown[]) => mockBrowserAdminTestSessionAllowed(...args),
 }));
 
 describe('adminApi', () => {
   beforeEach(() => {
     fetchMock.mockReset();
     mockGetAccessToken.mockReset();
+    mockClearBrowserAuthState.mockReset();
+    mockBrowserAdminTestSessionAllowed.mockReset();
+    mockBrowserAdminTestSessionAllowed.mockReturnValue(true);
     vi.stubGlobal('fetch', fetchMock);
   });
 
@@ -181,6 +191,25 @@ describe('adminApi', () => {
     }))).toBe(false);
   });
 
+  it('fails locally with a short diagnostic when the Pages runtime has no usable bearer token', async () => {
+    mockGetAccessToken.mockResolvedValue(null);
+    mockBrowserAdminTestSessionAllowed.mockReturnValue(false);
+
+    const request = getTransactions();
+
+    await expect(request).rejects.toMatchObject({
+      name: 'ApiError',
+      code: 'AUTH_SESSION_INVALID',
+      diagnostic: 'auth_state_unusable',
+      status: 401,
+    });
+    await expect(request).rejects.toThrow(
+      'Sua sessao expirou. Faca login novamente. Diagnostico: auth_state_unusable',
+    );
+    expect(mockClearBrowserAuthState).toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('keeps the auth endpoints on the same origin and includes the JSON payload', async () => {
     mockGetAccessToken.mockResolvedValue('token-123');
     fetchMock.mockResolvedValue({
@@ -241,6 +270,7 @@ describe('adminApi', () => {
 
   it('falls back to cookie csrf transport when no bearer token is available', async () => {
     mockGetAccessToken.mockResolvedValue(null);
+    mockBrowserAdminTestSessionAllowed.mockReturnValue(true);
     fetchMock.mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({ status: 'ok', transaction: { id: 'tx-1' } }),

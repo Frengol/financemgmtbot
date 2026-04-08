@@ -10,7 +10,7 @@ import {
   saveBrowserAdminProfile,
   saveBrowserAdminTestSession,
 } from '@/lib/auth';
-import { supabase } from '@/lib/supabase';
+import { clearBrowserAuthState, supabase } from '@/lib/supabase';
 
 function decodeAuthValue(value: string | null) {
   if (!value) {
@@ -54,6 +54,10 @@ function mapUpstreamAuthError(upstreamError: string, upstreamCode: string | null
   }
 
   return upstreamError || 'Nao foi possivel concluir o login com este link. Solicite um novo magic link.';
+}
+
+function withDiagnostic(message: string, diagnostic?: string) {
+  return diagnostic ? `${message} Diagnostico: ${diagnostic}` : message;
 }
 
 function buildHomeUrl() {
@@ -105,6 +109,28 @@ export default function AuthCallback() {
     let cancelled = false;
 
     const completeLogin = async () => {
+      const failLogin = async (diagnostic?: string) => {
+        await clearBrowserAuthState();
+        setError(withDiagnostic('Nao foi possivel concluir o login com este link. Solicite um novo magic link.', diagnostic));
+      };
+
+      const loadValidatedPersistedSession = async (diagnostic: string) => {
+        const { data } = await supabase.auth.getSession();
+        const persistedAccessToken = data.session?.access_token ?? null;
+        const persistedProfile = resolveAuthProfile({
+          accessToken: persistedAccessToken,
+          user: data.session?.user,
+          fallbackProfile: callbackProfile,
+        });
+
+        if (!persistedAccessToken || !isJwtShapeValid(persistedAccessToken) || !persistedProfile) {
+          await failLogin(diagnostic);
+          return null;
+        }
+
+        return persistedProfile;
+      };
+
       const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
       const queryParams = new URLSearchParams(window.location.search);
       const upstreamError = decodeAuthValue(hashParams.get('error_description') || queryParams.get('error_description'));
@@ -127,17 +153,14 @@ export default function AuthCallback() {
         }
 
         if (exchangeError || !data.session?.access_token) {
-          clearBrowserAdminProfile();
-          clearBrowserAdminTestSession();
-          setError('Nao foi possivel concluir o login com este link. Solicite um novo magic link.');
+          await failLogin('exchange_failed');
           return;
         }
 
-        const resolvedProfile = resolveAuthProfile({
-          accessToken: data.session.access_token,
-          user: data.session.user,
-          fallbackProfile: callbackProfile,
-        });
+        const resolvedProfile = await loadValidatedPersistedSession('session_store_invalid');
+        if (!resolvedProfile || cancelled) {
+          return;
+        }
         clearBrowserAdminTestSession();
         saveBrowserAdminProfile(resolvedProfile);
         window.location.replace(buildHomeUrl());
@@ -160,6 +183,11 @@ export default function AuthCallback() {
         }
 
         const { data } = await supabase.auth.getSession();
+        if (data.session?.access_token && !isJwtShapeValid(data.session.access_token)) {
+          await failLogin('auth_state_unusable');
+          clearTokenFragment();
+          return;
+        }
         const existingProfile = resolveAuthProfile({
           accessToken: data.session?.access_token,
           user: data.session?.user,
@@ -173,9 +201,7 @@ export default function AuthCallback() {
       }
 
       if (!accessToken || !refreshToken) {
-        clearBrowserAdminProfile();
-        clearBrowserAdminTestSession();
-        setError('Nao foi possivel concluir o login com este link. Solicite um novo magic link.');
+        await failLogin('callback_tokens_missing');
         clearTokenFragment();
         return;
       }
@@ -204,14 +230,16 @@ export default function AuthCallback() {
       }
 
       if (sessionError) {
-        clearBrowserAdminProfile();
-        clearBrowserAdminTestSession();
-        setError('Nao foi possivel concluir o login com este link. Solicite um novo magic link.');
+        await failLogin('session_exchange_failed');
         return;
       }
 
+      const resolvedProfile = await loadValidatedPersistedSession('session_store_invalid');
+      if (!resolvedProfile || cancelled) {
+        return;
+      }
       clearBrowserAdminTestSession();
-      saveBrowserAdminProfile(resolveAuthProfile({ accessToken, fallbackProfile: callbackProfile }));
+      saveBrowserAdminProfile(resolvedProfile);
       window.location.replace(buildHomeUrl());
     };
 

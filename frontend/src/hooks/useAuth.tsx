@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { createContext, startTransition, useContext, useEffect, useState } from 'react';
 import { getAuthSession, localDevBypassEnabled, logoutAuthSession } from '@/lib/adminApi';
 import {
+  browserAdminTestSessionAllowed,
   decodeAccessTokenIdentity,
   loadBrowserAdminProfile,
   loadBrowserAdminTestSession,
@@ -86,6 +87,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refreshSession = async () => {
     const authCallbackRoute = isAuthCallbackRoute();
+    const allowLegacyBackendFallback = browserAdminTestSessionAllowed();
 
     if (localDevBypassEnabled) {
       startTransition(() => {
@@ -101,7 +103,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      const browserAuthTestSession = loadBrowserAdminTestSession();
+      const browserAuthTestSession = allowLegacyBackendFallback ? loadBrowserAdminTestSession() : null;
       if (browserAuthTestSession?.accessToken && browserAuthTestSession.user?.id) {
         startTransition(() => {
           setAuthenticated(true);
@@ -131,6 +133,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       if (authCallbackRoute) {
+        startTransition(() => {
+          setAuthenticated(false);
+          setUser(null);
+          setCsrfToken('');
+          setLoading(false);
+        });
+        return;
+      }
+
+      if (!allowLegacyBackendFallback) {
+        clearBrowserAdminArtifacts();
         startTransition(() => {
           setAuthenticated(false);
           setUser(null);
