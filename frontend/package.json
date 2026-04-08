@@ -12,8 +12,10 @@
     "test:e2e:integration": "playwright test auth.integration.spec.ts",
     "test:e2e:install": "playwright install chromium firefox",
     "build": "tsc && vite build",
+    "postbuild": "node ./scripts/pages-fallback.mjs copy",
     "verify:build-env": "node ./scripts/validate-build-env.mjs",
     "verify:bundle": "node ./scripts/verify-bundle.mjs",
+    "verify:pages-fallback": "node ./scripts/pages-fallback.mjs verify",
     "preview": "vite preview"
   },
   "dependencies": {

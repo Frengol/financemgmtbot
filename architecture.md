@@ -179,6 +179,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - o backend constrói `email_redirect_to` do Supabase usando sempre a rota pública canônica do frontend no GitHub Pages, por exemplo `/auth/callback`
   - `redirectTo` vindo do browser só é aceito em desenvolvimento local ou `AUTH_TEST_MODE`
   - o fallback seguro de retorno do painel usa `FRONTEND_PUBLIC_URL`, nunca `localhost`
+  - o build oficial gera `dist/404.html` como cópia funcional de `dist/index.html`, permitindo que o GitHub Pages entregue o shell da SPA para deep links como `/financemgmtbot/auth/callback`
   - `GET /auth/callback` do backend preserva `hash`/`query string` e redireciona para o callback do frontend quando um link antigo ainda cair no `run.app`
   - a SPA manipula apenas o token público de sessão do Supabase no navegador e envia `Authorization: Bearer` para o backend administrativo
   - o frontend exige `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` no build oficial
@@ -201,6 +202,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - falha se a cobertura unitária do frontend ficar abaixo de `90%` em `Statements`, `Branches`, `Functions` ou `Lines`
   - valida `npm run verify:build-env`, exigindo `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` vindos de GitHub Actions `Variables` ou `Secrets`
   - valida `npm run build`
+  - valida `npm run verify:pages-fallback`, garantindo que `404.html` foi gerado e continua idêntico ao shell da SPA para o GitHub Pages
   - valida `npm run verify:bundle` para garantir que o artefato publicado continua no contrato `Supabase browser session + Authorization Bearer`
   - o scanner do bundle permite apenas os valores públicos esperados do frontend (`VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY`) e continua bloqueando segredos backend, e-mails inesperados e JWTs não reconhecidos
   - executa `npm run test:e2e` com Playwright em Chromium e Firefox
@@ -209,10 +211,21 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
     - integração local com backend Quart em `AUTH_TEST_MODE`, validando magic link, callback no frontend, sessão Supabase no browser e carregamento de `/api/admin/gastos` por bearer
   - executa `gitleaks` com histórico completo no clone da CI
   - publica artefatos de coverage e do relatório Playwright
+* Pré-commit/local:
+  - mudanças com risco de exposição devem rodar `make audit-repo-security` antes de commit quando `gitleaks` estiver disponível localmente
+  - `make audit-repo-security` varre o repositório Git e o diff atual rastreado, evitando falsos positivos em `.env` locais ignorados e artefatos gerados fora do Git
+  - fixtures de teste não devem conter literais completos que casem com scanners de segredos; tokens/JWTs simulados devem ser montados por fragmentos em tempo de execução
+  - `make pre-push` é o gate local padrão antes de qualquer push e agrega secret scanning, coverage do backend, coverage do frontend, build de produção e `verify:bundle`
+  - o gate local também valida `npm run verify:pages-fallback` para impedir publicação de um build sem fallback de SPA no GitHub Pages
+  - `make pre-push` e `make pre-push-full` injetam placeholders públicos seguros para `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` durante a validação local do build
+  - quando necessário validar o gate com valores públicos específicos do ambiente, os overrides locais devem usar `FRONTEND_BUILD_API_BASE_URL`, `FRONTEND_BUILD_SUPABASE_URL` e `FRONTEND_BUILD_SUPABASE_ANON_KEY`
+  - `make pre-push-full` estende o gate padrão com `npm run test:e2e --prefix frontend` e deve ser usado para mudanças de auth, frontend, CI, build, deploy, contrato público ou segurança
+  - o hook local é opt-in e pode ser instalado com `make install-git-hooks`; ele roda apenas `make pre-push`
 * `deploy-pages.yml`
   - instala dependências com `npm ci`
   - valida `npm run verify:build-env` antes do build, aceitando `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` vindos de Repository Variables ou Secrets
   - builda o frontend com `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` vindos de Repository Variables ou Secrets
+  - valida `npm run verify:pages-fallback` antes de publicar, garantindo que o GitHub Pages consegue servir o shell da SPA em deep links
   - valida o bundle com `npm run verify:bundle` antes de publicar o artefato no GitHub Pages, reutilizando exatamente a mesma política de scan da CI
   - publica automaticamente o SPA no GitHub Pages
 
