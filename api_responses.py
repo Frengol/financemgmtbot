@@ -33,6 +33,7 @@ def json_error(
     status_code: int,
     *,
     code: str = "UNKNOWN_ERROR",
+    detail: str | None = None,
     retryable: bool | None = None,
     retry_after_seconds: int | None = None,
 ):
@@ -42,6 +43,8 @@ def json_error(
         "code": code,
         "requestId": current_request_id(),
     }
+    if detail is not None:
+        payload["detail"] = detail
     if retryable is not None:
         payload["retryable"] = retryable
     if retry_after_seconds is not None:

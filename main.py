@@ -34,11 +34,12 @@ from test_support import auth_test_mode_enabled, capture_magic_link, consume_mag
 app = Quart(__name__)
 
 
-def _json_error(message: str, status_code: int, *, code: str = "UNKNOWN_ERROR", retryable: bool | None = None, retry_after_seconds: int | None = None):
+def _json_error(message: str, status_code: int, *, code: str = "UNKNOWN_ERROR", detail: str | None = None, retryable: bool | None = None, retry_after_seconds: int | None = None):
     return json_error(
         message,
         status_code,
         code=code,
+        detail=detail,
         retryable=retryable,
         retry_after_seconds=retry_after_seconds,
     )

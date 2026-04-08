@@ -2,14 +2,14 @@ import type { ReactNode } from 'react';
 import { createContext, startTransition, useContext, useEffect, useState } from 'react';
 import { getAuthSession, localDevBypassEnabled, logoutAuthSession } from '@/lib/adminApi';
 import {
-  clearBrowserAdminProfile,
-  clearBrowserAdminTestSession,
   decodeAccessTokenIdentity,
   loadBrowserAdminProfile,
   loadBrowserAdminTestSession,
   saveBrowserAdminProfile,
+  clearBrowserAdminArtifacts,
+  isJwtShapeValid,
 } from '@/lib/auth';
-import { supabase } from '@/lib/supabase';
+import { clearBrowserAuthState, supabase } from '@/lib/supabase';
 
 type AuthUser = {
   id: string;
@@ -59,7 +59,7 @@ function isAuthCallbackRoute() {
 }
 
 function buildAuthUser(session: SessionLike): AuthUser | null {
-  if (!session?.access_token) {
+  if (!session?.access_token || !isJwtShapeValid(session.access_token)) {
     return null;
   }
 
@@ -126,6 +126,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
+      if (session?.access_token && !authUser) {
+        await clearBrowserAuthState();
+      }
+
       if (authCallbackRoute) {
         startTransition(() => {
           setAuthenticated(false);
@@ -138,8 +142,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const payload = await getAuthSession();
       if (!payload.authenticated) {
-        clearBrowserAdminProfile();
-        clearBrowserAdminTestSession();
+        clearBrowserAdminArtifacts();
       }
       startTransition(() => {
         setAuthenticated(Boolean(payload.authenticated));
@@ -149,8 +152,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
     } catch {
       if (!authCallbackRoute) {
-        clearBrowserAdminProfile();
-        clearBrowserAdminTestSession();
+        clearBrowserAdminArtifacts();
       }
       startTransition(() => {
         setAuthenticated(false);
@@ -219,11 +221,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         localBypass: localDevBypassEnabled,
         signOut: async () => {
           if (!localDevBypassEnabled) {
-            await supabase.auth.signOut();
+            await clearBrowserAuthState();
             await logoutAuthSession().catch(() => undefined);
           }
-          clearBrowserAdminProfile();
-          clearBrowserAdminTestSession();
+          clearBrowserAdminArtifacts();
           startTransition(() => {
             setAuthenticated(false);
             setUser(null);

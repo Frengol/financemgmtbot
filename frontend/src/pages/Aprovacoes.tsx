@@ -1,18 +1,19 @@
 import { useEffect, useState } from "react";
-import { approvePendingReceipt, getPendingReceipts, rejectPendingReceipt, type PendingApprovalItem } from "@/lib/adminApi";
+import { ApiError, approvePendingReceipt, getPendingReceipts, isReauthenticationError, rejectPendingReceipt, type PendingApprovalItem } from "@/lib/adminApi";
 import { useAuth } from "@/hooks/useAuth";
 import { Check, X, CreditCard, ListMinus } from "lucide-react";
+import { clearBrowserAdminArtifacts } from "@/lib/auth";
 
 export default function Aprovacoes() {
-  const { authenticated, csrfToken, localBypass } = useAuth();
+  const { authenticated, csrfToken, localBypass, signOut } = useAuth();
   const [items, setItems] = useState<PendingApprovalItem[]>([]);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<ApiError | Error | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
 
   const fetchCache = async () => {
     if (!authenticated && !localBypass) {
       setItems([]);
-      setError("");
+      setError(null);
       return;
     }
 
@@ -21,9 +22,12 @@ export default function Aprovacoes() {
       if (data) {
         setItems(data as PendingApprovalItem[]);
       }
-      setError("");
+      setError(null);
     } catch (fetchError) {
-      setError(fetchError instanceof Error ? fetchError.message : "Nao foi possivel carregar as aprovacoes agora.");
+      if (isReauthenticationError(fetchError)) {
+        clearBrowserAdminArtifacts();
+      }
+      setError(fetchError instanceof Error ? fetchError : new Error("Nao foi possivel carregar as aprovacoes agora."));
     }
   };
 
@@ -42,18 +46,21 @@ export default function Aprovacoes() {
 
   const handleAprovar = async (item: PendingApprovalItem) => {
     if ((!authenticated || !csrfToken) && !localBypass) {
-      setError("Sua sessão expirou. Faça login novamente.");
+      setError(new Error("Sua sessão expirou. Faça login novamente."));
       return;
     }
 
     try {
       setPendingId(item.id);
-      setError("");
+      setError(null);
       await approvePendingReceipt(item.id, csrfToken);
       setItems((current) => current.filter((currentItem) => currentItem.id !== item.id));
       window.dispatchEvent(new CustomEvent('transactions:changed'));
     } catch (approveError) {
-      setError(approveError instanceof Error ? approveError.message : "Nao foi possivel aprovar o cupom pendente.");
+      if (isReauthenticationError(approveError)) {
+        clearBrowserAdminArtifacts();
+      }
+      setError(approveError instanceof Error ? approveError : new Error("Nao foi possivel aprovar o cupom pendente."));
     } finally {
       setPendingId(null);
     }
@@ -61,18 +68,21 @@ export default function Aprovacoes() {
 
   const handleRejeitar = async (id: string) => {
     if ((!authenticated || !csrfToken) && !localBypass) {
-      setError("Sua sessão expirou. Faça login novamente.");
+      setError(new Error("Sua sessão expirou. Faça login novamente."));
       return;
     }
 
     try {
       setPendingId(id);
-      setError("");
+      setError(null);
       await rejectPendingReceipt(id, csrfToken);
       setItems((current) => current.filter((currentItem) => currentItem.id !== id));
       window.dispatchEvent(new CustomEvent('transactions:changed'));
     } catch (rejectError) {
-      setError(rejectError instanceof Error ? rejectError.message : "Nao foi possivel rejeitar o cupom pendente.");
+      if (isReauthenticationError(rejectError)) {
+        clearBrowserAdminArtifacts();
+      }
+      setError(rejectError instanceof Error ? rejectError : new Error("Nao foi possivel rejeitar o cupom pendente."));
     } finally {
       setPendingId(null);
     }
@@ -90,8 +100,17 @@ export default function Aprovacoes() {
   return (
     <div className="space-y-6">
       {error && (
-        <div className="bg-rose-50 text-rose-700 border border-rose-100 rounded-lg px-4 py-3 text-sm">
-          {error}
+        <div className="flex flex-col gap-3 rounded-lg border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-700 md:flex-row md:items-center md:justify-between">
+          <span>{error.message}</span>
+          {isReauthenticationError(error) ? (
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              className="inline-flex items-center justify-center rounded-lg border border-rose-200 bg-white px-3 py-2 font-medium text-rose-700 transition hover:bg-rose-100"
+            >
+              Fazer login novamente
+            </button>
+          ) : null}
         </div>
       )}
       {items.length === 0 ? null : (

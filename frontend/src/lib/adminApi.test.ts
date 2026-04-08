@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  ApiError,
   approvePendingReceipt,
   createTransaction,
   deleteTransaction,
   getAuthSession,
   getPendingReceipts,
   getTransactions,
+  isReauthenticationError,
   logoutAuthSession,
   rejectPendingReceipt,
   requestMagicLink,
@@ -131,6 +133,31 @@ describe('adminApi', () => {
     );
   });
 
+  it('preserves a short safe error detail for malformed auth sessions', async () => {
+    mockGetAccessToken.mockResolvedValue(buildMalformedToken());
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 401,
+      headers: new Headers({ 'X-Request-ID': 'req_auth_bad_token' }),
+      json: vi.fn().mockResolvedValue({
+        status: 'error',
+        code: 'AUTH_SESSION_TOKEN_MALFORMED',
+        detail: 'bearer_malformed',
+        message: 'Invalid or expired session.',
+      }),
+    });
+
+    await expect(getTransactions()).rejects.toMatchObject({
+      name: 'ApiError',
+      code: 'AUTH_SESSION_TOKEN_MALFORMED',
+      detail: 'bearer_malformed',
+      requestId: 'req_auth_bad_token',
+    });
+    await expect(getTransactions()).rejects.toThrow(
+      'Sua sessao de acesso e invalida. Faca login novamente. Codigo de suporte: req_auth_bad_token Detalhe: bearer_malformed',
+    );
+  });
+
   it('wraps network failures in a typed retryable error', async () => {
     fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
 
@@ -140,6 +167,18 @@ describe('adminApi', () => {
       retryable: true,
       status: 0,
     });
+  });
+
+  it('flags auth recovery errors for re-login flows', () => {
+    expect(isReauthenticationError(new ApiError('x', {
+      code: 'AUTH_SESSION_TOKEN_MALFORMED',
+      detail: 'bearer_malformed',
+      status: 401,
+    }))).toBe(true);
+    expect(isReauthenticationError(new ApiError('x', {
+      code: 'ADMIN_DATA_LOAD_FAILED',
+      status: 503,
+    }))).toBe(false);
   });
 
   it('keeps the auth endpoints on the same origin and includes the JSON payload', async () => {
@@ -224,3 +263,7 @@ describe('adminApi', () => {
     expect(headers.has('Authorization')).toBe(false);
   });
 });
+
+function buildMalformedToken() {
+  return 'not-a-jwt';
+}

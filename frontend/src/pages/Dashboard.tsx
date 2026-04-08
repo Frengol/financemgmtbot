@@ -2,8 +2,9 @@ import { AreaChart, BarChart, Card, DonutChart, Grid, Metric, Text, Title } from
 import { eachDayOfInterval, endOfMonth, format, startOfMonth } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { useEffect, useState } from "react";
-import { getTransactions } from "@/lib/adminApi";
+import { ApiError, getTransactions, isReauthenticationError } from "@/lib/adminApi";
 import { useAuth } from "@/hooks/useAuth";
+import { clearBrowserAdminArtifacts } from "@/lib/auth";
 import CompactMonthPicker from "@/components/CompactMonthPicker";
 
 type DashboardTransaction = {
@@ -21,13 +22,13 @@ function toMonthRange(referenceDate: Date) {
 }
 
 export default function Dashboard() {
-  const { authenticated, localBypass } = useAuth();
+  const { authenticated, localBypass, signOut } = useAuth();
   const [referenceMonth, setReferenceMonth] = useState(() => startOfMonth(new Date()));
   const [dataGeral, setDataGeral] = useState({ total: 0, essencial: 0, superfluous: 0 });
   const [chartData, setChartData] = useState<Array<{ date: string; Gasto: number }>>([]);
   const [donutData, setDonutData] = useState<Array<{ name: string; value: number }>>([]);
   const [heatmapData, setHeatmapData] = useState<Array<{ name: string; "Valor Acumulado": number }>>([]);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<ApiError | Error | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
@@ -37,7 +38,7 @@ export default function Dashboard() {
         setChartData([]);
         setDonutData([]);
         setHeatmapData([]);
-        setError("");
+        setError(null);
         return;
       }
 
@@ -53,7 +54,7 @@ export default function Dashboard() {
           setChartData([]);
           setDonutData([]);
           setHeatmapData([]);
-          setError("");
+          setError(null);
           return;
         }
 
@@ -99,13 +100,16 @@ export default function Dashboard() {
         setDataGeral({ total, essencial, superfluous });
         setDonutData(Object.entries(catCount).map(([name, value]) => ({ name, value })));
         setHeatmapData(Object.entries(heatCount).map(([name, value]) => ({ name, "Valor Acumulado": value })));
-        setError("");
+        setError(null);
       } catch (fetchError) {
         setDataGeral({ total: 0, essencial: 0, superfluous: 0 });
         setChartData([]);
         setDonutData([]);
         setHeatmapData([]);
-        setError(fetchError instanceof Error ? fetchError.message : "Nao foi possivel carregar os dados agora.");
+        if (isReauthenticationError(fetchError)) {
+          clearBrowserAdminArtifacts();
+        }
+        setError(fetchError instanceof Error ? fetchError : new Error("Nao foi possivel carregar os dados agora."));
       }
     };
 
@@ -121,18 +125,30 @@ export default function Dashboard() {
     return () => window.removeEventListener('transactions:changed', refresh);
   }, []);
 
+  const requiresReauthentication = isReauthenticationError(error);
+
   return (
     <div className="space-y-6">
       {error && (
         <div className="flex flex-col gap-3 rounded-xl border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-700 md:flex-row md:items-center md:justify-between">
-          <span>{error}</span>
-          <button
-            type="button"
-            onClick={() => setReloadToken((current) => current + 1)}
-            className="inline-flex items-center justify-center rounded-lg border border-rose-200 bg-white px-3 py-2 font-medium text-rose-700 transition hover:bg-rose-100"
-          >
-            Tentar novamente
-          </button>
+          <span>{error.message}</span>
+          {requiresReauthentication ? (
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              className="inline-flex items-center justify-center rounded-lg border border-rose-200 bg-white px-3 py-2 font-medium text-rose-700 transition hover:bg-rose-100"
+            >
+              Fazer login novamente
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setReloadToken((current) => current + 1)}
+              className="inline-flex items-center justify-center rounded-lg border border-rose-200 bg-white px-3 py-2 font-medium text-rose-700 transition hover:bg-rose-100"
+            >
+              Tentar novamente
+            </button>
+          )}
         </div>
       )}
       <Grid numItemsSm={2} numItemsLg={3} className="gap-6">

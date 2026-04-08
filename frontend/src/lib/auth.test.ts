@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+function buildJwtLikeToken(...segments: string[]) {
+  return segments.join('.');
+}
+
 describe('isAllowedAdminEmail', () => {
   beforeEach(() => {
     vi.resetModules();
@@ -8,6 +12,7 @@ describe('isAllowedAdminEmail', () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
   });
 
   it('allows any e-mail when no allowlist is configured', async () => {
@@ -28,13 +33,15 @@ describe('isAllowedAdminEmail', () => {
   });
 
   it('decodes access token identities and ignores malformed payloads', async () => {
-    const { decodeAccessTokenIdentity } = await import('./auth');
+    const { decodeAccessTokenIdentity, isJwtShapeValid } = await import('./auth');
     const payload = btoa(JSON.stringify({ sub: 'user-1', email: 'admin@example.com' }))
       .replace(/\+/g, '-')
       .replace(/\//g, '_')
       .replace(/=+$/g, '');
+    const validJwt = buildJwtLikeToken('header-segment', payload, 'signature-segment');
 
-    expect(decodeAccessTokenIdentity(`header.${payload}.signature`)).toEqual({
+    expect(isJwtShapeValid(validJwt)).toBe(true);
+    expect(decodeAccessTokenIdentity(validJwt)).toEqual({
       id: 'user-1',
       email: 'admin@example.com',
     });
@@ -45,8 +52,9 @@ describe('isAllowedAdminEmail', () => {
       .replace(/\+/g, '-')
       .replace(/\//g, '_')
       .replace(/=+$/g, '');
-    expect(decodeAccessTokenIdentity(`header.${noSubjectPayload}.signature`)).toBeNull();
-    expect(decodeAccessTokenIdentity('header.invalid-json.signature')).toBeNull();
+    expect(decodeAccessTokenIdentity(buildJwtLikeToken('header-segment', noSubjectPayload, 'signature-segment'))).toBeNull();
+    expect(decodeAccessTokenIdentity(buildJwtLikeToken('header-segment', 'invalid-json', 'signature-segment'))).toBeNull();
+    expect(isJwtShapeValid('not-a-jwt')).toBe(false);
   });
 
   it('falls back to Buffer decoding and gracefully handles environments without window', async () => {
@@ -70,7 +78,7 @@ describe('isAllowedAdminEmail', () => {
       .replace(/\+/g, '-')
       .replace(/\//g, '_')
       .replace(/=+$/g, '');
-    expect(decodeAccessTokenIdentity(`header.${payload}.signature`)).toEqual({
+    expect(decodeAccessTokenIdentity(buildJwtLikeToken('header-segment', payload, 'signature-segment'))).toEqual({
       id: 'user-buffer',
       email: 'buffer@example.com',
     });
@@ -87,7 +95,7 @@ describe('isAllowedAdminEmail', () => {
     clearBrowserAdminTestSession();
 
     vi.stubGlobal('Buffer', undefined);
-    expect(decodeAccessTokenIdentity(`header.${payload}.signature`)).toBeNull();
+    expect(decodeAccessTokenIdentity(buildJwtLikeToken('header-segment', payload, 'signature-segment'))).toBeNull();
 
     vi.unstubAllGlobals();
     Object.defineProperty(window, 'atob', {
@@ -126,9 +134,10 @@ describe('isAllowedAdminEmail', () => {
       loadBrowserAdminTestSession,
       clearBrowserAdminTestSession,
     } = await import('./auth');
+    const validJwt = buildJwtLikeToken('header-segment', 'payload-segment', 'signature-segment');
 
     saveBrowserAdminTestSession({
-      accessToken: 'token-1',
+      accessToken: validJwt,
       refreshToken: 'refresh-1',
       user: {
         id: 'user-1',
@@ -136,7 +145,7 @@ describe('isAllowedAdminEmail', () => {
       },
     });
     expect(loadBrowserAdminTestSession()).toEqual({
-      accessToken: 'token-1',
+      accessToken: validJwt,
       refreshToken: 'refresh-1',
       user: {
         id: 'user-1',
@@ -154,7 +163,7 @@ describe('isAllowedAdminEmail', () => {
     expect(window.localStorage.getItem('financemgmtbot-admin-auth-test-session')).toBeNull();
 
     saveBrowserAdminTestSession({
-      accessToken: 'token-2',
+      accessToken: validJwt,
       user: {
         id: 'user-2',
         email: null,
@@ -178,5 +187,43 @@ describe('isAllowedAdminEmail', () => {
       user: { id: 'user-3', email: 'admin@example.com' },
     });
     expect(window.localStorage.getItem('financemgmtbot-admin-auth-test-session')).toBeNull();
+  });
+
+  it('clears auth test session storage outside loopback runtimes', async () => {
+    const {
+      browserAdminTestSessionAllowed,
+      loadBrowserAdminTestSession,
+      saveBrowserAdminTestSession,
+    } = await import('./auth');
+    const originalWindow = window;
+    const validJwt = buildJwtLikeToken('header-segment', 'payload-segment', 'signature-segment');
+
+    vi.stubGlobal('window', {
+      localStorage: originalWindow.localStorage,
+      location: {
+        hostname: 'frengol.github.io',
+      },
+    });
+
+    expect(browserAdminTestSessionAllowed()).toBe(false);
+    saveBrowserAdminTestSession({
+      accessToken: validJwt,
+      refreshToken: 'refresh-1',
+      user: {
+        id: 'user-1',
+        email: 'admin@example.com',
+      },
+    });
+    expect(loadBrowserAdminTestSession()).toBeNull();
+    expect(originalWindow.localStorage.getItem('financemgmtbot-admin-auth-test-session')).toBeNull();
+  });
+
+  it('clears browser admin artifacts safely even when no window is available', async () => {
+    const { clearBrowserAdminArtifacts, browserAdminTestSessionAllowed } = await import('./auth');
+
+    vi.stubGlobal('window', undefined);
+
+    expect(browserAdminTestSessionAllowed()).toBe(false);
+    expect(() => clearBrowserAdminArtifacts()).not.toThrow();
   });
 });

@@ -5,6 +5,7 @@ const configuredAdminEmails = (import.meta.env.VITE_ALLOWED_ADMIN_EMAILS || "")
 
 const browserAdminProfileStorageKey = 'financemgmtbot-admin-profile';
 const browserAdminTestSessionStorageKey = 'financemgmtbot-admin-auth-test-session';
+const jwtSegmentPattern = /^[A-Za-z0-9_-]+$/;
 
 export type BrowserAdminProfile = {
   id: string;
@@ -17,6 +18,39 @@ export type BrowserAdminTestSession = {
   user: BrowserAdminProfile;
 };
 
+function isLoopbackHostname(hostname: string) {
+  return ['localhost', '127.0.0.1', '::1'].includes((hostname || '').toLowerCase());
+}
+
+export function browserAdminTestSessionAllowed() {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  return isLoopbackHostname(window.location.hostname);
+}
+
+export function isJwtShapeValid(token?: string | null) {
+  if (!token || typeof token !== 'string') {
+    return false;
+  }
+
+  const segments = token.split('.');
+  return (
+    segments.length === 3
+    && segments.every((segment) => segment.length > 0 && jwtSegmentPattern.test(segment))
+  );
+}
+
+export function clearBrowserAdminArtifacts() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.localStorage.removeItem(browserAdminProfileStorageKey);
+  window.localStorage.removeItem(browserAdminTestSessionStorageKey);
+}
+
 export function isAllowedAdminEmail(email?: string | null) {
   if (configuredAdminEmails.length === 0) {
     return true;
@@ -26,16 +60,12 @@ export function isAllowedAdminEmail(email?: string | null) {
 }
 
 export function decodeAccessTokenIdentity(token?: string | null): BrowserAdminProfile | null {
-  if (!token) {
-    return null;
-  }
-
-  const segments = token.split('.');
-  if (segments.length < 2) {
+  if (!token || !isJwtShapeValid(token)) {
     return null;
   }
 
   try {
+    const segments = token.split('.');
     const normalized = segments[1].replace(/-/g, '+').replace(/_/g, '/');
     const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
     let decodedPayload = '';
@@ -107,7 +137,7 @@ export function saveBrowserAdminTestSession(session: BrowserAdminTestSession | n
     return;
   }
 
-  if (!session?.accessToken || !session.user?.id) {
+  if (!browserAdminTestSessionAllowed() || !session?.accessToken || !isJwtShapeValid(session.accessToken) || !session.user?.id) {
     window.localStorage.removeItem(browserAdminTestSessionStorageKey);
     return;
   }
@@ -120,6 +150,11 @@ export function loadBrowserAdminTestSession(): BrowserAdminTestSession | null {
     return null;
   }
 
+  if (!browserAdminTestSessionAllowed()) {
+    window.localStorage.removeItem(browserAdminTestSessionStorageKey);
+    return null;
+  }
+
   const raw = window.localStorage.getItem(browserAdminTestSessionStorageKey);
   if (!raw) {
     return null;
@@ -127,11 +162,13 @@ export function loadBrowserAdminTestSession(): BrowserAdminTestSession | null {
 
   try {
     const parsed = JSON.parse(raw) as BrowserAdminTestSession;
-    if (!parsed?.accessToken || !parsed.user?.id) {
+    if (!parsed?.accessToken || !isJwtShapeValid(parsed.accessToken) || !parsed.user?.id) {
+      window.localStorage.removeItem(browserAdminTestSessionStorageKey);
       return null;
     }
     return parsed;
   } catch {
+    window.localStorage.removeItem(browserAdminTestSessionStorageKey);
     return null;
   }
 }

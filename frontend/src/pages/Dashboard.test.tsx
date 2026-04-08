@@ -2,13 +2,19 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Dashboard from './Dashboard';
+import { ApiError } from '@/lib/adminApi';
 
 const mockGetTransactions = vi.fn();
 const mockUseAuth = vi.fn();
+const mockSignOut = vi.fn();
 
-vi.mock('@/lib/adminApi', () => ({
-  getTransactions: (...args: unknown[]) => mockGetTransactions(...args),
-}));
+vi.mock('@/lib/adminApi', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/adminApi')>('@/lib/adminApi');
+  return {
+    ...actual,
+    getTransactions: (...args: unknown[]) => mockGetTransactions(...args),
+  };
+});
 
 vi.mock('@/hooks/useAuth', () => ({
   useAuth: () => mockUseAuth(),
@@ -28,7 +34,8 @@ vi.mock('@tremor/react', () => ({
 describe('Dashboard', () => {
   beforeEach(() => {
     mockGetTransactions.mockReset();
-    mockUseAuth.mockReturnValue({ authenticated: true, localBypass: false });
+    mockSignOut.mockReset();
+    mockUseAuth.mockReturnValue({ authenticated: true, localBypass: false, signOut: mockSignOut });
   });
 
   it('loads KPI totals and chart data for the selected month', async () => {
@@ -123,5 +130,27 @@ describe('Dashboard', () => {
     await waitFor(() => {
       expect(screen.getAllByText('R$ 42,00')).toHaveLength(2);
     });
+  });
+
+  it('shows a re-login action instead of retry for malformed auth sessions', async () => {
+    mockGetTransactions.mockRejectedValue(new ApiError(
+      'Sua sessao de acesso e invalida. Faca login novamente. Codigo de suporte: req_dash_auth Detalhe: bearer_malformed',
+      {
+        code: 'AUTH_SESSION_TOKEN_MALFORMED',
+        detail: 'bearer_malformed',
+        status: 401,
+        requestId: 'req_dash_auth',
+      },
+    ));
+
+    render(<Dashboard />);
+
+    expect(await screen.findByText(/detalhe: bearer_malformed/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Fazer login novamente' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Tentar novamente' })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Fazer login novamente' }));
+
+    expect(mockSignOut).toHaveBeenCalledTimes(1);
   });
 });

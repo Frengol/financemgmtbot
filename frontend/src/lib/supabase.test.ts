@@ -3,12 +3,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mockCreateClient = vi.fn();
 const mockGetSession = vi.fn();
 const mockLoadBrowserAdminTestSession = vi.fn();
+const mockSignOut = vi.fn();
+const mockClearBrowserAdminArtifacts = vi.fn();
+
+function buildJwtLikeToken(...segments: string[]) {
+  return segments.join('.');
+}
 
 vi.mock('@supabase/supabase-js', () => ({
   createClient: (...args: unknown[]) => mockCreateClient(...args),
 }));
 
 vi.mock('@/lib/auth', () => ({
+  clearBrowserAdminArtifacts: (...args: unknown[]) => mockClearBrowserAdminArtifacts(...args),
+  isJwtShapeValid: (token?: string | null) => typeof token === 'string' && token.split('.').length === 3,
   loadBrowserAdminTestSession: (...args: unknown[]) => mockLoadBrowserAdminTestSession(...args),
 }));
 
@@ -18,9 +26,12 @@ describe('supabase helpers', () => {
     mockCreateClient.mockReset();
     mockGetSession.mockReset();
     mockLoadBrowserAdminTestSession.mockReset();
+    mockSignOut.mockReset();
+    mockClearBrowserAdminArtifacts.mockReset();
     mockCreateClient.mockReturnValue({
       auth: {
         getSession: (...args: unknown[]) => mockGetSession(...args),
+        signOut: (...args: unknown[]) => mockSignOut(...args),
       },
     });
     mockGetSession.mockResolvedValue({ data: { session: null } });
@@ -77,19 +88,36 @@ describe('supabase helpers', () => {
   });
 
   it('falls back to the Supabase browser session token and then null', async () => {
+    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-1', 'signature-segment');
     mockGetSession.mockResolvedValueOnce({
       data: {
         session: {
-          access_token: 'session-access-token',
+          access_token: accessToken,
         },
       },
     });
 
     const { getAccessToken } = await import('./supabase');
 
-    await expect(getAccessToken()).resolves.toBe('session-access-token');
+    await expect(getAccessToken()).resolves.toBe(accessToken);
 
     mockGetSession.mockResolvedValueOnce({ data: { session: null } });
     await expect(getAccessToken()).resolves.toBeNull();
+  });
+
+  it('clears a malformed persisted Supabase session token instead of returning it', async () => {
+    mockGetSession.mockResolvedValueOnce({
+      data: {
+        session: {
+          access_token: 'not-a-jwt',
+        },
+      },
+    });
+
+    const { getAccessToken } = await import('./supabase');
+
+    await expect(getAccessToken()).resolves.toBeNull();
+    expect(mockClearBrowserAdminArtifacts).toHaveBeenCalledTimes(1);
+    expect(mockSignOut).toHaveBeenCalledTimes(1);
   });
 });

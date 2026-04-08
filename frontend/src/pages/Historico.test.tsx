@@ -2,16 +2,22 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Historico from './Historico';
+import { ApiError } from '@/lib/adminApi';
 
 const mockDeleteTransaction = vi.fn();
 const mockGetTransactions = vi.fn();
 const mockUseAuth = vi.fn();
 const mockOpenEdit = vi.fn();
+const mockSignOut = vi.fn();
 
-vi.mock('@/lib/adminApi', () => ({
-  deleteTransaction: (...args: unknown[]) => mockDeleteTransaction(...args),
-  getTransactions: (...args: unknown[]) => mockGetTransactions(...args),
-}));
+vi.mock('@/lib/adminApi', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/adminApi')>('@/lib/adminApi');
+  return {
+    ...actual,
+    deleteTransaction: (...args: unknown[]) => mockDeleteTransaction(...args),
+    getTransactions: (...args: unknown[]) => mockGetTransactions(...args),
+  };
+});
 
 vi.mock('@/hooks/useAuth', () => ({
   useAuth: () => mockUseAuth(),
@@ -28,11 +34,13 @@ describe('Historico', () => {
     mockDeleteTransaction.mockReset();
     mockGetTransactions.mockReset();
     mockOpenEdit.mockReset();
+    mockSignOut.mockReset();
     mockUseAuth.mockReturnValue({
       authenticated: true,
       csrfToken: 'csrf-token',
       loading: false,
       localBypass: false,
+      signOut: mockSignOut,
     });
 
     vi.stubGlobal('confirm', vi.fn(() => true));
@@ -139,6 +147,57 @@ describe('Historico', () => {
     expect(screen.getByText(/Codigo de suporte: req_hist_1/i)).toBeInTheDocument();
   });
 
+  it('offers re-login instead of generic retry when the auth token is malformed', async () => {
+    mockGetTransactions.mockRejectedValue(new ApiError(
+      'Sua sessao de acesso e invalida. Faca login novamente. Codigo de suporte: req_hist_auth Detalhe: bearer_malformed',
+      {
+        code: 'AUTH_SESSION_TOKEN_MALFORMED',
+        detail: 'bearer_malformed',
+        status: 401,
+        requestId: 'req_hist_auth',
+      },
+    ));
+
+    render(<Historico />);
+
+    expect(await screen.findByText(/detalhe: bearer_malformed/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Fazer login novamente' }));
+    expect(mockSignOut).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers re-login when deleting fails with malformed auth', async () => {
+    mockGetTransactions.mockResolvedValue({
+      transactions: [{
+        id: 'tx-auth-delete',
+        data: '2026-03-19',
+        natureza: 'Essencial',
+        categoria: 'Mercado',
+        descricao: 'Compra com token invalido',
+        valor: 10,
+        conta: 'Nubank',
+        metodo_pagamento: 'Pix',
+      }],
+    });
+    mockDeleteTransaction.mockRejectedValue(new ApiError(
+      'Sua sessao de acesso e invalida. Faca login novamente. Codigo de suporte: req_hist_delete_auth Detalhe: bearer_malformed',
+      {
+        code: 'AUTH_SESSION_TOKEN_MALFORMED',
+        detail: 'bearer_malformed',
+        status: 401,
+        requestId: 'req_hist_delete_auth',
+      },
+    ));
+
+    render(<Historico />);
+
+    expect(await screen.findByText('Compra com token invalido')).toBeInTheDocument();
+    await userEvent.click(screen.getAllByTitle('Excluir')[0]);
+
+    expect(await screen.findByText(/detalhe: bearer_malformed/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Fazer login novamente' }));
+    expect(mockSignOut).toHaveBeenCalledTimes(1);
+  });
+
   it('skips loading history when the session is unavailable', async () => {
     mockUseAuth.mockReturnValue({
       authenticated: false,
@@ -229,6 +288,9 @@ describe('Historico', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Próxima' }));
     expect(await screen.findByText('Viagem especial')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Anterior' }));
+    expect(await screen.findByText('Compra 1')).toBeInTheDocument();
 
     await userEvent.type(screen.getByPlaceholderText('Buscar (ex: Mercado)...'), 'Viagem');
     expect(await screen.findByText('Viagem especial')).toBeInTheDocument();

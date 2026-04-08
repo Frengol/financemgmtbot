@@ -1,9 +1,10 @@
 import { useEffect, useState, useMemo } from "react";
-import { deleteTransaction, getTransactions } from "@/lib/adminApi";
+import { ApiError, deleteTransaction, getTransactions, isReauthenticationError } from "@/lib/adminApi";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable, getFilteredRowModel, getPaginationRowModel } from '@tanstack/react-table';
 import { useAuth } from "@/hooks/useAuth";
 import { useTransactionComposer } from "@/hooks/useTransactionComposer";
 import { Edit, Loader2, Search, Trash2 } from "lucide-react";
+import { clearBrowserAdminArtifacts } from "@/lib/auth";
 import { normalizeNatureLabel, type TransactionRecord } from "@/lib/transactions";
 
 type Gasto = TransactionRecord;
@@ -11,11 +12,11 @@ type Gasto = TransactionRecord;
 const columnHelper = createColumnHelper<Gasto>();
 
 export default function Historico() {
-  const { authenticated, csrfToken, loading, localBypass } = useAuth();
+  const { authenticated, csrfToken, loading, localBypass, signOut } = useAuth();
   const { openEdit } = useTransactionComposer();
   const [data, setData] = useState<Gasto[]>([]);
   const [globalFilter, setGlobalFilter] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState<ApiError | Error | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [fetching, setFetching] = useState(true);
 
@@ -35,9 +36,12 @@ export default function Historico() {
         metodo_pagamento: item.metodo_pagamento || 'Outros',
         conta: item.conta || 'Nao Informada',
       })));
-      setError("");
+      setError(null);
     } catch (fetchError) {
-      setError(fetchError instanceof Error ? fetchError.message : "Nao foi possivel carregar o historico agora.");
+      if (isReauthenticationError(fetchError)) {
+        clearBrowserAdminArtifacts();
+      }
+      setError(fetchError instanceof Error ? fetchError : new Error("Nao foi possivel carregar o historico agora."));
     }
     setFetching(false);
   };
@@ -58,23 +62,26 @@ export default function Historico() {
   const handleDelete = async (id: string) => {
     if (confirm("Deseja mesmo excluir este registro? A ação não pode ser desfeita.")) {
       if (loading) {
-        setError("Sua autenticacao ainda esta sendo carregada. Tente novamente em alguns segundos.");
+        setError(new Error("Sua autenticacao ainda esta sendo carregada. Tente novamente em alguns segundos."));
         return;
       }
 
       if ((!authenticated || !csrfToken) && !localBypass) {
-        setError("Nao foi possivel validar sua sessao. Entre novamente.");
+        setError(new Error("Nao foi possivel validar sua sessao. Entre novamente."));
         return;
       }
 
       try {
         setPendingDeleteId(id);
-        setError("");
+        setError(null);
         await deleteTransaction(id, csrfToken);
         setData((current) => current.filter((item) => item.id !== id));
         window.dispatchEvent(new CustomEvent('transactions:changed'));
       } catch (deleteError) {
-        setError(deleteError instanceof Error ? deleteError.message : "Nao foi possivel excluir o registro.");
+        if (isReauthenticationError(deleteError)) {
+          clearBrowserAdminArtifacts();
+        }
+        setError(deleteError instanceof Error ? deleteError : new Error("Nao foi possivel excluir o registro."));
       } finally {
         setPendingDeleteId(null);
       }
@@ -158,8 +165,17 @@ export default function Historico() {
             </div>
           </div>
           {error && (
-            <div className="bg-rose-50 text-rose-700 border border-rose-100 rounded-lg px-4 py-3 text-sm">
-              {error}
+            <div className="flex flex-col gap-3 rounded-lg border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-700 md:flex-row md:items-center md:justify-between">
+              <span>{error.message}</span>
+              {isReauthenticationError(error) ? (
+                <button
+                  type="button"
+                  onClick={() => void signOut()}
+                  className="inline-flex items-center justify-center rounded-lg border border-rose-200 bg-white px-3 py-2 font-medium text-rose-700 transition hover:bg-rose-100"
+                >
+                  Fazer login novamente
+                </button>
+              ) : null}
             </div>
           )}
         </div>

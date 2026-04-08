@@ -1,6 +1,10 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+function buildJwtLikeToken(...segments: string[]) {
+  return segments.join('.');
+}
+
 const mockSetSession = vi.fn();
 const mockExchangeCodeForSession = vi.fn();
 const mockGetSession = vi.fn();
@@ -47,7 +51,11 @@ describe('AuthCallback', () => {
     mockLoadBrowserAdminTestSession.mockReset();
     mockGetSession.mockResolvedValue({ data: { session: null } });
     mockLoadBrowserAdminTestSession.mockReturnValue(null);
-    window.history.pushState({}, '', '/auth/callback#access_token=token-1&refresh_token=refresh-1&type=magiclink');
+    window.history.pushState(
+      {},
+      '',
+      `/auth/callback#access_token=${buildJwtLikeToken('header-segment', 'payload-segment-1', 'signature-segment')}&refresh_token=refresh-1&type=magiclink`,
+    );
   });
 
   afterEach(() => {
@@ -55,7 +63,8 @@ describe('AuthCallback', () => {
   });
 
   it('consumes the upstream tokens, stores the session and redirects to the app root', async () => {
-    window.history.pushState({}, '', '/auth/callback#access_token=token-1&refresh_token=refresh-1&type=magiclink');
+    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-2', 'signature-segment');
+    window.history.pushState({}, '', `/auth/callback#access_token=${accessToken}&refresh_token=refresh-1&type=magiclink`);
     const replaceSpy = vi.fn();
     vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
     mockSetSession.mockResolvedValue({ data: {}, error: null });
@@ -67,7 +76,7 @@ describe('AuthCallback', () => {
 
     await waitFor(() => {
       expect(mockSetSession).toHaveBeenCalledWith({
-        access_token: 'token-1',
+        access_token: accessToken,
         refresh_token: 'refresh-1',
       });
     });
@@ -192,7 +201,7 @@ describe('AuthCallback', () => {
     const replaceSpy = vi.fn();
     vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
     mockLoadBrowserAdminTestSession.mockReturnValue({
-      accessToken: 'existing-auth-test-token',
+      accessToken: buildJwtLikeToken('header-segment', 'payload-segment-4', 'signature-segment'),
       refreshToken: 'existing-auth-test-refresh',
       user: {
         id: 'user-1',

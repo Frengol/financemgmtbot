@@ -1561,8 +1561,12 @@ class TestAdminRoutes:
         assert payload["transaction"]["id"] == "tx-99"
 
     @pytest.mark.asyncio
-    async def test_admin_routes_reject_invalid_bearer_tokens(self):
-        config.supabase.auth.get_user = MagicMock(side_effect=Exception("invalid jwt"))
+    async def test_admin_routes_reject_malformed_bearer_tokens_with_short_detail(self):
+        config.supabase.auth.get_user = MagicMock(
+            side_effect=Exception(
+                "invalid JWT: unable to parse or verify signature, token is malformed: token contains an invalid number of segments"
+            )
+        )
 
         async with main.app.test_client() as client:
             resp = await client.get(
@@ -1572,7 +1576,9 @@ class TestAdminRoutes:
 
         assert resp.status_code == 401
         payload = await resp.get_json()
-        assert payload["code"] == "AUTH_SESSION_INVALID"
+        assert payload["code"] == "AUTH_SESSION_TOKEN_MALFORMED"
+        assert payload["detail"] == "bearer_malformed"
+        assert payload["requestId"].startswith("req_")
 
     @pytest.mark.asyncio
     async def test_admin_routes_reject_bearer_tokens_for_blocked_identities(self):

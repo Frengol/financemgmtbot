@@ -45,11 +45,12 @@ def _build_field_summary(payload: dict[str, Any] | None):
     }
 
 
-def _json_error(message: str, status_code: int, *, code: str = "UNKNOWN_ERROR", retryable: bool | None = None, retry_after_seconds: int | None = None):
+def _json_error(message: str, status_code: int, *, code: str = "UNKNOWN_ERROR", detail: str | None = None, retryable: bool | None = None, retry_after_seconds: int | None = None):
     return json_error(
         message,
         status_code,
         code=code,
+        detail=detail,
         retryable=retryable,
         retry_after_seconds=retry_after_seconds,
     )
@@ -89,6 +90,15 @@ def _extract_bearer_token():
     return token.strip()
 
 
+def _is_malformed_bearer_error(error_text: str):
+    normalized = (error_text or "").lower()
+    return (
+        "invalid number of segments" in normalized
+        or "token is malformed" in normalized
+        or "jwt malformed" in normalized
+    )
+
+
 def _normalize_lookup(value: str):
     normalized = unicodedata.normalize("NFKD", value)
     ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
@@ -114,7 +124,15 @@ def autenticar_admin_request():
                 auth_response = supabase.auth.get_user(bearer_token)
                 user_id, email = _extract_user_fields(getattr(auth_response, "user", auth_response))
         except Exception as exc:
-            logger.warning(with_request_id({"event": "admin_bearer_auth_failed", "error": mascarar_segredos(str(exc))}))
+            error_text = mascarar_segredos(str(exc))
+            logger.warning(with_request_id({"event": "admin_bearer_auth_failed", "error": error_text}))
+            if _is_malformed_bearer_error(error_text):
+                return None, json_error(
+                    "Invalid or expired session.",
+                    401,
+                    code="AUTH_SESSION_TOKEN_MALFORMED",
+                    detail="bearer_malformed",
+                )
             return None, _json_error("Invalid or expired session.", 401, code="AUTH_SESSION_INVALID")
 
         normalized_email = email.lower() if isinstance(email, str) else None

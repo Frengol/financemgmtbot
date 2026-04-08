@@ -48,11 +48,14 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 3. O backend valida allowlist/rate limit e pede ao Supabase o envio do Magic Link com `email_redirect_to` canônico apontando para a rota pública do frontend, por exemplo `https://admin.example.com/auth/callback`; em produção, esse callback não depende mais do `redirectTo` informado pelo navegador.
 4. O frontend recebe `access_token` e `refresh_token` do Supabase na rota `/auth/callback` e persiste a sessão usando `supabase.auth.setSession(...)`, ou troca um `code` por sessão com `supabase.auth.exchangeCodeForSession(...)` quando o provedor responder nesse formato.
 5. O contexto `useAuth` passa a refletir a sessão oficial do navegador via `supabase.auth.getSession()` e `onAuthStateChange(...)`, com fallback opcional para `GET /auth/session` apenas como compatibilidade legada/local.
-6. O frontend chama o backend em `/api/admin/*` com `Authorization: Bearer <access_token>`; o caminho cookie+CSRF deixa de ser o fluxo oficial do GitHub Pages.
-7. O backend valida o bearer token no lado servidor com Supabase, revalida allowlists administrativas e executa a operação privilegiada com auditoria.
-8. O operador continua podendo criar, editar, excluir, aprovar e rejeitar registros a partir do painel sem expor `service_role` ao navegador; o token web oficial passa a ser o token público do Supabase, compatível com o domínio separado do GitHub Pages.
-9. O callback legado do backend (`GET /auth/callback`) passa a atuar apenas como relay de compatibilidade: ele preserva `hash` ou `query string` vindos do Supabase e redireciona o navegador para o callback do frontend, sem mais criar sessão cookie para o fluxo oficial do Pages.
-10. Falhas operacionais do painel usam envelope sanitizado com `code`, `requestId`, `retryable` e, quando aplicável, `retryAfterSeconds`, permitindo que a UI mostre erro real sem ecoar detalhes crus de provedores ou do banco.
+6. O storage legado `financemgmtbot-admin-auth-test-session` permanece restrito a loopback (`localhost`/`127.0.0.1`) para E2E e testes locais; em produção o frontend ignora e limpa esse estado assim que detectado.
+7. Tokens Bearer do navegador passam por validação mínima de formato (`3` segmentos JWT) antes de qualquer uso. Sessões malformadas são descartadas localmente para impedir estado "UI autenticada / backend inválido".
+8. Erros de autenticação Bearer malformada retornam envelope sanitizado com `code=AUTH_SESSION_TOKEN_MALFORMED`, `detail=bearer_malformed` e `requestId`, permitindo que a UI troque o CTA de retry por re-login sem expor mensagem crua do parser JWT.
+9. O frontend chama o backend em `/api/admin/*` com `Authorization: Bearer <access_token>`; o caminho cookie+CSRF deixa de ser o fluxo oficial do GitHub Pages.
+10. O backend valida o bearer token no lado servidor com Supabase, revalida allowlists administrativas e executa a operação privilegiada com auditoria.
+11. O operador continua podendo criar, editar, excluir, aprovar e rejeitar registros a partir do painel sem expor `service_role` ao navegador; o token web oficial passa a ser o token público do Supabase, compatível com o domínio separado do GitHub Pages.
+12. O callback legado do backend (`GET /auth/callback`) passa a atuar apenas como relay de compatibilidade: ele preserva `hash` ou `query string` vindos do Supabase e redireciona o navegador para o callback do frontend, sem mais criar sessão cookie para o fluxo oficial do Pages.
+13. Falhas operacionais do painel usam envelope sanitizado com `code`, `requestId`, `retryable` e, quando aplicável, `retryAfterSeconds`; erros de sessão agora também podem incluir um `detail` curto e controlado para suporte, sem ecoar detalhes crus de provedores ou do banco.
 
 ### 2.3 Separação de Superfícies
 * **GitHub Pages** hospeda apenas arquivos estáticos.

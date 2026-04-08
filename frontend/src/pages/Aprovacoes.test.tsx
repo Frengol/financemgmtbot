@@ -2,17 +2,23 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Aprovacoes from './Aprovacoes';
+import { ApiError } from '@/lib/adminApi';
 
 const mockApprovePendingReceipt = vi.fn();
 const mockGetPendingReceipts = vi.fn();
 const mockRejectPendingReceipt = vi.fn();
 const mockUseAuth = vi.fn();
+const mockSignOut = vi.fn();
 
-vi.mock('@/lib/adminApi', () => ({
-  approvePendingReceipt: (...args: unknown[]) => mockApprovePendingReceipt(...args),
-  getPendingReceipts: (...args: unknown[]) => mockGetPendingReceipts(...args),
-  rejectPendingReceipt: (...args: unknown[]) => mockRejectPendingReceipt(...args),
-}));
+vi.mock('@/lib/adminApi', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/adminApi')>('@/lib/adminApi');
+  return {
+    ...actual,
+    approvePendingReceipt: (...args: unknown[]) => mockApprovePendingReceipt(...args),
+    getPendingReceipts: (...args: unknown[]) => mockGetPendingReceipts(...args),
+    rejectPendingReceipt: (...args: unknown[]) => mockRejectPendingReceipt(...args),
+  };
+});
 
 vi.mock('@/hooks/useAuth', () => ({
   useAuth: () => mockUseAuth(),
@@ -23,10 +29,12 @@ describe('Aprovacoes', () => {
     mockApprovePendingReceipt.mockReset();
     mockGetPendingReceipts.mockReset();
     mockRejectPendingReceipt.mockReset();
+    mockSignOut.mockReset();
     mockUseAuth.mockReturnValue({
       authenticated: true,
       csrfToken: 'csrf-token',
       localBypass: false,
+      signOut: mockSignOut,
     });
   });
 
@@ -92,6 +100,31 @@ describe('Aprovacoes', () => {
 
     expect(await screen.findByText('Sua sessão expirou. Faça login novamente.')).toBeInTheDocument();
     expect(mockRejectPendingReceipt).not.toHaveBeenCalled();
+  });
+
+  it('shows session error before approving when there is no access token', async () => {
+    mockUseAuth.mockReturnValue({
+      authenticated: true,
+      csrfToken: '',
+      localBypass: false,
+    });
+    mockGetPendingReceipts.mockResolvedValue({
+      items: [{
+        id: 'C2A',
+        kind: 'receipt_batch',
+        expires_at: '2026-03-20T10:00:00Z',
+        created_at: '2026-03-19T10:00:00Z',
+        preview: { itens: ['Leite'], itens_count: 1, total_estimado: 7 },
+      }],
+    });
+
+    render(<Aprovacoes />);
+
+    expect(await screen.findByText(/Leite/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /Aprovar/i }));
+
+    expect(await screen.findByText('Sua sessão expirou. Faça login novamente.')).toBeInTheDocument();
+    expect(mockApprovePendingReceipt).not.toHaveBeenCalled();
   });
 
   it('renders the empty state when there are no pending receipts', async () => {
@@ -160,6 +193,58 @@ describe('Aprovacoes', () => {
 
     expect(await screen.findByText(/Nao foi possivel carregar os dados agora/i)).toBeInTheDocument();
     expect(screen.getByText(/Codigo de suporte: req_pending_1/i)).toBeInTheDocument();
+  });
+
+  it('offers re-login when pending approvals fail with malformed auth', async () => {
+    mockGetPendingReceipts.mockRejectedValue(new ApiError(
+      'Sua sessao de acesso e invalida. Faca login novamente. Codigo de suporte: req_pending_auth Detalhe: bearer_malformed',
+      {
+        code: 'AUTH_SESSION_TOKEN_MALFORMED',
+        detail: 'bearer_malformed',
+        status: 401,
+        requestId: 'req_pending_auth',
+      },
+    ));
+
+    render(<Aprovacoes />);
+
+    expect(await screen.findByText(/detalhe: bearer_malformed/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Fazer login novamente' }));
+    expect(mockSignOut).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers re-login when rejection fails with malformed auth', async () => {
+    mockGetPendingReceipts.mockResolvedValue({
+      items: [{
+        id: 'D-auth',
+        kind: 'delete_confirmation',
+        expires_at: '2026-03-20T10:00:00Z',
+        created_at: '2026-03-19T10:00:00Z',
+        preview: {
+          summary: 'Excluir registros',
+          records_count: 1,
+          itens: [],
+        },
+      }],
+    });
+    mockRejectPendingReceipt.mockRejectedValue(new ApiError(
+      'Sua sessao de acesso e invalida. Faca login novamente. Codigo de suporte: req_pending_reject_auth Detalhe: bearer_malformed',
+      {
+        code: 'AUTH_SESSION_TOKEN_MALFORMED',
+        detail: 'bearer_malformed',
+        status: 401,
+        requestId: 'req_pending_reject_auth',
+      },
+    ));
+
+    render(<Aprovacoes />);
+
+    expect(await screen.findByText(/Excluir registros/i)).toBeInTheDocument();
+    await userEvent.click(screen.getAllByRole('button')[1]);
+
+    expect(await screen.findByText(/detalhe: bearer_malformed/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Fazer login novamente' }));
+    expect(mockSignOut).toHaveBeenCalledTimes(1);
   });
 
   it('falls back to the generic loading error when the rejection is not an Error instance', async () => {

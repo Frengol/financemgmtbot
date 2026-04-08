@@ -8,6 +8,7 @@ type ApiResponse<T> = {
   status: string;
   message?: string;
   code?: string;
+  detail?: string;
   requestId?: string;
   retryable?: boolean;
   retryAfterSeconds?: number;
@@ -17,6 +18,7 @@ type ApiErrorPayload = {
   message?: string;
   error?: string;
   code?: string;
+  detail?: string;
   requestId?: string;
   retryable?: boolean;
   retryAfterSeconds?: number;
@@ -31,12 +33,19 @@ const ERROR_MESSAGES: Record<string, string> = {
   AUTH_MAGIC_LINK_RATE_LIMIT: 'Muitos pedidos de login em pouco tempo. Aguarde alguns minutos e tente novamente.',
   AUTH_MAGIC_LINK_SEND_FAILED: 'Nao foi possivel enviar o link de acesso agora. Tente novamente em instantes.',
   AUTH_SESSION_INVALID: 'Sua sessao expirou. Faca login novamente.',
+  AUTH_SESSION_TOKEN_MALFORMED: 'Sua sessao de acesso e invalida. Faca login novamente.',
   AUTH_SESSION_STORAGE_UNAVAILABLE: 'O login esta temporariamente indisponivel. Tente novamente em instantes.',
   NETWORK_ERROR: 'Nao foi possivel conectar ao servidor agora. Verifique sua conexao e tente novamente.',
 };
 
+const AUTH_RECOVERY_ERROR_CODES = new Set([
+  'AUTH_SESSION_INVALID',
+  'AUTH_SESSION_TOKEN_MALFORMED',
+]);
+
 export class ApiError extends Error {
   code: string;
+  detail?: string;
   status: number;
   requestId?: string;
   retryable: boolean;
@@ -46,12 +55,14 @@ export class ApiError extends Error {
     message: string,
     {
       code,
+      detail,
       status,
       requestId,
       retryable = false,
       retryAfterSeconds,
     }: {
       code: string;
+      detail?: string;
       status: number;
       requestId?: string;
       retryable?: boolean;
@@ -61,6 +72,7 @@ export class ApiError extends Error {
     super(message);
     this.name = 'ApiError';
     this.code = code;
+    this.detail = detail;
     this.status = status;
     this.requestId = requestId;
     this.retryable = retryable;
@@ -112,17 +124,32 @@ async function parseError(response: Response) {
 
   const requestId = payload.requestId || response.headers.get('X-Request-ID') || undefined;
   const code = payload.code || 'UNKNOWN_ERROR';
+  const detail = typeof payload.detail === 'string' && /^[a-z0-9_:-]{1,64}$/i.test(payload.detail)
+    ? payload.detail
+    : undefined;
   const fallbackMessage = payload.message || payload.error || `Request failed with status ${response.status}`;
   const mappedMessage = ERROR_MESSAGES[code] || fallbackMessage;
-  const supportMessage = requestId ? `${mappedMessage} Codigo de suporte: ${requestId}` : mappedMessage;
+  const supportMessageParts = [mappedMessage];
+  if (requestId) {
+    supportMessageParts.push(`Codigo de suporte: ${requestId}`);
+  }
+  if (detail) {
+    supportMessageParts.push(`Detalhe: ${detail}`);
+  }
+  const supportMessage = supportMessageParts.join(' ');
 
   return new ApiError(supportMessage, {
     code,
+    detail,
     status: response.status,
     requestId,
     retryable: payload.retryable ?? false,
     retryAfterSeconds: payload.retryAfterSeconds,
   });
+}
+
+export function isReauthenticationError(error: unknown): error is ApiError {
+  return error instanceof ApiError && AUTH_RECOVERY_ERROR_CODES.has(error.code);
 }
 
 async function apiRequest<T>(path: string, init: RequestInit = {}, csrfToken?: string): Promise<ApiResponse<T>> {

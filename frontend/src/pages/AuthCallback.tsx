@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Activity, Loader2 } from 'lucide-react';
 import {
+  browserAdminTestSessionAllowed,
   clearBrowserAdminProfile,
   clearBrowserAdminTestSession,
   decodeAccessTokenIdentity,
+  isJwtShapeValid,
   loadBrowserAdminTestSession,
   saveBrowserAdminProfile,
   saveBrowserAdminTestSession,
@@ -136,6 +138,7 @@ export default function AuthCallback() {
           user: data.session.user,
           fallbackProfile: callbackProfile,
         });
+        clearBrowserAdminTestSession();
         saveBrowserAdminProfile(resolvedProfile);
         window.location.replace(buildHomeUrl());
         return;
@@ -145,7 +148,12 @@ export default function AuthCallback() {
       const refreshToken = hashParams.get('refresh_token');
       if (!accessToken || !refreshToken) {
         const existingBrowserAuthTestSession = loadBrowserAdminTestSession();
-        if (existingBrowserAuthTestSession?.accessToken && existingBrowserAuthTestSession.user?.id) {
+        if (
+          browserAdminTestSessionAllowed()
+          && existingBrowserAuthTestSession?.accessToken
+          && existingBrowserAuthTestSession.user?.id
+          && isJwtShapeValid(existingBrowserAuthTestSession.accessToken)
+        ) {
           saveBrowserAdminProfile(existingBrowserAuthTestSession.user);
           window.location.replace(buildHomeUrl());
           return;
@@ -172,7 +180,7 @@ export default function AuthCallback() {
         return;
       }
 
-      if (callbackProfile) {
+      if (callbackProfile && browserAdminTestSessionAllowed()) {
         saveBrowserAdminProfile(callbackProfile);
         saveBrowserAdminTestSession({
           accessToken,
@@ -202,6 +210,7 @@ export default function AuthCallback() {
         return;
       }
 
+      clearBrowserAdminTestSession();
       saveBrowserAdminProfile(resolveAuthProfile({ accessToken, fallbackProfile: callbackProfile }));
       window.location.replace(buildHomeUrl());
     };

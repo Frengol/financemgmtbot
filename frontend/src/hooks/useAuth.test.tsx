@@ -7,9 +7,15 @@ const mockGetAuthSession = vi.fn();
 const mockGetSession = vi.fn();
 const mockOnAuthStateChange = vi.fn();
 const mockSignOut = vi.fn();
+const mockClearBrowserAuthState = vi.fn();
 const mockLogoutAuthSession = vi.fn();
 
+function buildJwtLikeToken(...segments: string[]) {
+  return segments.join('.');
+}
+
 vi.mock('@/lib/supabase', () => ({
+  clearBrowserAuthState: (...args: unknown[]) => mockClearBrowserAuthState(...args),
   supabase: {
     auth: {
       getSession: (...args: unknown[]) => mockGetSession(...args),
@@ -50,6 +56,7 @@ describe('useAuth', () => {
     mockGetSession.mockReset();
     mockOnAuthStateChange.mockReset();
     mockSignOut.mockReset();
+    mockClearBrowserAuthState.mockReset();
     mockLogoutAuthSession.mockReset();
     window.localStorage.clear();
     window.history.pushState({}, '', '/#access_token=abc&refresh_token=def');
@@ -63,10 +70,11 @@ describe('useAuth', () => {
   });
 
   it('loads the Supabase session and refreshes on focus', async () => {
+    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-1', 'signature-segment');
     mockGetSession.mockResolvedValue({
       data: {
         session: {
-          access_token: 'token-1',
+          access_token: accessToken,
           user: { id: 'user-1', email: 'admin@example.com' },
         },
       },
@@ -121,6 +129,47 @@ describe('useAuth', () => {
     expect(screen.getByTestId('csrf')).toHaveTextContent('csrf-token');
   });
 
+  it('clears malformed browser auth state before falling back to the backend session', async () => {
+    window.localStorage.setItem('financemgmtbot-admin-profile', JSON.stringify({
+      id: 'stale-user',
+      email: 'stale@example.com',
+    }));
+
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: 'not-a-jwt',
+          user: { id: 'user-malformed', email: 'broken@example.com' },
+        },
+      },
+    });
+    mockGetAuthSession.mockResolvedValue({
+      authenticated: true,
+      user: { id: 'user-1', email: 'admin@example.com' },
+      csrfToken: 'csrf-token',
+    });
+    mockClearBrowserAuthState.mockImplementation(async () => {
+      window.localStorage.removeItem('financemgmtbot-admin-profile');
+      window.localStorage.removeItem('financemgmtbot-admin-auth-test-session');
+    });
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading')).toHaveTextContent('ready');
+    });
+
+    expect(mockClearBrowserAuthState).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('authenticated')).toHaveTextContent('yes');
+    expect(screen.getByTestId('email')).toHaveTextContent('admin@example.com');
+    expect(window.localStorage.getItem('financemgmtbot-admin-profile')).toBeNull();
+    expect(window.localStorage.getItem('financemgmtbot-admin-auth-test-session')).toBeNull();
+  });
+
   it('hydrates the authorized user from JWT claims when the Supabase session omits user metadata', async () => {
     const jwtPayload = btoa(JSON.stringify({
       sub: 'user-claims',
@@ -157,8 +206,9 @@ describe('useAuth', () => {
   });
 
   it('accepts the browser auth test session fallback used by the integrated magic-link tests', async () => {
+    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-2', 'signature-segment');
     window.localStorage.setItem('financemgmtbot-admin-auth-test-session', JSON.stringify({
-      accessToken: 'auth-test-token',
+      accessToken,
       refreshToken: 'auth-test-refresh',
       user: {
         id: 'auth-test-user',
@@ -187,6 +237,11 @@ describe('useAuth', () => {
   });
 
   it('falls back to a logged-out state when both session lookups fail', async () => {
+    window.localStorage.setItem('financemgmtbot-admin-profile', JSON.stringify({
+      id: 'stale-user',
+      email: 'stale@example.com',
+    }));
+    window.localStorage.setItem('financemgmtbot-admin-auth-test-session', '{bad-json');
     mockGetSession.mockRejectedValue(new Error('network'));
     mockGetAuthSession.mockRejectedValue(new Error('network'));
 
@@ -201,18 +256,22 @@ describe('useAuth', () => {
     });
 
     expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    expect(window.localStorage.getItem('financemgmtbot-admin-profile')).toBeNull();
+    expect(window.localStorage.getItem('financemgmtbot-admin-auth-test-session')).toBeNull();
   });
 
   it('signs out through Supabase, clears local auth state and clears legacy backend cookies best-effort', async () => {
+    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-3', 'signature-segment');
     mockGetSession.mockResolvedValue({
       data: {
         session: {
-          access_token: 'token-1',
+          access_token: accessToken,
           user: { id: 'user-1', email: 'admin@example.com' },
         },
       },
     });
     mockSignOut.mockResolvedValue({ error: null });
+    mockClearBrowserAuthState.mockResolvedValue(undefined);
     mockLogoutAuthSession.mockResolvedValue({ loggedOut: true });
 
     render(
@@ -228,7 +287,7 @@ describe('useAuth', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
 
     await waitFor(() => {
-      expect(mockSignOut).toHaveBeenCalledTimes(1);
+      expect(mockClearBrowserAuthState).toHaveBeenCalledTimes(1);
       expect(mockLogoutAuthSession).toHaveBeenCalledTimes(1);
     });
     expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
@@ -236,6 +295,7 @@ describe('useAuth', () => {
   });
 
   it('allows manual refresh, reacts to auth state changes and throws outside the provider', async () => {
+    const refreshAccessToken = buildJwtLikeToken('header-segment', 'payload-segment-4', 'signature-segment');
     let authStateHandler: ((event: string, session: { access_token?: string; user?: { id: string; email?: string | null } } | null) => void) | undefined;
     mockOnAuthStateChange.mockImplementation((handler: typeof authStateHandler) => {
       authStateHandler = handler;
@@ -256,7 +316,7 @@ describe('useAuth', () => {
       .mockResolvedValueOnce({
         data: {
           session: {
-            access_token: 'token-2',
+            access_token: refreshAccessToken,
             user: { id: 'user-2', email: 'admin2@example.com' },
           },
         },
@@ -303,6 +363,7 @@ describe('useAuth', () => {
   });
 
   it('falls back to refreshSession when the auth state change does not resolve a usable user', async () => {
+    const malformedToken = 'not-a-jwt';
     let authStateHandler: ((event: string, session: { access_token?: string; user?: { id?: string; email?: string | null } | null } | null) => void) | undefined;
     mockOnAuthStateChange.mockImplementation((handler: typeof authStateHandler) => {
       authStateHandler = handler;
@@ -344,7 +405,7 @@ describe('useAuth', () => {
     });
 
     authStateHandler?.('SIGNED_IN', {
-      access_token: 'token-without-user',
+      access_token: malformedToken,
       user: null,
     });
 
@@ -355,6 +416,7 @@ describe('useAuth', () => {
   });
 
   it('hydrates the authenticated state directly from a valid auth state change session', async () => {
+    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-5', 'signature-segment');
     let authStateHandler: ((event: string, session: { access_token?: string; user?: { id?: string; email?: string | null } | null } | null) => void) | undefined;
     mockOnAuthStateChange.mockImplementation((handler: typeof authStateHandler) => {
       authStateHandler = handler;
@@ -386,7 +448,7 @@ describe('useAuth', () => {
     });
 
     authStateHandler?.('SIGNED_IN', {
-      access_token: 'token-3',
+      access_token: accessToken,
       user: { id: 'user-3', email: 'admin3@example.com' },
     });
 
@@ -434,9 +496,11 @@ describe('useAuth', () => {
       },
     });
     const bypassSignOut = vi.fn();
+    const bypassClearBrowserAuthState = vi.fn();
     const bypassLogout = vi.fn();
 
     vi.doMock('@/lib/supabase', () => ({
+      clearBrowserAuthState: (...args: unknown[]) => bypassClearBrowserAuthState(...args),
       supabase: {
         auth: {
           getSession: (...args: unknown[]) => bypassGetSession(...args),
@@ -486,6 +550,7 @@ describe('useAuth', () => {
 
     expect(bypassGetSession).not.toHaveBeenCalled();
     expect(bypassSignOut).not.toHaveBeenCalled();
+    expect(bypassClearBrowserAuthState).not.toHaveBeenCalled();
     expect(bypassLogout).not.toHaveBeenCalled();
     expect(screen.getByTestId('bypass-authenticated')).toHaveTextContent('no');
   });
