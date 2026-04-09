@@ -9,20 +9,10 @@ export default function MainLayout() {
   const [isOnline, setIsOnline] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const location = useLocation();
-  const { user, signOut } = useAuth();
+  const { authenticated, loading, user, signOut } = useAuth();
   const { openCreate } = useTransactionComposer();
 
   useEffect(() => {
-    const checkStatus = async () => {
-      try {
-        await getTransactions({ dateFrom: '2000-01-01', dateTo: '2000-01-01' });
-        setIsOnline(true);
-      } catch {
-        setIsOnline(false);
-      }
-    };
-    void checkStatus();
-    
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
         e.preventDefault();
@@ -32,6 +22,37 @@ export default function MainLayout() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [openCreate]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const authCallbackRoute = location.pathname.endsWith('/auth/callback');
+
+    if (loading || !authenticated || authCallbackRoute) {
+      setIsOnline(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const checkStatus = async () => {
+      try {
+        await getTransactions({ dateFrom: '2000-01-01', dateTo: '2000-01-01' });
+        if (!cancelled) {
+          setIsOnline(true);
+        }
+      } catch {
+        if (!cancelled) {
+          setIsOnline(false);
+        }
+      }
+    };
+
+    void checkStatus();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticated, loading, location.pathname]);
 
   useEffect(() => {
     setIsMobileMenuOpen(false);

@@ -3,9 +3,14 @@ const configuredAdminEmails = (import.meta.env.VITE_ALLOWED_ADMIN_EMAILS || "")
   .map((email) => email.trim().toLowerCase())
   .filter(Boolean);
 
-const browserAdminProfileStorageKey = 'financemgmtbot-admin-profile';
-const browserAdminTestSessionStorageKey = 'financemgmtbot-admin-auth-test-session';
+const authTestModeEnabled = import.meta.env.VITE_AUTH_TEST_MODE === 'true';
+export const legacyBrowserAdminProfileStorageKey = 'financemgmtbot-admin-profile';
+export const browserAdminProfileStorageKey = 'financemgmtbot-admin-profile-v2';
+export const legacyBrowserAdminTestSessionStorageKey = 'financemgmtbot-admin-auth-test-session';
+export const browserAdminTestSessionStorageKey = 'financemgmtbot-admin-auth-test-session-v2';
+export const browserAdminLoginNoticeStorageKey = 'financemgmtbot-admin-login-notice-v1';
 const jwtSegmentPattern = /^[A-Za-z0-9_-]+$/;
+const buildIdPattern = /^[A-Za-z0-9._-]{1,32}$/;
 
 export type BrowserAdminProfile = {
   id: string;
@@ -18,8 +23,34 @@ export type BrowserAdminTestSession = {
   user: BrowserAdminProfile;
 };
 
+export type BrowserAdminLoginNotice = {
+  message: string;
+};
+
 function isLoopbackHostname(hostname: string) {
   return ['localhost', '127.0.0.1', '::1'].includes((hostname || '').toLowerCase());
+}
+
+export function normalizeBuildId(value?: string | null) {
+  const normalized = (value || '').trim();
+  if (!normalized || !buildIdPattern.test(normalized)) {
+    return null;
+  }
+  return normalized;
+}
+
+export function getAppBuildId() {
+  return normalizeBuildId(import.meta.env.VITE_APP_BUILD_ID) || 'dev-local';
+}
+
+function removeStorageKeys(keys: string[]) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  for (const key of keys) {
+    window.localStorage.removeItem(key);
+  }
 }
 
 export function browserAdminTestSessionAllowed() {
@@ -28,6 +59,10 @@ export function browserAdminTestSessionAllowed() {
   }
 
   return isLoopbackHostname(window.location.hostname);
+}
+
+export function browserAdminAuthTestModeEnabled() {
+  return authTestModeEnabled && browserAdminTestSessionAllowed();
 }
 
 export function isJwtShapeValid(token?: string | null) {
@@ -43,12 +78,53 @@ export function isJwtShapeValid(token?: string | null) {
 }
 
 export function clearBrowserAdminArtifacts() {
+  removeStorageKeys([
+    browserAdminProfileStorageKey,
+    legacyBrowserAdminProfileStorageKey,
+    browserAdminTestSessionStorageKey,
+    legacyBrowserAdminTestSessionStorageKey,
+  ]);
+}
+
+export function saveBrowserAdminLoginNotice(notice: BrowserAdminLoginNotice | null) {
   if (typeof window === 'undefined') {
     return;
   }
 
-  window.localStorage.removeItem(browserAdminProfileStorageKey);
-  window.localStorage.removeItem(browserAdminTestSessionStorageKey);
+  if (!notice?.message) {
+    clearBrowserAdminLoginNotice();
+    return;
+  }
+
+  window.sessionStorage.setItem(browserAdminLoginNoticeStorageKey, JSON.stringify(notice));
+}
+
+export function loadBrowserAdminLoginNotice(): BrowserAdminLoginNotice | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const raw = window.sessionStorage.getItem(browserAdminLoginNoticeStorageKey);
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as BrowserAdminLoginNotice;
+    if (!parsed?.message) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function clearBrowserAdminLoginNotice() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.sessionStorage.removeItem(browserAdminLoginNoticeStorageKey);
 }
 
 export function isAllowedAdminEmail(email?: string | null) {
@@ -96,10 +172,11 @@ export function saveBrowserAdminProfile(profile: BrowserAdminProfile | null) {
   }
 
   if (!profile?.id) {
-    window.localStorage.removeItem(browserAdminProfileStorageKey);
+    clearBrowserAdminProfile();
     return;
   }
 
+  window.localStorage.removeItem(legacyBrowserAdminProfileStorageKey);
   window.localStorage.setItem(browserAdminProfileStorageKey, JSON.stringify(profile));
 }
 
@@ -110,6 +187,7 @@ export function loadBrowserAdminProfile(): BrowserAdminProfile | null {
 
   const raw = window.localStorage.getItem(browserAdminProfileStorageKey);
   if (!raw) {
+    window.localStorage.removeItem(legacyBrowserAdminProfileStorageKey);
     return null;
   }
 
@@ -125,11 +203,10 @@ export function loadBrowserAdminProfile(): BrowserAdminProfile | null {
 }
 
 export function clearBrowserAdminProfile() {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  window.localStorage.removeItem(browserAdminProfileStorageKey);
+  removeStorageKeys([
+    browserAdminProfileStorageKey,
+    legacyBrowserAdminProfileStorageKey,
+  ]);
 }
 
 export function saveBrowserAdminTestSession(session: BrowserAdminTestSession | null) {
@@ -137,11 +214,12 @@ export function saveBrowserAdminTestSession(session: BrowserAdminTestSession | n
     return;
   }
 
-  if (!browserAdminTestSessionAllowed() || !session?.accessToken || !isJwtShapeValid(session.accessToken) || !session.user?.id) {
-    window.localStorage.removeItem(browserAdminTestSessionStorageKey);
+  if (!browserAdminAuthTestModeEnabled() || !session?.accessToken || !isJwtShapeValid(session.accessToken) || !session.user?.id) {
+    clearBrowserAdminTestSession();
     return;
   }
 
+  window.localStorage.removeItem(legacyBrowserAdminTestSessionStorageKey);
   window.localStorage.setItem(browserAdminTestSessionStorageKey, JSON.stringify(session));
 }
 
@@ -150,33 +228,33 @@ export function loadBrowserAdminTestSession(): BrowserAdminTestSession | null {
     return null;
   }
 
-  if (!browserAdminTestSessionAllowed()) {
-    window.localStorage.removeItem(browserAdminTestSessionStorageKey);
+  if (!browserAdminAuthTestModeEnabled()) {
+    clearBrowserAdminTestSession();
     return null;
   }
 
   const raw = window.localStorage.getItem(browserAdminTestSessionStorageKey);
   if (!raw) {
+    window.localStorage.removeItem(legacyBrowserAdminTestSessionStorageKey);
     return null;
   }
 
   try {
     const parsed = JSON.parse(raw) as BrowserAdminTestSession;
     if (!parsed?.accessToken || !isJwtShapeValid(parsed.accessToken) || !parsed.user?.id) {
-      window.localStorage.removeItem(browserAdminTestSessionStorageKey);
+      clearBrowserAdminTestSession();
       return null;
     }
     return parsed;
   } catch {
-    window.localStorage.removeItem(browserAdminTestSessionStorageKey);
+    clearBrowserAdminTestSession();
     return null;
   }
 }
 
 export function clearBrowserAdminTestSession() {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  window.localStorage.removeItem(browserAdminTestSessionStorageKey);
+  removeStorageKeys([
+    browserAdminTestSessionStorageKey,
+    legacyBrowserAdminTestSessionStorageKey,
+  ]);
 }

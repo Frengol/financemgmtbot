@@ -3,80 +3,217 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Login from './Login';
 
-const mockRequestMagicLink = vi.fn();
+const mockSignInWithOtp = vi.fn();
+const mockRequestTestMagicLink = vi.fn();
+const mockLoadBrowserAdminLoginNotice = vi.fn();
+const mockClearBrowserAdminLoginNotice = vi.fn();
+const mockUseAuth = vi.fn();
+
+vi.mock('@/lib/supabase', () => ({
+  supabase: {
+    auth: {
+      signInWithOtp: (...args: unknown[]) => mockSignInWithOtp(...args),
+    },
+  },
+}));
 
 vi.mock('@/lib/adminApi', () => ({
   localDevBypassEnabled: false,
-  requestMagicLink: (...args: unknown[]) => mockRequestMagicLink(...args),
+  requestTestMagicLink: (...args: unknown[]) => mockRequestTestMagicLink(...args),
 }));
+
+vi.mock('@/hooks/useAuth', () => ({
+  useAuth: () => mockUseAuth(),
+}));
+
+vi.mock('@/lib/auth', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/auth')>('@/lib/auth');
+  return {
+    ...actual,
+    browserAdminAuthTestModeEnabled: () => import.meta.env.VITE_AUTH_TEST_MODE === 'true',
+    loadBrowserAdminLoginNotice: (...args: unknown[]) => mockLoadBrowserAdminLoginNotice(...args),
+    clearBrowserAdminLoginNotice: (...args: unknown[]) => mockClearBrowserAdminLoginNotice(...args),
+  };
+});
 
 describe('Login', () => {
   beforeEach(() => {
-    mockRequestMagicLink.mockReset();
+    mockSignInWithOtp.mockReset();
+    mockRequestTestMagicLink.mockReset();
+    mockLoadBrowserAdminLoginNotice.mockReset();
+    mockClearBrowserAdminLoginNotice.mockReset();
+    mockUseAuth.mockReset();
+    mockLoadBrowserAdminLoginNotice.mockReturnValue(null);
+    mockUseAuth.mockReturnValue({
+      authenticated: false,
+      loading: false,
+      localBypass: false,
+    });
+    vi.stubEnv('VITE_AUTH_TEST_MODE', 'false');
     window.history.pushState({}, '', '/login');
   });
 
-  it('requests a magic link and renders the success state', async () => {
-    mockRequestMagicLink.mockResolvedValue({ message: 'sent' });
+  it('requests a magic link directly from the Supabase browser client', async () => {
+    mockSignInWithOtp.mockResolvedValue({ data: {}, error: null });
 
     render(<Login />);
 
-    const emailInput = screen.getByLabelText('E-mail de Acesso');
-    expect(emailInput).toHaveAttribute('name', 'email');
-    expect(emailInput).toHaveAttribute('autocomplete', 'email');
-    expect(emailInput).toHaveAttribute('autocapitalize', 'none');
-    expect(emailInput).toHaveAttribute('autocorrect', 'off');
-    expect(emailInput).toHaveAttribute('placeholder', 'seu e-mail');
-
-    await userEvent.type(emailInput, 'admin@example.com');
+    await userEvent.type(screen.getByLabelText('E-mail de Acesso'), 'admin@example.com');
     await userEvent.click(screen.getByRole('button', { name: 'Enviar Magic Link' }));
 
     await waitFor(() => {
-      expect(mockRequestMagicLink).toHaveBeenCalledWith(
+      expect(mockSignInWithOtp).toHaveBeenCalledWith({
+        email: 'admin@example.com',
+        options: {
+          shouldCreateUser: false,
+          emailRedirectTo: new URL('auth/callback', new URL(import.meta.env.BASE_URL, window.location.origin)).toString(),
+        },
+      });
+    });
+    expect(await screen.findByText('Link mágico enviado!')).toBeInTheDocument();
+    expect(mockRequestTestMagicLink).not.toHaveBeenCalled();
+  });
+
+  it('uses the loopback auth test endpoint only in auth test mode', async () => {
+    vi.stubEnv('VITE_AUTH_TEST_MODE', 'true');
+    mockRequestTestMagicLink.mockResolvedValue({ magicLink: { link: 'http://127.0.0.1:8080/__test__/auth/verify?token_hash=1' } });
+
+    render(<Login />);
+
+    await userEvent.type(screen.getByLabelText('E-mail de Acesso'), 'admin@example.com');
+    await userEvent.click(screen.getByRole('button', { name: 'Enviar Magic Link' }));
+
+    await waitFor(() => {
+      expect(mockRequestTestMagicLink).toHaveBeenCalledWith(
         'admin@example.com',
         new URL('auth/callback', new URL(import.meta.env.BASE_URL, window.location.origin)).toString(),
       );
     });
+    expect(mockSignInWithOtp).not.toHaveBeenCalled();
     expect(await screen.findByText('Link mágico enviado!')).toBeInTheDocument();
-    expect(screen.getByText(/admin@example.com/i)).toBeInTheDocument();
   });
 
-  it('shows the unauthorized reason and backend errors', async () => {
-    mockRequestMagicLink.mockRejectedValue(new Error('Muitos pedidos de login em pouco tempo. Aguarde alguns minutos e tente novamente. Codigo de suporte: req_auth_123'));
-    window.history.pushState({}, '', '/login?reason=unauthorized');
+  it('surfaces rate limiting and masks user enumeration failures', async () => {
+    mockSignInWithOtp
+      .mockResolvedValueOnce({ data: {}, error: { message: 'For security purposes, you can only request this after 8 seconds.' } })
+      .mockResolvedValueOnce({ data: {}, error: { message: 'User not found' } });
+
+    const { rerender } = render(<Login />);
+
+    await userEvent.type(screen.getByLabelText('E-mail de Acesso'), 'admin@example.com');
+    await userEvent.click(screen.getByRole('button', { name: 'Enviar Magic Link' }));
+
+    expect(await screen.findByText(/muitos pedidos de login/i)).toBeInTheDocument();
+
+    rerender(<Login />);
+    await userEvent.clear(screen.getByLabelText('E-mail de Acesso'));
+    await userEvent.type(screen.getByLabelText('E-mail de Acesso'), 'blocked@example.com');
+    await userEvent.click(screen.getByRole('button', { name: 'Enviar Magic Link' }));
+
+    expect(await screen.findByText('Link mágico enviado!')).toBeInTheDocument();
+  });
+
+  it('shows login notices persisted by the auth flow', () => {
+    mockLoadBrowserAdminLoginNotice.mockReturnValue({
+      message: 'Seu usuario nao esta autorizado a acessar o painel.',
+    });
 
     render(<Login />);
 
     expect(screen.getByText(/nao esta autorizado/i)).toBeInTheDocument();
-    await userEvent.type(screen.getByLabelText('E-mail de Acesso'), 'blocked@example.com');
-    await userEvent.click(screen.getByRole('button', { name: 'Enviar Magic Link' }));
-
-    expect(await screen.findByText(/Muitos pedidos de login em pouco tempo/i)).toBeInTheDocument();
-    expect(screen.getByText(/Codigo de suporte: req_auth_123/i)).toBeInTheDocument();
+    expect(mockClearBrowserAdminLoginNotice).toHaveBeenCalledTimes(1);
   });
 
-  it('shows auth unavailable reason with support code from callback fallback', () => {
-    window.history.pushState({}, '', '/login?reason=auth_unavailable&requestId=req_auth_123');
+  it('renders the operational auth banners from the query string', () => {
+    window.history.pushState({}, '', '/login?reason=auth_unavailable&requestId=req_test_1');
 
     render(<Login />);
 
     expect(screen.getByText(/login esta temporariamente indisponivel/i)).toBeInTheDocument();
-    expect(screen.getByText(/Codigo de suporte: req_auth_123/i)).toBeInTheDocument();
+    expect(screen.getByText(/codigo de suporte: req_test_1/i)).toBeInTheDocument();
   });
 
-  it('redirects immediately when local development bypass is enabled', async () => {
+  it('surfaces a generic request failure when the Supabase browser client errors unexpectedly', async () => {
+    mockSignInWithOtp.mockResolvedValue({ data: {}, error: { message: 'unexpected upstream failure' } });
+
+    render(<Login />);
+
+    await userEvent.type(screen.getByLabelText('E-mail de Acesso'), 'admin@example.com');
+    await userEvent.click(screen.getByRole('button', { name: 'Enviar Magic Link' }));
+
+    expect(await screen.findByText(/nao foi possivel enviar o link de acesso agora/i)).toBeInTheDocument();
+  });
+
+  it('redirects to the app root when auth is already established', async () => {
+    const originalLocation = window.location;
     const replaceSpy = vi.fn();
-    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
-    vi.resetModules();
-    vi.doMock('@/lib/adminApi', () => ({
-      localDevBypassEnabled: true,
-      requestMagicLink: (...args: unknown[]) => mockRequestMagicLink(...args),
-    }));
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        ...originalLocation,
+        replace: replaceSpy,
+      },
+    });
+    mockUseAuth.mockReturnValue({
+      authenticated: true,
+      loading: false,
+      localBypass: false,
+    });
 
-    const { default: LoginWithBypass } = await import('./Login');
-    const { container } = render(<LoginWithBypass />);
+    render(<Login />);
 
-    expect(container).toBeEmptyDOMElement();
-    expect(replaceSpy).toHaveBeenCalledWith(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
+    await waitFor(() => {
+      expect(replaceSpy).toHaveBeenCalledWith(
+        new URL(import.meta.env.BASE_URL, window.location.origin).toString(),
+      );
+    });
+
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: originalLocation,
+    });
+  });
+
+  it('redirects immediately when local bypass is already active', async () => {
+    const originalLocation = window.location;
+    const replaceSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        ...originalLocation,
+        replace: replaceSpy,
+      },
+    });
+    mockUseAuth.mockReturnValue({
+      authenticated: false,
+      loading: false,
+      localBypass: true,
+    });
+
+    render(<Login />);
+
+    await waitFor(() => {
+      expect(replaceSpy).toHaveBeenCalledWith(
+        new URL(import.meta.env.BASE_URL, window.location.origin).toString(),
+      );
+    });
+
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: originalLocation,
+    });
+  });
+
+  it('keeps the login screen stable while auth hydration is still loading', () => {
+    mockUseAuth.mockReturnValue({
+      authenticated: false,
+      loading: true,
+      localBypass: false,
+    });
+
+    render(<Login />);
+
+    expect(screen.getByRole('button', { name: 'Enviar Magic Link' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Finance Copilot' })).toBeInTheDocument();
   });
 });

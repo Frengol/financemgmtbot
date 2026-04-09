@@ -5,27 +5,38 @@ function buildJwtLikeToken(...segments: string[]) {
   return segments.join('.');
 }
 
-const mockSetSession = vi.fn();
-const mockExchangeCodeForSession = vi.fn();
 const mockGetSession = vi.fn();
+const mockOnAuthStateChange = vi.fn();
+const mockGetAdminMe = vi.fn();
 const mockClearBrowserAuthState = vi.fn();
+const mockSetCachedBrowserAccessToken = vi.fn();
 const mockSaveBrowserAdminProfile = vi.fn();
 const mockSaveBrowserAdminTestSession = vi.fn();
+const mockSaveBrowserAdminLoginNotice = vi.fn();
+const mockClearBrowserAdminLoginNotice = vi.fn();
 const mockClearBrowserAdminProfile = vi.fn();
 const mockClearBrowserAdminTestSession = vi.fn();
 const mockDecodeAccessTokenIdentity = vi.fn();
-const mockLoadBrowserAdminTestSession = vi.fn();
+const mockBrowserAdminAuthTestModeEnabled = vi.fn();
 
 vi.mock('@/lib/supabase', () => ({
   clearBrowserAuthState: (...args: unknown[]) => mockClearBrowserAuthState(...args),
+  setCachedBrowserAccessToken: (...args: unknown[]) => mockSetCachedBrowserAccessToken(...args),
   supabase: {
     auth: {
-      setSession: (...args: unknown[]) => mockSetSession(...args),
-      exchangeCodeForSession: (...args: unknown[]) => mockExchangeCodeForSession(...args),
       getSession: (...args: unknown[]) => mockGetSession(...args),
+      onAuthStateChange: (...args: unknown[]) => mockOnAuthStateChange(...args),
     },
   },
 }));
+
+vi.mock('@/lib/adminApi', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/adminApi')>('@/lib/adminApi');
+  return {
+    ...actual,
+    getAdminMe: (...args: unknown[]) => mockGetAdminMe(...args),
+  };
+});
 
 vi.mock('@/lib/auth', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth')>('@/lib/auth');
@@ -33,299 +44,351 @@ vi.mock('@/lib/auth', async () => {
     ...actual,
     saveBrowserAdminProfile: (...args: unknown[]) => mockSaveBrowserAdminProfile(...args),
     saveBrowserAdminTestSession: (...args: unknown[]) => mockSaveBrowserAdminTestSession(...args),
+    saveBrowserAdminLoginNotice: (...args: unknown[]) => mockSaveBrowserAdminLoginNotice(...args),
+    clearBrowserAdminLoginNotice: (...args: unknown[]) => mockClearBrowserAdminLoginNotice(...args),
     clearBrowserAdminProfile: (...args: unknown[]) => mockClearBrowserAdminProfile(...args),
     clearBrowserAdminTestSession: (...args: unknown[]) => mockClearBrowserAdminTestSession(...args),
     decodeAccessTokenIdentity: (...args: unknown[]) => mockDecodeAccessTokenIdentity(...args),
-    loadBrowserAdminTestSession: (...args: unknown[]) => mockLoadBrowserAdminTestSession(...args),
+    browserAdminAuthTestModeEnabled: (...args: unknown[]) => mockBrowserAdminAuthTestModeEnabled(...args),
   };
 });
 
 describe('AuthCallback', () => {
   beforeEach(() => {
-    mockSetSession.mockReset();
-    mockExchangeCodeForSession.mockReset();
+    vi.resetModules();
     mockGetSession.mockReset();
+    mockOnAuthStateChange.mockReset();
+    mockGetAdminMe.mockReset();
     mockClearBrowserAuthState.mockReset();
+    mockSetCachedBrowserAccessToken.mockReset();
     mockSaveBrowserAdminProfile.mockReset();
     mockSaveBrowserAdminTestSession.mockReset();
+    mockSaveBrowserAdminLoginNotice.mockReset();
+    mockClearBrowserAdminLoginNotice.mockReset();
     mockClearBrowserAdminProfile.mockReset();
     mockClearBrowserAdminTestSession.mockReset();
     mockDecodeAccessTokenIdentity.mockReset();
-    mockLoadBrowserAdminTestSession.mockReset();
+    mockBrowserAdminAuthTestModeEnabled.mockReset();
+
+    mockBrowserAdminAuthTestModeEnabled.mockReturnValue(false);
     mockGetSession.mockResolvedValue({ data: { session: null } });
-    mockLoadBrowserAdminTestSession.mockReturnValue(null);
-    window.history.pushState(
-      {},
-      '',
-      `/auth/callback#access_token=${buildJwtLikeToken('header-segment', 'payload-segment-1', 'signature-segment')}&refresh_token=refresh-1&type=magiclink`,
-    );
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it('consumes the upstream tokens, stores the session and redirects to the app root', async () => {
-    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-2', 'signature-segment');
-    window.history.pushState({}, '', `/auth/callback#access_token=${accessToken}&refresh_token=refresh-1&type=magiclink`);
-    const replaceSpy = vi.fn();
-    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
-    mockSetSession.mockResolvedValue({ data: {}, error: null });
-    mockGetSession.mockResolvedValue({
+    mockOnAuthStateChange.mockReturnValue({
       data: {
-        session: {
-          access_token: accessToken,
-          user: {
-            id: 'user-1',
-            email: 'admin@example.com',
-          },
+        subscription: {
+          unsubscribe: vi.fn(),
         },
       },
     });
-    mockDecodeAccessTokenIdentity.mockReturnValue({ id: 'user-1', email: 'admin@example.com' });
-
-    const { default: AuthCallback } = await import('./AuthCallback');
-
-    render(<AuthCallback />);
-
-    await waitFor(() => {
-      expect(mockSetSession).toHaveBeenCalledWith({
-        access_token: accessToken,
-        refresh_token: 'refresh-1',
-      });
+    mockGetAdminMe.mockResolvedValue({
+      authenticated: true,
+      authorized: true,
+      user: { id: 'user-1', email: 'admin@example.com' },
     });
-    expect(mockSaveBrowserAdminProfile).toHaveBeenCalledWith({ id: 'user-1', email: 'admin@example.com' });
-    expect(replaceSpy).toHaveBeenCalledWith(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
+    mockDecodeAccessTokenIdentity.mockReturnValue({ id: 'user-1', email: 'admin@example.com' });
+    window.history.pushState({}, '', '/auth/callback');
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it('shows an explicit error when the upstream link is invalid or expired', async () => {
     window.history.pushState({}, '', '/auth/callback#error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired');
 
     const { default: AuthCallback } = await import('./AuthCallback');
-
     render(<AuthCallback />);
 
     expect(await screen.findByText(/link de acesso invalido ou expirado/i)).toBeInTheDocument();
-    expect(mockSetSession).not.toHaveBeenCalled();
+    expect(mockGetAdminMe).not.toHaveBeenCalled();
     expect(mockClearBrowserAdminProfile).toHaveBeenCalled();
     expect(mockClearBrowserAdminTestSession).toHaveBeenCalled();
-    expect(window.location.hash).toContain('otp_expired');
   });
 
-  it('shows an explicit error when the callback does not contain usable tokens', async () => {
-    window.history.pushState({}, '', '/auth/callback');
+  it('surfaces non-expired upstream callback failures without leaking raw provider details', async () => {
+    window.history.pushState({}, '', '/auth/callback#error=server_error&error_description=Temporary+provider+failure');
 
     const { default: AuthCallback } = await import('./AuthCallback');
-
     render(<AuthCallback />);
 
-    expect(await screen.findByText(/nao foi possivel concluir o login/i)).toBeInTheDocument();
-    expect(mockSetSession).not.toHaveBeenCalled();
+    expect(await screen.findByText(/temporary provider failure/i)).toBeInTheDocument();
+    expect(mockGetAdminMe).not.toHaveBeenCalled();
   });
 
-  it('exchanges query code callbacks for a browser session and redirects to the app root', async () => {
-    window.history.pushState({}, '', '/auth/callback?code=pkce-code-1');
+  it('waits for the persisted Supabase browser session and validates admin access before redirecting home', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload', 'signature');
     const replaceSpy = vi.fn();
     vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
-    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-code', 'signature-segment');
-    mockExchangeCodeForSession.mockResolvedValue({
-      data: {
-        session: {
-          access_token: accessToken,
-          user: {
-            id: 'user-1',
-            email: 'admin@example.com',
-          },
-        },
-      },
-      error: null,
-    });
     mockGetSession.mockResolvedValue({
       data: {
         session: {
           access_token: accessToken,
-          user: {
-            id: 'user-1',
-            email: 'admin@example.com',
-          },
+          user: { id: 'user-1', email: 'admin@example.com' },
         },
       },
     });
-    mockDecodeAccessTokenIdentity.mockReturnValue({ id: 'user-1', email: 'admin@example.com' });
 
     const { default: AuthCallback } = await import('./AuthCallback');
-
     render(<AuthCallback />);
 
     await waitFor(() => {
-      expect(mockExchangeCodeForSession).toHaveBeenCalledWith('pkce-code-1');
+      expect(mockGetAdminMe).toHaveBeenCalledWith(accessToken);
     });
-    expect(mockSetSession).not.toHaveBeenCalled();
-    expect(mockSaveBrowserAdminProfile).toHaveBeenCalledWith({ id: 'user-1', email: 'admin@example.com' });
+    expect(mockSetCachedBrowserAccessToken).toHaveBeenCalledWith(accessToken);
+    expect(mockSaveBrowserAdminProfile).toHaveBeenCalledWith({
+      id: 'user-1',
+      email: 'admin@example.com',
+    });
+    expect(mockClearBrowserAdminLoginNotice).toHaveBeenCalled();
     expect(replaceSpy).toHaveBeenCalledWith(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
   });
 
-  it('shows an explicit error when a query-based callback cannot exchange the session', async () => {
-    window.history.pushState({}, '', '/auth/callback?code=expired-code');
-    mockExchangeCodeForSession.mockResolvedValue({
-      data: { session: null },
-      error: { message: 'invalid flow state' },
+  it('accepts a session that arrives later through onAuthStateChange', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-late', 'signature');
+    let authStateHandler: ((event: string, session: { access_token?: string; user?: { id?: string; email?: string | null } | null } | null) => void) | undefined;
+    const replaceSpy = vi.fn();
+    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
+    mockGetSession.mockResolvedValue({ data: { session: null } });
+    mockOnAuthStateChange.mockImplementation((handler: typeof authStateHandler) => {
+      authStateHandler = handler;
+      return {
+        data: {
+          subscription: {
+            unsubscribe: vi.fn(),
+          },
+        },
+      };
     });
 
     const { default: AuthCallback } = await import('./AuthCallback');
-
     render(<AuthCallback />);
 
-    expect(await screen.findByText(/nao foi possivel concluir o login/i)).toBeInTheDocument();
-    expect(mockSetSession).not.toHaveBeenCalled();
-    expect(mockClearBrowserAuthState).toHaveBeenCalled();
+    await waitFor(() => {
+      expect(mockOnAuthStateChange).toHaveBeenCalledTimes(1);
+    });
+
+    authStateHandler?.('SIGNED_IN', {
+      access_token: accessToken,
+      user: { id: 'user-2', email: 'admin2@example.com' },
+    });
+
+    await waitFor(() => {
+      expect(mockGetAdminMe).toHaveBeenCalledWith(accessToken);
+    });
+    expect(mockSaveBrowserAdminProfile).toHaveBeenCalledWith({
+      id: 'user-2',
+      email: 'admin2@example.com',
+    });
+    expect(replaceSpy).toHaveBeenCalledWith(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
   });
 
-  it('shows a short diagnostic when the exchanged session cannot be persisted safely', async () => {
-    window.history.pushState({}, '', '/auth/callback?code=pkce-code-invalid');
-    mockExchangeCodeForSession.mockResolvedValue({
-      data: {
-        session: {
-          access_token: buildJwtLikeToken('header-segment', 'payload-segment-code-invalid', 'signature-segment'),
-          user: {
-            id: 'user-1',
-            email: 'admin@example.com',
-          },
+  it('keeps the loopback auth test callback path isolated from the production runtime', async () => {
+    mockBrowserAdminAuthTestModeEnabled.mockReturnValue(true);
+    const accessToken = buildJwtLikeToken('header', 'payload-test', 'signature');
+    window.history.pushState(
+      {},
+      '',
+      `/auth/callback#access_token=${accessToken}&refresh_token=refresh-1&auth_test_user_id=user-1&auth_test_email=admin%40example.com`,
+    );
+    const replaceSpy = vi.fn();
+    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+    render(<AuthCallback />);
+
+    await waitFor(() => {
+      expect(mockSaveBrowserAdminTestSession).toHaveBeenCalledWith({
+        accessToken,
+        refreshToken: 'refresh-1',
+        user: {
+          id: 'user-1',
+          email: 'admin@example.com',
         },
-      },
-      error: null,
+      });
     });
+    expect(mockGetAdminMe).not.toHaveBeenCalled();
+    expect(replaceSpy).toHaveBeenCalledWith(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
+  });
+
+  it('shows a short diagnostic when the browser session never becomes usable', async () => {
     mockGetSession.mockResolvedValue({
       data: {
         session: {
           access_token: 'not-a-jwt',
-          user: {
-            id: 'user-1',
-            email: 'admin@example.com',
-          },
+          user: { id: 'user-1', email: 'admin@example.com' },
         },
       },
     });
 
     const { default: AuthCallback } = await import('./AuthCallback');
-
     render(<AuthCallback />);
 
     expect(await screen.findByText(/diagnostico: session_store_invalid/i)).toBeInTheDocument();
     expect(mockClearBrowserAuthState).toHaveBeenCalled();
   });
 
-  it('stores a minimal browser auth profile derived from the access token claims', async () => {
-    const payload = btoa(JSON.stringify({
-      sub: 'user-1',
-      email: 'admin@example.com',
-      exp: 9999999999,
-    }))
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/g, '');
-    window.history.pushState(
-      {},
-      '',
-      `/auth/callback?user_id=user-1&email=admin%40example.com#access_token=header.${payload}.sig&refresh_token=refresh-1&type=magiclink`,
-    );
-    const replaceSpy = vi.fn();
-    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
-    mockSetSession.mockResolvedValue({ data: {}, error: null });
-    mockDecodeAccessTokenIdentity.mockReturnValue(null);
-
-    const { default: AuthCallback } = await import('./AuthCallback');
-
-    render(<AuthCallback />);
-
-    await waitFor(() => {
-      expect(mockSaveBrowserAdminProfile).toHaveBeenCalledWith({
-        id: 'user-1',
-        email: 'admin@example.com',
-      });
-    });
-    expect(mockSaveBrowserAdminTestSession).toHaveBeenCalledWith({
-      accessToken: `header.${payload}.sig`,
-      refreshToken: 'refresh-1',
-      user: {
-        id: 'user-1',
-        email: 'admin@example.com',
-      },
-    });
-    expect(mockSetSession).not.toHaveBeenCalled();
-  });
-
-  it('reuses an existing browser auth test session when the callback effect is replayed without hash tokens', async () => {
-    window.history.pushState({}, '', '/auth/callback');
-    const replaceSpy = vi.fn();
-    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
-    mockLoadBrowserAdminTestSession.mockReturnValue({
-      accessToken: buildJwtLikeToken('header-segment', 'payload-segment-4', 'signature-segment'),
-      refreshToken: 'existing-auth-test-refresh',
-      user: {
-        id: 'user-1',
-        email: 'admin@example.com',
+  it('shows a short diagnostic when the browser session never appears after the callback', async () => {
+    mockGetSession.mockResolvedValue({ data: { session: null } });
+    mockOnAuthStateChange.mockReturnValue({
+      data: {
+        subscription: {
+          unsubscribe: vi.fn(),
+        },
       },
     });
 
     const { default: AuthCallback } = await import('./AuthCallback');
-
     render(<AuthCallback />);
 
-    await waitFor(() => {
-      expect(replaceSpy).toHaveBeenCalledWith(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
-    });
-    expect(mockClearBrowserAdminTestSession).not.toHaveBeenCalled();
-    expect(mockSetSession).not.toHaveBeenCalled();
+    expect(await screen.findByText(/diagnostico: session_store_invalid/i, {}, { timeout: 6000 })).toBeInTheDocument();
+    expect(mockClearBrowserAuthState).toHaveBeenCalled();
   });
 
-  it('reuses an existing Supabase browser session when the callback reloads without tokens', async () => {
-    window.history.pushState({}, '', '/auth/callback?email=admin%40example.com');
+  it('saves a short notice and returns to login when backend authorization fails', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-denied', 'signature');
     const replaceSpy = vi.fn();
     vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
-    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-existing', 'signature-segment');
     mockGetSession.mockResolvedValue({
       data: {
         session: {
           access_token: accessToken,
-          user: {
-            id: 'user-1',
-            email: 'admin@example.com',
-          },
+          user: { id: 'user-1', email: 'admin@example.com' },
         },
       },
     });
+    mockGetAdminMe.mockRejectedValue(new Error('Seu usuario nao esta autorizado a acessar o painel. Codigo de suporte: req_authz_1'));
 
     const { default: AuthCallback } = await import('./AuthCallback');
-
     render(<AuthCallback />);
 
     await waitFor(() => {
-      expect(mockSaveBrowserAdminProfile).toHaveBeenCalledWith({ id: 'user-1', email: 'admin@example.com' });
+      expect(mockSaveBrowserAdminLoginNotice).toHaveBeenCalledWith({
+        message: 'Seu usuario nao esta autorizado a acessar o painel. Codigo de suporte: req_authz_1',
+      });
     });
-    expect(replaceSpy).toHaveBeenCalledWith(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
-    expect(mockClearBrowserAdminTestSession).not.toHaveBeenCalled();
+    expect(mockClearBrowserAuthState).toHaveBeenCalled();
+    expect(replaceSpy).toHaveBeenCalledWith(new URL('login', new URL(import.meta.env.BASE_URL, window.location.origin)).toString());
   });
 
-  it('shows a diagnostic when an existing persisted session is unusable during callback replay', async () => {
-    window.history.pushState({}, '', '/auth/callback?email=admin%40example.com');
+  it('treats a resolved but unauthorized admin identity as a login failure', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-denied', 'signature');
+    const replaceSpy = vi.fn();
+    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
     mockGetSession.mockResolvedValue({
       data: {
         session: {
-          access_token: 'not-a-jwt',
-          user: {
-            id: 'user-1',
-            email: 'admin@example.com',
-          },
+          access_token: accessToken,
+          user: { id: 'user-1', email: 'admin@example.com' },
+        },
+      },
+    });
+    mockGetAdminMe.mockResolvedValue({
+      authenticated: true,
+      authorized: false,
+      user: { id: 'user-1', email: 'admin@example.com' },
+    });
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+    render(<AuthCallback />);
+
+    await waitFor(() => {
+      expect(mockSaveBrowserAdminLoginNotice).toHaveBeenCalledWith({
+        message: 'Seu usuario nao esta autorizado a acessar o painel.',
+      });
+    });
+    expect(mockClearBrowserAuthState).toHaveBeenCalled();
+    expect(replaceSpy).toHaveBeenCalledWith(new URL('login', new URL(import.meta.env.BASE_URL, window.location.origin)).toString());
+  });
+
+  it('uses the callback fallback profile when the browser session does not expose a user object', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-fallback', 'signature');
+    window.history.pushState({}, '', '/auth/callback?user_id=user-from-query&email=admin%40example.com');
+    const replaceSpy = vi.fn();
+    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
+    mockDecodeAccessTokenIdentity.mockReturnValue(null);
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: null,
         },
       },
     });
 
     const { default: AuthCallback } = await import('./AuthCallback');
-
     render(<AuthCallback />);
 
-    expect(await screen.findByText(/diagnostico: auth_state_unusable/i)).toBeInTheDocument();
+    await waitFor(() => {
+      expect(mockSaveBrowserAdminProfile).toHaveBeenCalledWith({
+        id: 'user-from-query',
+        email: 'admin@example.com',
+      });
+    });
+    expect(replaceSpy).toHaveBeenCalledWith(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
+  });
+
+  it('shows a short diagnostic when the callback finishes with no resolvable user profile', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-noprofile', 'signature');
+    mockDecodeAccessTokenIdentity.mockReturnValue(null);
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: null,
+        },
+      },
+    });
+    window.history.pushState({}, '', '/auth/callback');
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+    render(<AuthCallback />);
+
+    expect(await screen.findByText(/diagnostico: session_store_invalid/i)).toBeInTheDocument();
     expect(mockClearBrowserAuthState).toHaveBeenCalled();
+  });
+
+  it('stops the callback flow cleanly when the component unmounts before the browser session resolves', async () => {
+    let resolveSession: ((value: { data: { session: null } }) => void) | undefined;
+    mockGetSession.mockReturnValue(new Promise((resolve) => {
+      resolveSession = resolve;
+    }));
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+    const view = render(<AuthCallback />);
+
+    view.unmount();
+    resolveSession?.({ data: { session: null } });
+    await Promise.resolve();
+
+    expect(mockClearBrowserAuthState).not.toHaveBeenCalled();
+  });
+
+  it('ignores a valid session that resolves only after the callback component unmounts', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-late-unmount', 'signature');
+    let resolveSession: ((value: { data: { session: { access_token: string; user: { id: string; email: string } } } }) => void) | undefined;
+    mockGetSession.mockReturnValue(new Promise((resolve) => {
+      resolveSession = resolve;
+    }));
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+    const view = render(<AuthCallback />);
+
+    view.unmount();
+    resolveSession?.({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: { id: 'user-late', email: 'late@example.com' },
+        },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockGetAdminMe).not.toHaveBeenCalledWith(accessToken);
+    expect(mockSaveBrowserAdminProfile).not.toHaveBeenCalledWith({
+      id: 'user-late',
+      email: 'late@example.com',
+    });
   });
 });

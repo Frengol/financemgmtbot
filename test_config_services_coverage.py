@@ -111,6 +111,8 @@ class TestConfigCoverage:
         )
         assert module.normalize_public_url("https://admin.example.com/app", trailing_slash=True) == "https://admin.example.com/app/"
         assert module.normalize_public_url("nota-url") == ""
+        assert module.normalize_build_id("build-2026.04_08") == "build-2026.04_08"
+        assert module.normalize_build_id("build id with spaces") == ""
         assert module.mascarar_segredos(REQUIRED_ENV["SUPABASE_KEY"]) == "[MASKED_SUPABASE_KEY]"
 
     def test_auth_test_mode_uses_magicmock_supabase_and_normalizes_public_urls(self, monkeypatch: pytest.MonkeyPatch):

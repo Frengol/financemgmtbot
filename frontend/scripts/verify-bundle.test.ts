@@ -46,9 +46,11 @@ describe('verifyBundleDirectory', () => {
     const dir = createBundleDir(`
       const supabaseUrl = '${PUBLIC_SUPABASE_URL}';
       const supabaseAnonKey = '${PUBLIC_SUPABASE_ANON_KEY}';
-      const storageKey = 'financemgmtbot-admin-auth';
-      supabase.auth.setSession({ access_token: 'token', refresh_token: 'refresh' });
-      fetch('/api/admin/gastos', { headers: { Authorization: 'Bearer abc' } });
+      const storageKey = 'financemgmtbot-admin-auth-v2';
+      const authEmail = 'admin' + '@' + 'example.com';
+      supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
+      supabase.auth.onAuthStateChange(() => {});
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
     `);
 
     expect(
@@ -63,9 +65,11 @@ describe('verifyBundleDirectory', () => {
     const dir = createBundleDir(`
       const supabaseUrl = '${PUBLIC_SUPABASE_URL}';
       const supabaseAnonKey = '${PUBLIC_SUPABASE_ANON_KEY}';
-      const storageKey = 'financemgmtbot-admin-auth';
-      supabase.auth.setSession({ access_token: 'token', refresh_token: 'refresh' });
-      fetch('/api/admin/gastos');
+      const storageKey = 'financemgmtbot-admin-auth-v2';
+      const authEmail = 'admin' + '@' + 'example.com';
+      supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
+      supabase.auth.onAuthStateChange(() => {});
+      fetch('/api/admin/me');
     `);
 
     expect(
@@ -77,10 +81,13 @@ describe('verifyBundleDirectory', () => {
     ).toThrow(/bearer authorization transport/i);
   });
 
-  it('rejects a bundle that loses Supabase browser session bootstrap', () => {
+  it('rejects a bundle that loses the Supabase auth listener and handshake contract', () => {
     const dir = createBundleDir(`
       const supabaseUrl = '${PUBLIC_SUPABASE_URL}';
       const supabaseAnonKey = '${PUBLIC_SUPABASE_ANON_KEY}';
+      const storageKey = 'financemgmtbot-admin-auth-v2';
+      const authEmail = 'admin' + '@' + 'example.com';
+      supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
       fetch('/api/admin/gastos', { headers: { Authorization: 'Bearer abc' } });
     `);
 
@@ -90,17 +97,40 @@ describe('verifyBundleDirectory', () => {
           supabaseUrl: PUBLIC_SUPABASE_URL,
           supabaseAnonKey: PUBLIC_SUPABASE_ANON_KEY,
         }),
-    ).toThrow(/Supabase browser session storage key/i);
+    ).toThrow(/Supabase auth state listener/i);
   });
 
   it('does not fail only because legacy compatibility strings still exist in the bundle', () => {
     const dir = createBundleDir(`
       const supabaseUrl = '${PUBLIC_SUPABASE_URL}';
       const supabaseAnonKey = '${PUBLIC_SUPABASE_ANON_KEY}';
-      const storageKey = 'financemgmtbot-admin-auth';
-      supabase.auth.setSession({ access_token: 'token', refresh_token: 'refresh' });
-      fetch('/api/admin/gastos', { credentials: 'include', headers: { 'X-CSRF-Token': 'csrf' } });
-      fetch('/api/admin/gastos', { headers: { Authorization: 'Bearer abc' } });
+      const storageKey = 'financemgmtbot-admin-auth-v2';
+      const authEmail = 'admin' + '@' + 'example.com';
+      supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
+      supabase.auth.onAuthStateChange(() => {});
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
+      fetch('/api/admin/gastos', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
+      const legacyBridge = '/auth/callback';
+    `);
+
+    expect(
+      verifyBundleDirectory(dir, {
+        supabaseUrl: PUBLIC_SUPABASE_URL,
+        supabaseAnonKey: PUBLIC_SUPABASE_ANON_KEY,
+      }),
+    ).toBe(2);
+  });
+
+  it('does not flag the loopback-only auth test endpoint as a published legacy auth path', () => {
+    const dir = createBundleDir(`
+      const supabaseUrl = '${PUBLIC_SUPABASE_URL}';
+      const supabaseAnonKey = '${PUBLIC_SUPABASE_ANON_KEY}';
+      const storageKey = 'financemgmtbot-admin-auth-v2';
+      const authEmail = 'admin' + '@' + 'example.com';
+      supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
+      supabase.auth.onAuthStateChange(() => {});
+      fetch('/__test__/auth/magic-link', { method: 'POST' });
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
     `);
 
     expect(
@@ -115,10 +145,12 @@ describe('verifyBundleDirectory', () => {
     const dir = createBundleDir(`
       const supabaseUrl = '${PUBLIC_SUPABASE_URL}';
       const supabaseAnonKey = '${PUBLIC_SUPABASE_ANON_KEY}';
-      const storageKey = 'financemgmtbot-admin-auth';
+      const storageKey = 'financemgmtbot-admin-auth-v2';
       const leakedToken = '${UNEXPECTED_JWT}';
-      supabase.auth.setSession({ access_token: 'token', refresh_token: 'refresh' });
-      fetch('/api/admin/gastos', { headers: { Authorization: 'Bearer abc' } });
+      const authEmail = 'admin' + '@' + 'example.com';
+      supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
+      supabase.auth.onAuthStateChange(() => {});
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
     `);
 
     expect(
@@ -134,10 +166,12 @@ describe('verifyBundleDirectory', () => {
     const dir = createBundleDir(`
       const supabaseUrl = '${PUBLIC_SUPABASE_URL}';
       const supabaseAnonKey = '${PUBLIC_SUPABASE_ANON_KEY}';
-      const storageKey = 'financemgmtbot-admin-auth';
+      const storageKey = 'financemgmtbot-admin-auth-v2';
       const leakedSecret = 'service_role';
-      supabase.auth.setSession({ access_token: 'token', refresh_token: 'refresh' });
-      fetch('/api/admin/gastos', { headers: { Authorization: 'Bearer abc' } });
+      const authEmail = 'admin' + '@' + 'example.com';
+      supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
+      supabase.auth.onAuthStateChange(() => {});
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
     `);
 
     expect(
@@ -153,10 +187,12 @@ describe('verifyBundleDirectory', () => {
     const dir = createBundleDir(`
       const supabaseUrl = '${PUBLIC_SUPABASE_URL}';
       const supabaseAnonKey = '${PUBLIC_SUPABASE_ANON_KEY}';
-      const storageKey = 'financemgmtbot-admin-auth';
+      const storageKey = 'financemgmtbot-admin-auth-v2';
       const leakedEmail = 'operator@example.com';
-      supabase.auth.setSession({ access_token: 'token', refresh_token: 'refresh' });
-      fetch('/api/admin/gastos', { headers: { Authorization: 'Bearer abc' } });
+      const authEmail = 'admin' + '@' + 'example.com';
+      supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
+      supabase.auth.onAuthStateChange(() => {});
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
     `);
 
     expect(
@@ -166,5 +202,26 @@ describe('verifyBundleDirectory', () => {
           supabaseAnonKey: PUBLIC_SUPABASE_ANON_KEY,
         }),
     ).toThrow(/unexpected email/i);
+  });
+
+  it('rejects a bundle that still ships the legacy auth session path', () => {
+    const dir = createBundleDir(`
+      const supabaseUrl = '${PUBLIC_SUPABASE_URL}';
+      const supabaseAnonKey = '${PUBLIC_SUPABASE_ANON_KEY}';
+      const storageKey = 'financemgmtbot-admin-auth-v2';
+      const authEmail = 'admin' + '@' + 'example.com';
+      supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
+      supabase.auth.onAuthStateChange(() => {});
+      fetch('/auth/session');
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
+    `);
+
+    expect(
+      () =>
+        verifyBundleDirectory(dir, {
+          supabaseUrl: PUBLIC_SUPABASE_URL,
+          supabaseAnonKey: PUBLIC_SUPABASE_ANON_KEY,
+        }),
+    ).toThrow(/legacy auth session path/i);
   });
 });

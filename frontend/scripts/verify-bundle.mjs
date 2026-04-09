@@ -5,15 +5,27 @@ import { fileURLToPath } from 'node:url';
 const requiredPatterns = [
   {
     description: 'Supabase browser session storage key',
-    regex: /financemgmtbot-admin-auth/,
+    regex: /financemgmtbot-admin-auth-v2/,
   },
   {
-    description: 'Supabase browser session bootstrap',
-    regex: /\.auth\.setSession/,
+    description: 'Supabase magic link sign-in flow',
+    regex: /\.auth\.signInWithOtp/,
+  },
+  {
+    description: 'Supabase auth state listener',
+    regex: /\.auth\.onAuthStateChange/,
+  },
+  {
+    description: 'admin authorization handshake',
+    regex: /\/api\/admin\/me/,
   },
   {
     description: 'bearer authorization transport',
     regex: /Authorization/,
+  },
+  {
+    description: 'client build correlation header',
+    regex: /X-Client-Build/,
   },
 ];
 
@@ -46,6 +58,16 @@ const forbiddenLiteralPatterns = [
 
 const jwtPattern = /\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b/g;
 const emailPattern = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+const forbiddenPublishedLegacyPathPatterns = [
+  {
+    description: 'legacy auth session path',
+    regex: /(^|[^_A-Za-z0-9/.-])\/auth\/session\b/g,
+  },
+  {
+    description: 'legacy magic link path',
+    regex: /(^|[^_A-Za-z0-9/.-])\/auth\/magic-link\b/g,
+  },
+];
 
 function normalizePublicValue(value) {
   return typeof value === 'string' ? value.trim().replace(/\/$/, '') : '';
@@ -96,6 +118,12 @@ export function verifyBundleDirectory(targetDir = resolve('dist'), options = {})
 
   if (supabaseAnonKey && !bundle.includes(supabaseAnonKey)) {
     throw new Error('Bundle verification failed: missing configured public Supabase anon key.');
+  }
+
+  for (const legacyPath of forbiddenPublishedLegacyPathPatterns) {
+    if (legacyPath.regex.test(bundle)) {
+      throw new Error(`Bundle verification failed: found ${legacyPath.description}.`);
+    }
   }
 
   for (const pattern of forbiddenLiteralPatterns) {

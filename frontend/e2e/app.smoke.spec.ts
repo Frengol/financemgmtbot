@@ -43,6 +43,28 @@ function jsonResponse(route: Route, body: unknown, status = 200) {
   });
 }
 
+function buildJwtToken(parts: [string, string, string]) {
+  return parts.join('.');
+}
+
+function buildAuthTestAccessToken(userId = 'user-1', email = 'admin@example.com') {
+  const payload = Buffer.from(
+    JSON.stringify({
+      sub: userId,
+      email,
+      role: 'authenticated',
+    }),
+    'utf-8',
+  )
+    .toString('base64url');
+
+  return buildJwtToken([
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9',
+    payload,
+    'testsignature1234567890',
+  ]);
+}
+
 async function installApiMocks(page: Page, stateOverrides: Partial<MockState> = {}) {
   const state: MockState = {
     authenticated: true,
@@ -99,27 +121,63 @@ async function installApiMocks(page: Page, stateOverrides: Partial<MockState> = 
     ...stateOverrides,
   };
 
-  await page.route('**/auth/session', async (route) => {
+  const accessToken = buildAuthTestAccessToken();
+
+  await page.addInitScript(({ authenticated, token }) => {
+    const sessionKey = 'financemgmtbot-admin-auth-test-session-v2';
+    const profileKey = 'financemgmtbot-admin-profile-v2';
+
+    window.localStorage.removeItem(sessionKey);
+    window.localStorage.removeItem(profileKey);
+
+    if (authenticated) {
+      window.localStorage.setItem(sessionKey, JSON.stringify({
+        accessToken: token,
+        refreshToken: 'auth-test-refresh-session',
+        user: {
+          id: 'user-1',
+          email: 'admin@example.com',
+        },
+      }));
+      window.localStorage.setItem(profileKey, JSON.stringify({
+        id: 'user-1',
+        email: 'admin@example.com',
+      }));
+    }
+  }, {
+    authenticated: state.authenticated,
+    token: accessToken,
+  });
+
+  await page.route('**/__test__/auth/magic-link', async (route) => {
+    const payload = route.request().postDataJSON() as { email: string; redirectTo: string };
+    state.magicLinkRequests.push(payload);
+    return jsonResponse(route, {
+      status: 'ok',
+      magicLink: {
+        link: `http://127.0.0.1/auth-test#email=${encodeURIComponent(payload.email)}`,
+      },
+    });
+  });
+
+  await page.route('**/api/admin/me', async (route) => {
     if (!state.authenticated) {
-      return jsonResponse(route, { status: 'ok', authenticated: false });
+      return jsonResponse(route, {
+        message: 'Sua sessao expirou. Faca login novamente.',
+        code: 'AUTH_SESSION_INVALID',
+        requestId: 'req_mock_1',
+      }, 401);
     }
 
     return jsonResponse(route, {
       status: 'ok',
       authenticated: true,
-      csrfToken: 'csrf-token',
+      authorized: true,
       user: {
         id: 'user-1',
         email: 'admin@example.com',
       },
-      expiresAt: '2099-04-03T12:00:00Z',
     });
-  });
-
-  await page.route('**/auth/magic-link', async (route) => {
-    const payload = route.request().postDataJSON() as { email: string; redirectTo: string };
-    state.magicLinkRequests.push(payload);
-    return jsonResponse(route, { status: 'ok', message: 'If the e-mail is authorized, a magic link will be sent shortly.' });
   });
 
   await page.route('**/auth/logout', async (route) => {

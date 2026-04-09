@@ -80,6 +80,17 @@ def normalize_public_url(raw_url: str | None, *, trailing_slash: bool = False):
     base = normalized.rstrip("/")
     return f"{base}/" if trailing_slash else base
 
+
+def normalize_build_id(raw_value: str | None):
+    normalized = (raw_value or "").strip()
+    if not normalized:
+        return ""
+    if len(normalized) > 32:
+        return ""
+    if not all(char.isalnum() or char in "._-" for char in normalized):
+        return ""
+    return normalized
+
 REQUIRED_VARS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_SECRET_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"]
 for var in REQUIRED_VARS:
     if not os.environ.get(var):

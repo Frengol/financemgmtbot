@@ -1,29 +1,38 @@
-import type { ReactNode } from 'react';
-import { createContext, startTransition, useContext, useEffect, useState } from 'react';
-import { getAuthSession, localDevBypassEnabled, logoutAuthSession } from '@/lib/adminApi';
 import {
-  browserAdminTestSessionAllowed,
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+import {
+  ApiError,
+  getAdminMe,
+  localDevBypassEnabled,
+  logoutAuthSession,
+} from '@/lib/adminApi';
+import {
+  browserAdminAuthTestModeEnabled,
+  clearBrowserAdminLoginNotice,
   decodeAccessTokenIdentity,
-  loadBrowserAdminProfile,
   loadBrowserAdminTestSession,
+  saveBrowserAdminLoginNotice,
   saveBrowserAdminProfile,
-  clearBrowserAdminArtifacts,
-  isJwtShapeValid,
 } from '@/lib/auth';
-import { clearBrowserAuthState, supabase } from '@/lib/supabase';
+import {
+  clearBrowserAuthState,
+  purgeLegacyBrowserAuthStorage,
+  setCachedBrowserAccessToken,
+  supabase,
+} from '@/lib/supabase';
 
 type AuthUser = {
   id: string;
   email?: string | null;
 };
-
-type SessionLike = {
-  access_token?: string;
-  user?: {
-    id: string;
-    email?: string | null;
-  } | null;
-} | null;
 
 type AuthContextValue = {
   authenticated: boolean;
@@ -31,222 +40,274 @@ type AuthContextValue = {
   csrfToken: string;
   loading: boolean;
   localBypass: boolean;
-  signOut: () => Promise<void>;
   refreshSession: () => Promise<void>;
+  signOut: () => Promise<void>;
+};
+
+type AuthState = {
+  authenticated: boolean;
+  user: AuthUser | null;
+  csrfToken: string;
+  loading: boolean;
+  localBypass: boolean;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-function stripTokenFragment() {
-  if (typeof window === 'undefined') {
-    return;
-  }
+const UNAUTHENTICATED_STATE: AuthState = {
+  authenticated: false,
+  user: null,
+  csrfToken: '',
+  loading: true,
+  localBypass: false,
+};
 
-  if (window.location.pathname.endsWith('/auth/callback')) {
-    return;
-  }
+const LOCAL_BYPASS_STATE: AuthState = {
+  authenticated: true,
+  user: {
+    id: 'local-dev',
+    email: 'local-dev@localhost',
+  },
+  csrfToken: 'local-dev-csrf',
+  loading: false,
+  localBypass: true,
+};
 
-  const hash = window.location.hash || '';
-  if (!hash.includes('access_token=') && !hash.includes('refresh_token=')) {
-    return;
-  }
-
-  const cleanUrl = `${window.location.pathname}${window.location.search}`;
-  window.history.replaceState({}, document.title, cleanUrl);
+function isJwtShapeValid(token?: string | null) {
+  return typeof token === 'string' && token.split('.').length === 3;
 }
 
-function isAuthCallbackRoute() {
-  return typeof window !== 'undefined' && window.location.pathname.endsWith('/auth/callback');
-}
-
-function buildAuthUser(session: SessionLike): AuthUser | null {
-  if (!session?.access_token || !isJwtShapeValid(session.access_token)) {
-    return null;
-  }
-
-  const claims = decodeAccessTokenIdentity(session.access_token);
-  const storedProfile = loadBrowserAdminProfile();
-  const userId = session.user?.id || claims?.id || storedProfile?.id;
-  const email = session.user?.email ?? claims?.email ?? storedProfile?.email ?? null;
-
-  if (!userId) {
+function toAuthUser(user?: { id?: string | null; email?: string | null } | null): AuthUser | null {
+  if (!user?.id) {
     return null;
   }
 
   return {
-    id: userId,
-    email,
+    id: user.id,
+    email: user.email ?? null,
   };
 }
 
+function fallbackUserFromAccessToken(accessToken?: string | null) {
+  return decodeAccessTokenIdentity(accessToken);
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [authenticated, setAuthenticated] = useState(false);
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [csrfToken, setCsrfToken] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [state, setState] = useState<AuthState>(
+    localDevBypassEnabled ? LOCAL_BYPASS_STATE : UNAUTHENTICATED_STATE,
+  );
+  const mountedRef = useRef(true);
 
-  const refreshSession = async () => {
-    const authCallbackRoute = isAuthCallbackRoute();
-    const allowLegacyBackendFallback = browserAdminTestSessionAllowed();
+  const setSafeState = useCallback((nextState: AuthState) => {
+    if (!mountedRef.current) {
+      return;
+    }
+    setState(nextState);
+  }, []);
 
-    if (localDevBypassEnabled) {
-      startTransition(() => {
-        setAuthenticated(true);
-        setUser({
-          id: 'local-dev',
-          email: 'local-dev@localhost',
-        });
-        setCsrfToken('local-dev-csrf');
-        setLoading(false);
+  const setLoggedOutState = useCallback((loading = false) => {
+    setCachedBrowserAccessToken(null);
+    setSafeState({
+      authenticated: false,
+      user: null,
+      csrfToken: '',
+      loading,
+      localBypass: false,
+    });
+  }, [setSafeState]);
+
+  const persistAuthFailure = useCallback(async (message: string) => {
+    await clearBrowserAuthState();
+    saveBrowserAdminLoginNotice({ message });
+    setLoggedOutState(false);
+  }, [setLoggedOutState]);
+
+  const authorizeAccessToken = useCallback(async (
+    accessToken: string,
+    browserUser?: { id?: string | null; email?: string | null } | null,
+  ) => {
+    if (!isJwtShapeValid(accessToken)) {
+      await persistAuthFailure(
+        'Sua sessao de acesso e invalida. Faca login novamente. Diagnostico: auth_state_unusable',
+      );
+      return;
+    }
+
+    setCachedBrowserAccessToken(accessToken);
+
+    try {
+      const payload = await getAdminMe(accessToken);
+      if (!payload.authenticated || !payload.authorized) {
+        throw new ApiError(
+          'Seu usuario nao esta autorizado a acessar o painel.',
+          {
+            code: 'AUTH_ACCESS_DENIED',
+            status: 403,
+          },
+        );
+      }
+
+      const authorizedUser = toAuthUser(payload.user)
+        || toAuthUser(browserUser)
+        || fallbackUserFromAccessToken(accessToken);
+
+      if (!authorizedUser) {
+        throw new ApiError(
+          'Nao foi possivel validar sua sessao agora. Faca login novamente.',
+          {
+            code: 'AUTH_SESSION_INVALID',
+            diagnostic: 'auth_state_unusable',
+            status: 401,
+          },
+        );
+      }
+
+      clearBrowserAdminLoginNotice();
+      saveBrowserAdminProfile(authorizedUser);
+      setSafeState({
+        authenticated: true,
+        user: authorizedUser,
+        csrfToken: '',
+        loading: false,
+        localBypass: false,
       });
+    } catch (error) {
+      if (error instanceof ApiError) {
+        await persistAuthFailure(error.message);
+        return;
+      }
+
+      await persistAuthFailure(
+        'Nao foi possivel validar sua sessao agora. Faca login novamente. Diagnostico: auth_validation_failed',
+      );
+    }
+  }, [persistAuthFailure, setSafeState]);
+
+  const refreshSession = useCallback(async () => {
+    if (localDevBypassEnabled) {
+      purgeLegacyBrowserAuthStorage();
+      clearBrowserAdminLoginNotice();
+      setSafeState(LOCAL_BYPASS_STATE);
+      return;
+    }
+
+    const authTestMode = browserAdminAuthTestModeEnabled();
+
+    if (mountedRef.current) {
+      setState((currentState) => ({
+        ...currentState,
+        loading: true,
+      }));
+    }
+    purgeLegacyBrowserAuthStorage();
+
+    if (authTestMode) {
+      const authTestSession = loadBrowserAdminTestSession();
+      if (authTestSession?.accessToken && authTestSession.user?.id) {
+        setCachedBrowserAccessToken(authTestSession.accessToken);
+        saveBrowserAdminProfile(authTestSession.user);
+        clearBrowserAdminLoginNotice();
+        setSafeState({
+          authenticated: true,
+          user: authTestSession.user,
+          csrfToken: '',
+          loading: false,
+          localBypass: false,
+        });
+        return;
+      }
+
+      setLoggedOutState(false);
       return;
     }
 
     try {
-      const browserAuthTestSession = allowLegacyBackendFallback ? loadBrowserAdminTestSession() : null;
-      if (browserAuthTestSession?.accessToken && browserAuthTestSession.user?.id) {
-        startTransition(() => {
-          setAuthenticated(true);
-          setUser(browserAuthTestSession.user);
-          setCsrfToken('');
-          setLoading(false);
-        });
-        return;
-      }
-
       const { data } = await supabase.auth.getSession();
-      const session = data.session;
-      const authUser = buildAuthUser(session);
-      if (session?.access_token && authUser) {
-        saveBrowserAdminProfile(authUser);
-        startTransition(() => {
-          setAuthenticated(true);
-          setUser(authUser);
-          setCsrfToken('');
-          setLoading(false);
-        });
+      const session = data.session ?? null;
+      const accessToken = session?.access_token ?? null;
+
+      if (!accessToken) {
+        setLoggedOutState(false);
         return;
       }
 
-      if (session?.access_token && !authUser) {
-        await clearBrowserAuthState();
-      }
-
-      if (authCallbackRoute) {
-        startTransition(() => {
-          setAuthenticated(false);
-          setUser(null);
-          setCsrfToken('');
-          setLoading(false);
-        });
-        return;
-      }
-
-      if (!allowLegacyBackendFallback) {
-        clearBrowserAdminArtifacts();
-        startTransition(() => {
-          setAuthenticated(false);
-          setUser(null);
-          setCsrfToken('');
-          setLoading(false);
-        });
-        return;
-      }
-
-      const payload = await getAuthSession();
-      if (!payload.authenticated) {
-        clearBrowserAdminArtifacts();
-      }
-      startTransition(() => {
-        setAuthenticated(Boolean(payload.authenticated));
-        setUser(payload.user || null);
-        setCsrfToken(payload.csrfToken || '');
-        setLoading(false);
-      });
+      await authorizeAccessToken(accessToken, session?.user ?? null);
     } catch {
-      if (!authCallbackRoute) {
-        clearBrowserAdminArtifacts();
-      }
-      startTransition(() => {
-        setAuthenticated(false);
-        setUser(null);
-        setCsrfToken('');
-        setLoading(false);
-      });
+      await clearBrowserAuthState();
+      setLoggedOutState(false);
     }
-  };
+  }, [authorizeAccessToken, setLoggedOutState, setSafeState]);
+
+  const signOut = useCallback(async () => {
+    if (localDevBypassEnabled) {
+      purgeLegacyBrowserAuthStorage();
+      clearBrowserAdminLoginNotice();
+      setLoggedOutState(false);
+      return;
+    }
+
+    await clearBrowserAuthState();
+    try {
+      await logoutAuthSession();
+    } catch {
+      // Legacy cookie cleanup is best-effort only.
+    }
+    clearBrowserAdminLoginNotice();
+    setLoggedOutState(false);
+  }, [setLoggedOutState]);
 
   useEffect(() => {
-    let mounted = true;
-    stripTokenFragment();
+    mountedRef.current = true;
+    const authTestMode = browserAdminAuthTestModeEnabled();
 
-    const load = async () => {
-      await refreshSession();
-      if (!mounted) {
-        return;
-      }
-    };
+    if (!localDevBypassEnabled) {
+      void refreshSession();
+    }
 
-    void load();
+    if (localDevBypassEnabled || authTestMode) {
+      return () => {
+        mountedRef.current = false;
+      };
+    }
 
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_, session) => {
-      if (!session?.access_token) {
-        void refreshSession();
-        return;
-      }
-
-      const authUser = buildAuthUser(session);
-      if (!authUser) {
-        void refreshSession();
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!mountedRef.current || localDevBypassEnabled) {
         return;
       }
 
-      saveBrowserAdminProfile(authUser);
-      startTransition(() => {
-        setAuthenticated(true);
-        setUser(authUser);
-        setCsrfToken('');
-        setLoading(false);
-      });
+      if (event === 'SIGNED_OUT') {
+        setLoggedOutState(false);
+        return;
+      }
+
+      if (event === 'INITIAL_SESSION' || event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+        const accessToken = session?.access_token ?? null;
+        if (!accessToken) {
+          setLoggedOutState(false);
+          return;
+        }
+        void authorizeAccessToken(accessToken, session?.user ?? null);
+      }
     });
 
-    const onFocus = () => {
-      void refreshSession();
-    };
-    window.addEventListener('focus', onFocus);
-
     return () => {
-      mounted = false;
+      mountedRef.current = false;
       subscription.unsubscribe();
-      window.removeEventListener('focus', onFocus);
     };
-  }, []);
+  }, [authorizeAccessToken, refreshSession, setLoggedOutState]);
+
+  const value = useMemo<AuthContextValue>(() => ({
+    authenticated: state.authenticated,
+    user: state.user,
+    csrfToken: state.csrfToken,
+    loading: state.loading,
+    localBypass: state.localBypass,
+    refreshSession,
+    signOut,
+  }), [refreshSession, signOut, state]);
 
   return (
-    <AuthContext.Provider
-      value={{
-        authenticated,
-        user,
-        csrfToken,
-        loading,
-        localBypass: localDevBypassEnabled,
-        signOut: async () => {
-          if (!localDevBypassEnabled) {
-            await clearBrowserAuthState();
-            await logoutAuthSession().catch(() => undefined);
-          }
-          clearBrowserAdminArtifacts();
-          startTransition(() => {
-            setAuthenticated(false);
-            setUser(null);
-            setCsrfToken('');
-          });
-        },
-        refreshSession,
-      }}
-    >
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );
@@ -257,6 +318,5 @@ export function useAuth() {
   if (!context) {
     throw new Error('useAuth must be used within AuthProvider.');
   }
-
   return context;
 }

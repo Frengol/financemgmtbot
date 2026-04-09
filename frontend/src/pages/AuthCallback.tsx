@@ -1,16 +1,18 @@
 import { useEffect, useState } from 'react';
 import { Activity, Loader2 } from 'lucide-react';
 import {
-  browserAdminTestSessionAllowed,
+  browserAdminAuthTestModeEnabled,
   clearBrowserAdminProfile,
+  clearBrowserAdminLoginNotice,
   clearBrowserAdminTestSession,
   decodeAccessTokenIdentity,
   isJwtShapeValid,
-  loadBrowserAdminTestSession,
+  saveBrowserAdminLoginNotice,
   saveBrowserAdminProfile,
   saveBrowserAdminTestSession,
 } from '@/lib/auth';
-import { clearBrowserAuthState, supabase } from '@/lib/supabase';
+import { ApiError, getAdminMe } from '@/lib/adminApi';
+import { clearBrowserAuthState, setCachedBrowserAccessToken, supabase } from '@/lib/supabase';
 
 function decodeAuthValue(value: string | null) {
   if (!value) {
@@ -102,6 +104,32 @@ function resolveAuthProfile(options: {
   };
 }
 
+async function waitForBrowserSession() {
+  const currentSession = await supabase.auth.getSession();
+  const currentAccessToken = currentSession.data.session?.access_token ?? null;
+  if (currentAccessToken) {
+    if (!isJwtShapeValid(currentAccessToken)) {
+      return 'invalid';
+    }
+    return currentSession.data.session;
+  }
+
+  return new Promise<any | null>((resolve) => {
+    const timeoutId = window.setTimeout(() => {
+      subscription.data.subscription.unsubscribe();
+      resolve(null);
+    }, 4000);
+
+    const subscription = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.access_token && isJwtShapeValid(session.access_token)) {
+        window.clearTimeout(timeoutId);
+        subscription.data.subscription.unsubscribe();
+        resolve(session);
+      }
+    });
+  });
+}
+
 export default function AuthCallback() {
   const [error, setError] = useState('');
 
@@ -112,23 +140,6 @@ export default function AuthCallback() {
       const failLogin = async (diagnostic?: string) => {
         await clearBrowserAuthState();
         setError(withDiagnostic('Nao foi possivel concluir o login com este link. Solicite um novo magic link.', diagnostic));
-      };
-
-      const loadValidatedPersistedSession = async (diagnostic: string) => {
-        const { data } = await supabase.auth.getSession();
-        const persistedAccessToken = data.session?.access_token ?? null;
-        const persistedProfile = resolveAuthProfile({
-          accessToken: persistedAccessToken,
-          user: data.session?.user,
-          fallbackProfile: callbackProfile,
-        });
-
-        if (!persistedAccessToken || !isJwtShapeValid(persistedAccessToken) || !persistedProfile) {
-          await failLogin(diagnostic);
-          return null;
-        }
-
-        return persistedProfile;
       };
 
       const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
@@ -144,69 +155,10 @@ export default function AuthCallback() {
       }
 
       const callbackProfile = fallbackProfileFromCallback(queryParams, hashParams);
-      const code = (queryParams.get('code') || '').trim();
-      if (code) {
-        const { data, error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
-
-        if (cancelled) {
-          return;
-        }
-
-        if (exchangeError || !data.session?.access_token) {
-          await failLogin('exchange_failed');
-          return;
-        }
-
-        const resolvedProfile = await loadValidatedPersistedSession('session_store_invalid');
-        if (!resolvedProfile || cancelled) {
-          return;
-        }
-        clearBrowserAdminTestSession();
-        saveBrowserAdminProfile(resolvedProfile);
-        window.location.replace(buildHomeUrl());
-        return;
-      }
-
       const accessToken = hashParams.get('access_token');
       const refreshToken = hashParams.get('refresh_token');
-      if (!accessToken || !refreshToken) {
-        const existingBrowserAuthTestSession = loadBrowserAdminTestSession();
-        if (
-          browserAdminTestSessionAllowed()
-          && existingBrowserAuthTestSession?.accessToken
-          && existingBrowserAuthTestSession.user?.id
-          && isJwtShapeValid(existingBrowserAuthTestSession.accessToken)
-        ) {
-          saveBrowserAdminProfile(existingBrowserAuthTestSession.user);
-          window.location.replace(buildHomeUrl());
-          return;
-        }
 
-        const { data } = await supabase.auth.getSession();
-        if (data.session?.access_token && !isJwtShapeValid(data.session.access_token)) {
-          await failLogin('auth_state_unusable');
-          clearTokenFragment();
-          return;
-        }
-        const existingProfile = resolveAuthProfile({
-          accessToken: data.session?.access_token,
-          user: data.session?.user,
-          fallbackProfile: callbackProfile,
-        });
-        if (data.session?.access_token && existingProfile) {
-          saveBrowserAdminProfile(existingProfile);
-          window.location.replace(buildHomeUrl());
-          return;
-        }
-      }
-
-      if (!accessToken || !refreshToken) {
-        await failLogin('callback_tokens_missing');
-        clearTokenFragment();
-        return;
-      }
-
-      if (callbackProfile && browserAdminTestSessionAllowed()) {
+      if (callbackProfile && browserAdminAuthTestModeEnabled() && accessToken && refreshToken) {
         saveBrowserAdminProfile(callbackProfile);
         saveBrowserAdminTestSession({
           accessToken,
@@ -217,27 +169,52 @@ export default function AuthCallback() {
         window.location.replace(buildHomeUrl());
         return;
       }
-
-      const { error: sessionError } = await supabase.auth.setSession({
-        access_token: accessToken,
-        refresh_token: refreshToken,
-      });
-
       clearTokenFragment();
 
+
+      const browserSession = await waitForBrowserSession();
       if (cancelled) {
         return;
       }
 
-      if (sessionError) {
-        await failLogin('session_exchange_failed');
+      if (browserSession === 'invalid') {
+        await failLogin('session_store_invalid');
         return;
       }
 
-      const resolvedProfile = await loadValidatedPersistedSession('session_store_invalid');
-      if (!resolvedProfile || cancelled) {
+      const resolvedProfile = resolveAuthProfile({
+        accessToken: browserSession?.access_token ?? null,
+        user: browserSession?.user ?? null,
+        fallbackProfile: callbackProfile,
+      });
+
+      if (!browserSession?.access_token || !isJwtShapeValid(browserSession.access_token) || !resolvedProfile) {
+        await failLogin('session_store_invalid');
         return;
       }
+
+      try {
+        setCachedBrowserAccessToken(browserSession.access_token);
+        const adminIdentity = await getAdminMe(browserSession.access_token);
+        if (!adminIdentity.authenticated || !adminIdentity.authorized) {
+          throw new ApiError('Seu usuario nao esta autorizado a acessar o painel.', {
+            code: 'AUTH_ACCESS_DENIED',
+            status: 403,
+          });
+        }
+      } catch (authError) {
+        const message = authError instanceof Error
+          ? authError.message
+          : 'Nao foi possivel validar sua sessao agora. Faca login novamente.';
+        await clearBrowserAuthState();
+        saveBrowserAdminLoginNotice({ message });
+        if (!cancelled) {
+          window.location.replace(buildLoginUrl());
+        }
+        return;
+      }
+
+      clearBrowserAdminLoginNotice();
       clearBrowserAdminTestSession();
       saveBrowserAdminProfile(resolvedProfile);
       window.location.replace(buildHomeUrl());

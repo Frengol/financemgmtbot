@@ -7,17 +7,14 @@ import MainLayout from './MainLayout';
 const mockSignOut = vi.fn();
 const mockOpenCreate = vi.fn();
 const mockGetTransactions = vi.fn();
+const mockUseAuth = vi.fn();
 
 vi.mock('@/lib/adminApi', () => ({
   getTransactions: (...args: unknown[]) => mockGetTransactions(...args),
 }));
 
 vi.mock('@/hooks/useAuth', () => ({
-  useAuth: () => ({
-    authenticated: true,
-    user: { email: 'test@example.com' },
-    signOut: mockSignOut,
-  }),
+  useAuth: () => mockUseAuth(),
 }));
 
 vi.mock('@/hooks/useTransactionComposer', () => ({
@@ -28,9 +25,17 @@ vi.mock('@/hooks/useTransactionComposer', () => ({
 
 describe('MainLayout mobile navigation', () => {
   beforeEach(() => {
+    mockGetTransactions.mockReset();
     mockGetTransactions.mockResolvedValue({ transactions: [] });
     mockSignOut.mockReset();
     mockOpenCreate.mockReset();
+    mockUseAuth.mockReset();
+    mockUseAuth.mockReturnValue({
+      authenticated: true,
+      loading: false,
+      user: { email: 'test@example.com' },
+      signOut: mockSignOut,
+    });
   });
 
   function renderLayout(initialEntry = '/') {
@@ -40,6 +45,9 @@ describe('MainLayout mobile navigation', () => {
           <Route path="/" element={<MainLayout />}>
             <Route index element={<div>Dashboard content</div>} />
             <Route path="historico" element={<div>Historico content</div>} />
+          </Route>
+          <Route path="/auth/callback" element={<MainLayout />}>
+            <Route index element={<div>Callback content</div>} />
           </Route>
         </Routes>
       </MemoryRouter>,
@@ -74,6 +82,20 @@ describe('MainLayout mobile navigation', () => {
 
     await user.keyboard('{Control>}k{/Control}');
     expect(mockOpenCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the admin health check while auth is loading, unauthenticated or inside the callback route', async () => {
+    mockUseAuth.mockReturnValue({
+      authenticated: false,
+      loading: true,
+      user: null,
+      signOut: mockSignOut,
+    });
+
+    renderLayout('/auth/callback');
+
+    expect(await screen.findByText('Offline')).toBeInTheDocument();
+    expect(mockGetTransactions).not.toHaveBeenCalled();
   });
 
   it('closes the mobile menu on escape, overlay click, navigation and mobile sign-out', async () => {

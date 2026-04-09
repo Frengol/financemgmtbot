@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import {
-  browserAdminTestSessionAllowed,
+  browserAdminAuthTestModeEnabled,
   clearBrowserAdminArtifacts,
   isJwtShapeValid,
   loadBrowserAdminTestSession,
@@ -8,19 +8,33 @@ import {
 
 const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL || 'http://127.0.0.1:54321').trim().replace(/\/$/, '');
 const supabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || 'public-anon-key-for-local-tests').trim();
-export const supabaseBrowserSessionStorageKey = 'financemgmtbot-admin-auth';
+export const legacySupabaseBrowserSessionStorageKey = 'financemgmtbot-admin-auth';
+export const supabaseBrowserSessionStorageKey = 'financemgmtbot-admin-auth-v2';
+let cachedBrowserAccessToken: string | null = null;
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     autoRefreshToken: true,
-    detectSessionInUrl: false,
+    detectSessionInUrl: true,
     persistSession: true,
     storageKey: supabaseBrowserSessionStorageKey,
   },
 });
 
-export async function clearBrowserAuthState() {
+export function setCachedBrowserAccessToken(token?: string | null) {
+  cachedBrowserAccessToken = isJwtShapeValid(token) ? (token ?? null) : null;
+}
+
+export function purgeLegacyBrowserAuthStorage() {
   if (typeof window !== 'undefined') {
+    window.localStorage.removeItem(legacySupabaseBrowserSessionStorageKey);
+  }
+}
+
+export async function clearBrowserAuthState() {
+  cachedBrowserAccessToken = null;
+  if (typeof window !== 'undefined') {
+    purgeLegacyBrowserAuthStorage();
     window.localStorage.removeItem(supabaseBrowserSessionStorageKey);
   }
   clearBrowserAdminArtifacts();
@@ -32,8 +46,15 @@ export async function clearBrowserAuthState() {
 }
 
 export async function getAccessToken() {
-  const browserAuthTestSession = browserAdminTestSessionAllowed() ? loadBrowserAdminTestSession() : null;
+  purgeLegacyBrowserAuthStorage();
+
+  if (cachedBrowserAccessToken && isJwtShapeValid(cachedBrowserAccessToken)) {
+    return cachedBrowserAccessToken;
+  }
+
+  const browserAuthTestSession = browserAdminAuthTestModeEnabled() ? loadBrowserAdminTestSession() : null;
   if (browserAuthTestSession?.accessToken) {
+    setCachedBrowserAccessToken(browserAuthTestSession.accessToken);
     return browserAuthTestSession.accessToken;
   }
 
@@ -44,5 +65,6 @@ export async function getAccessToken() {
     return null;
   }
 
+  setCachedBrowserAccessToken(accessToken);
   return accessToken;
 }

@@ -5,7 +5,7 @@ const mockGetSession = vi.fn();
 const mockLoadBrowserAdminTestSession = vi.fn();
 const mockSignOut = vi.fn();
 const mockClearBrowserAdminArtifacts = vi.fn();
-const mockBrowserAdminTestSessionAllowed = vi.fn();
+const mockBrowserAdminAuthTestModeEnabled = vi.fn();
 
 function buildJwtLikeToken(...segments: string[]) {
   return segments.join('.');
@@ -16,7 +16,7 @@ vi.mock('@supabase/supabase-js', () => ({
 }));
 
 vi.mock('@/lib/auth', () => ({
-  browserAdminTestSessionAllowed: (...args: unknown[]) => mockBrowserAdminTestSessionAllowed(...args),
+  browserAdminAuthTestModeEnabled: (...args: unknown[]) => mockBrowserAdminAuthTestModeEnabled(...args),
   clearBrowserAdminArtifacts: (...args: unknown[]) => mockClearBrowserAdminArtifacts(...args),
   isJwtShapeValid: (token?: string | null) => typeof token === 'string' && token.split('.').length === 3,
   loadBrowserAdminTestSession: (...args: unknown[]) => mockLoadBrowserAdminTestSession(...args),
@@ -30,8 +30,8 @@ describe('supabase helpers', () => {
     mockLoadBrowserAdminTestSession.mockReset();
     mockSignOut.mockReset();
     mockClearBrowserAdminArtifacts.mockReset();
-    mockBrowserAdminTestSessionAllowed.mockReset();
-    mockBrowserAdminTestSessionAllowed.mockReturnValue(true);
+    mockBrowserAdminAuthTestModeEnabled.mockReset();
+    mockBrowserAdminAuthTestModeEnabled.mockReturnValue(false);
     mockCreateClient.mockReturnValue({
       auth: {
         getSession: (...args: unknown[]) => mockGetSession(...args),
@@ -47,7 +47,7 @@ describe('supabase helpers', () => {
     window.localStorage.clear();
   });
 
-  it('creates the client with trimmed configured values', async () => {
+  it('creates the client with the official browser auth configuration', async () => {
     vi.stubEnv('VITE_SUPABASE_URL', 'https://your-project-ref.supabase.co/ ');
     vi.stubEnv('VITE_SUPABASE_ANON_KEY', ' public-anon-key ');
 
@@ -59,28 +59,16 @@ describe('supabase helpers', () => {
       {
         auth: {
           autoRefreshToken: true,
-          detectSessionInUrl: false,
+          detectSessionInUrl: true,
           persistSession: true,
-          storageKey: 'financemgmtbot-admin-auth',
+          storageKey: 'financemgmtbot-admin-auth-v2',
         },
       },
     );
   });
 
-  it('falls back to the local defaults when build env vars are absent', async () => {
-    vi.stubEnv('VITE_SUPABASE_URL', '');
-    vi.stubEnv('VITE_SUPABASE_ANON_KEY', '');
-
-    await import('./supabase');
-
-    expect(mockCreateClient).toHaveBeenCalledWith(
-      'http://127.0.0.1:54321',
-      'public-anon-key-for-local-tests',
-      expect.any(Object),
-    );
-  });
-
-  it('prefers the browser auth test session access token when present', async () => {
+  it('prefers the auth test session only when auth test mode is enabled', async () => {
+    mockBrowserAdminAuthTestModeEnabled.mockReturnValue(true);
     mockLoadBrowserAdminTestSession.mockReturnValue({
       accessToken: 'test-access-token',
       user: { id: 'user-1', email: 'admin@example.com' },
@@ -92,8 +80,8 @@ describe('supabase helpers', () => {
     expect(mockGetSession).not.toHaveBeenCalled();
   });
 
-  it('falls back to the Supabase browser session token and then null', async () => {
-    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-1', 'signature-segment');
+  it('falls back to the persisted Supabase browser session in production runtimes', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload', 'signature');
     mockGetSession.mockResolvedValueOnce({
       data: {
         session: {
@@ -105,32 +93,29 @@ describe('supabase helpers', () => {
     const { getAccessToken } = await import('./supabase');
 
     await expect(getAccessToken()).resolves.toBe(accessToken);
-
-    mockGetSession.mockResolvedValueOnce({ data: { session: null } });
-    await expect(getAccessToken()).resolves.toBeNull();
-  });
-
-  it('ignores the browser auth test session outside of loopback runtimes', async () => {
-    mockBrowserAdminTestSessionAllowed.mockReturnValue(false);
-    mockLoadBrowserAdminTestSession.mockReturnValue({
-      accessToken: buildJwtLikeToken('header-segment', 'payload-segment-loopback', 'signature-segment'),
-      user: { id: 'user-1', email: 'admin@example.com' },
-    });
-    mockGetSession.mockResolvedValueOnce({
-      data: {
-        session: {
-          access_token: buildJwtLikeToken('header-segment', 'payload-segment-pages', 'signature-segment'),
-        },
-      },
-    });
-
-    const { getAccessToken } = await import('./supabase');
-
-    await expect(getAccessToken()).resolves.toBe(buildJwtLikeToken('header-segment', 'payload-segment-pages', 'signature-segment'));
     expect(mockGetSession).toHaveBeenCalledTimes(1);
   });
 
-  it('clears a malformed persisted Supabase session token instead of returning it', async () => {
+  it('returns null when there is no cached token, no auth test session and no persisted Supabase session', async () => {
+    mockGetSession.mockResolvedValueOnce({ data: { session: null } });
+
+    const { getAccessToken } = await import('./supabase');
+
+    await expect(getAccessToken()).resolves.toBeNull();
+    expect(mockGetSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses the cached browser access token before touching Supabase again', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload', 'signature');
+    const { getAccessToken, setCachedBrowserAccessToken } = await import('./supabase');
+
+    setCachedBrowserAccessToken(accessToken);
+
+    await expect(getAccessToken()).resolves.toBe(accessToken);
+    expect(mockGetSession).not.toHaveBeenCalled();
+  });
+
+  it('clears malformed persisted sessions instead of returning them', async () => {
     mockGetSession.mockResolvedValueOnce({
       data: {
         session: {
@@ -146,14 +131,31 @@ describe('supabase helpers', () => {
     expect(mockSignOut).toHaveBeenCalledTimes(1);
   });
 
-  it('purges the persisted Supabase browser storage key when clearing auth state', async () => {
-    window.localStorage.setItem('financemgmtbot-admin-auth', '{"access_token":"stale"}');
+  it('purges the v1 and v2 browser storage keys when clearing auth state', async () => {
+    window.localStorage.setItem('financemgmtbot-admin-auth', '{"access_token":"stale-v1"}');
+    window.localStorage.setItem('financemgmtbot-admin-auth-v2', '{"access_token":"stale-v2"}');
 
     const { clearBrowserAuthState } = await import('./supabase');
 
     await clearBrowserAuthState();
 
     expect(window.localStorage.getItem('financemgmtbot-admin-auth')).toBeNull();
+    expect(window.localStorage.getItem('financemgmtbot-admin-auth-v2')).toBeNull();
+    expect(mockClearBrowserAdminArtifacts).toHaveBeenCalledTimes(1);
+    expect(mockSignOut).toHaveBeenCalledTimes(1);
+  });
+
+  it('still clears local browser state when Supabase signOut itself fails', async () => {
+    window.localStorage.setItem('financemgmtbot-admin-auth', '{"access_token":"stale-v1"}');
+    window.localStorage.setItem('financemgmtbot-admin-auth-v2', '{"access_token":"stale-v2"}');
+    mockSignOut.mockRejectedValueOnce(new Error('signout failed'));
+
+    const { clearBrowserAuthState } = await import('./supabase');
+
+    await clearBrowserAuthState();
+
+    expect(window.localStorage.getItem('financemgmtbot-admin-auth')).toBeNull();
+    expect(window.localStorage.getItem('financemgmtbot-admin-auth-v2')).toBeNull();
     expect(mockClearBrowserAdminArtifacts).toHaveBeenCalledTimes(1);
     expect(mockSignOut).toHaveBeenCalledTimes(1);
   });

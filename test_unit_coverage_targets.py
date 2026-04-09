@@ -2,6 +2,7 @@ import os
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from cryptography.fernet import InvalidToken
@@ -74,6 +75,8 @@ class TestMainHelperCoverage:
                 assert main._sanitize_frontend_redirect_target("https://evil.example.com") == "https://admin.example.com/app/auth/callback"
                 assert main._sanitize_frontend_app_redirect_target("") == "https://admin.example.com/app/"
                 assert main._sanitize_frontend_app_redirect_target("https://evil.example.com") == "https://admin.example.com/app/"
+                assert main._build_callback_url("https://admin.example.com/app/auth/callback", mode="canonical") == "https://admin.example.com/app/auth/callback"
+                assert main._build_callback_url("http://localhost:3000/auth/callback", mode="local_override") == "http://localhost:3000/auth/callback"
 
             with patch.object(main, "FRONTEND_PUBLIC_URL", ""), patch.object(main, "_is_loopback_request", return_value=True):
                 assert main._sanitize_frontend_redirect_target("http://localhost:3000/app") == "http://localhost:3000/app"
@@ -140,12 +143,18 @@ class TestMainHelperCoverage:
             with patch.object(main, "FRONTEND_ALLOWED_ORIGINS", frozenset({"https://admin.example.com"})):
                 response = await main.harden_response(main.Response("ok"))
             assert response.headers["Access-Control-Allow-Origin"] == "https://admin.example.com"
-            assert response.headers["Access-Control-Allow-Headers"] == "Authorization, Content-Type, X-CSRF-Token"
+            assert response.headers["Access-Control-Allow-Headers"] == "Authorization, Content-Type, X-CSRF-Token, X-Client-Build"
             assert response.headers["Cache-Control"] == "no-store, private"
 
         async with main.app.test_request_context("/plain"):
             response = await main.harden_response(main.Response("ok"))
             assert "Access-Control-Allow-Origin" not in response.headers
+
+        async with main.app.test_request_context("/__test__/auth/magic-link", headers={"Origin": "http://127.0.0.1:4175"}):
+            with patch.object(main, "FRONTEND_ALLOWED_ORIGINS", frozenset({"http://127.0.0.1:4175"})), \
+                 patch.object(main, "auth_test_mode_enabled", return_value=True):
+                response = await main.harden_response(main.Response("ok"))
+            assert response.headers["Access-Control-Allow-Origin"] == "http://127.0.0.1:4175"
 
     @pytest.mark.asyncio
     async def test_auth_session_and_test_support_routes_cover_error_paths(self):
@@ -164,6 +173,7 @@ class TestMainHelperCoverage:
                 assert (await client.post("/__test__/auth/reset")).status_code == 404
                 assert (await client.post("/__test__/auth/transactions", json={"transactions": []})).status_code == 404
                 assert (await client.get("/__test__/auth/magic-link?email=admin@example.com")).status_code == 404
+                assert (await client.options("/__test__/auth/magic-link")).status_code == 204
 
             with patch.object(main, "_test_support_request_allowed", return_value=True):
                 invalid_transactions = await client.post("/__test__/auth/transactions", json={"transactions": {"bad": "payload"}})
@@ -261,7 +271,13 @@ class TestMainHelperCoverage:
 
                 relay_resp = await client.get("/auth/callback?next=https://admin.example.com/app/")
                 assert relay_resp.status_code == 302
-                assert relay_resp.headers["Location"] == "https://admin.example.com/app/auth/callback?next=https://admin.example.com/app/"
+                relay_target = urlparse(relay_resp.headers["Location"])
+                assert relay_target.scheme == "https"
+                assert relay_target.netloc == "admin.example.com"
+                assert relay_target.path == "/app/auth/callback"
+                assert parse_qs(relay_target.query) == {
+                    "next": ["https://admin.example.com/app/"],
+                }
 
                 invalid_post = await client.post("/auth/callback", json={"redirectTo": "https://admin.example.com/app/"})
                 assert invalid_post.status_code == 400
@@ -291,10 +307,15 @@ class TestMainHelperCoverage:
                     "/auth/callback?token_hash=token-1&type=magiclink&next=https://admin.example.com/app/"
                 )
                 assert relayed.status_code == 302
-                assert relayed.headers["Location"] == (
-                    "https://admin.example.com/app/auth/callback"
-                    "?token_hash=token-1&type=magiclink&next=https://admin.example.com/app/"
-                )
+                relay_target = urlparse(relayed.headers["Location"])
+                assert relay_target.scheme == "https"
+                assert relay_target.netloc == "admin.example.com"
+                assert relay_target.path == "/app/auth/callback"
+                assert parse_qs(relay_target.query) == {
+                    "token_hash": ["token-1"],
+                    "type": ["magiclink"],
+                    "next": ["https://admin.example.com/app/"],
+                }
 
             with patch.object(main, "_test_support_request_allowed", return_value=True), \
                  patch.object(main, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), \
@@ -353,6 +374,7 @@ class TestAdminApiHelperCoverage:
         assert admin_api._extract_user_fields(None) == (None, None)
         assert admin_api._extract_user_fields({"id": "user-1", "email": "admin@example.com"}) == ("user-1", "admin@example.com")
         assert admin_api._extract_user_fields(SimpleNamespace(id="user-2", email="admin2@example.com")) == ("user-2", "admin2@example.com")
+        assert admin_api._extract_user_fields(SimpleNamespace(user=SimpleNamespace(id="user-3", email="nested@example.com"))) == ("user-3", "nested@example.com")
         assert admin_api._normalize_lookup(" Diversão Ágil ") == "diversao agil"
 
     @pytest.mark.asyncio
@@ -379,6 +401,137 @@ class TestAdminApiHelperCoverage:
 
             _, invalid_category_error = admin_api._normalize_transaction_payload({"data": "2026-04-01", "valor": 1, "categoria": "Inexistente", "descricao": "Compra"})
             assert invalid_category_error.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_admin_auth_helpers_cover_bearer_lookup_authorization_and_current_admin_branches(self):
+        async with main.app.test_request_context(
+            "/api/admin/gastos",
+            headers={
+                "Authorization": "Basic nope",
+                "X-Client-Build": "build-helper-1",
+            },
+        ):
+            assert admin_api._extract_bearer_token() is None
+
+        async with main.app.test_request_context(
+            "/api/admin/gastos",
+            headers={"Authorization": "Bearer valid.token.value"},
+        ):
+            assert admin_api._extract_bearer_token() == "valid.token.value"
+
+        assert admin_api._lookup_admin_user(None) is None
+
+        with patch.object(admin_api, "auth_test_mode_enabled", return_value=True):
+            assert admin_api._lookup_admin_user("user-test") == {"user_id": "user-test", "email": None}
+
+        with patch.object(admin_api, "auth_test_mode_enabled", return_value=False), \
+             patch.object(admin_api, "supabase", MagicMock(table=MagicMock(return_value=MagicMock(select=MagicMock(return_value=MagicMock(eq=MagicMock(return_value=MagicMock(limit=MagicMock(return_value=MagicMock(execute=MagicMock(return_value=SimpleNamespace(data=[])))))))))))):
+            assert admin_api._lookup_admin_user("missing-user") is None
+
+        non_dict_row = MagicMock()
+        non_dict_row.select.return_value.eq.return_value.limit.return_value.execute.return_value = SimpleNamespace(data=[SimpleNamespace(user_id="user-1")])
+        with patch.object(admin_api, "auth_test_mode_enabled", return_value=False), \
+             patch.object(admin_api, "supabase", MagicMock(table=MagicMock(return_value=non_dict_row))):
+            assert admin_api._lookup_admin_user("user-1") is None
+
+        log_calls: list[dict] = []
+        failing_table = MagicMock()
+        failing_table.select.return_value.eq.return_value.limit.return_value.execute.side_effect = APIError(
+            {"message": "lookup failed", "code": "PGRST116", "details": "", "hint": ""}
+        )
+        with patch.object(admin_api, "supabase", MagicMock(table=MagicMock(return_value=failing_table))), \
+             patch.object(admin_api.logger, "warning", side_effect=lambda payload: log_calls.append(payload)):
+            async with main.app.test_request_context("/api/admin/me", headers={"X-Client-Build": "build-helper-1"}):
+                actor, error = admin_api._authorize_admin_identity("user-1", "admin@example.com")
+        assert actor is None
+        assert error.status_code == 503
+        assert log_calls[-1]["event"] == "admin_authorization_lookup_failed"
+        assert log_calls[-1]["client_build"] == "build-helper-1"
+
+        with patch.object(admin_api, "_lookup_admin_user", side_effect=RuntimeError("boom")), \
+             patch.object(admin_api.logger, "warning", side_effect=lambda payload: log_calls.append(payload)):
+            async with main.app.test_request_context("/api/admin/me"):
+                actor, error = admin_api._authorize_admin_identity("user-1", "admin@example.com")
+        assert actor is None
+        assert error.status_code == 503
+        assert log_calls[-1]["event"] == "admin_authorization_lookup_unexpected"
+
+        with patch.object(admin_api, "_lookup_admin_user", return_value=None):
+            async with main.app.test_request_context("/api/admin/me"):
+                actor, error = admin_api._authorize_admin_identity("user-1", "admin@example.com")
+        assert actor is None
+        assert error.status_code == 403
+
+        with patch.object(admin_api, "_lookup_admin_user", return_value={"user_id": "user-1", "email": "admin@example.com"}), \
+             patch.object(admin_api, "ADMIN_USER_IDS", frozenset({"other-user"})), \
+             patch.object(admin_api, "ADMIN_EMAILS", frozenset()):
+            async with main.app.test_request_context("/api/admin/me"):
+                actor, error = admin_api._authorize_admin_identity("user-1", "admin@example.com")
+        assert actor is None
+        assert error.status_code == 403
+
+        with patch.object(admin_api, "_lookup_admin_user", return_value={"user_id": "user-1", "email": "admin@example.com"}), \
+             patch.object(admin_api, "ADMIN_USER_IDS", frozenset()), \
+             patch.object(admin_api, "ADMIN_EMAILS", frozenset({"blocked@example.com"})):
+            async with main.app.test_request_context("/api/admin/me"):
+                actor, error = admin_api._authorize_admin_identity("user-1", None)
+        assert actor is None
+        assert error.status_code == 403
+
+        with patch.object(admin_api, "_lookup_admin_user", return_value={"user_id": "user-1", "email": "admin@example.com"}), \
+             patch.object(admin_api, "ADMIN_USER_IDS", frozenset()), \
+             patch.object(admin_api, "ADMIN_EMAILS", frozenset({"admin@example.com"})):
+            async with main.app.test_request_context("/api/admin/me"):
+                actor, error = admin_api._authorize_admin_identity("user-1", None)
+        assert error is None
+        assert actor == {"id": "user-1", "email": "admin@example.com"}
+
+        malformed_logs: list[dict] = []
+        with patch.object(admin_api, "auth_test_mode_enabled", return_value=True), \
+             patch.object(admin_api, "resolve_test_access_token", return_value=None), \
+             patch.object(admin_api.logger, "warning", side_effect=lambda payload: malformed_logs.append(payload)):
+            async with main.app.test_request_context(
+                "/api/admin/me",
+                headers={"Authorization": "Bearer auth-test-invalid"},
+            ):
+                actor, error = admin_api.autenticar_admin_request()
+        assert actor is None
+        assert error.status_code == 401
+        assert (await error.get_json())["code"] == "AUTH_SESSION_INVALID"
+        assert malformed_logs[-1]["event"] == "admin_bearer_auth_failed"
+
+        session_logs: list[dict] = []
+        with patch.object(admin_api, "resolve_admin_session", side_effect=RuntimeError("lookup failed")), \
+             patch.object(admin_api.logger, "warning", side_effect=lambda payload: session_logs.append(payload)):
+            async with main.app.test_request_context(
+                "/api/admin/me",
+                headers={"Cookie": f"{security.SESSION_COOKIE_NAME}=opaque"},
+            ):
+                actor, error = admin_api.autenticar_admin_request()
+        assert actor is None
+        assert error.status_code == 401
+        assert session_logs[-1]["event"] == "admin_session_lookup_failed"
+
+        with patch.object(admin_api, "resolve_admin_session", return_value=None):
+            async with main.app.test_request_context(
+                "/api/admin/me",
+                headers={"Cookie": f"{security.SESSION_COOKIE_NAME}=opaque"},
+            ):
+                actor, error = admin_api.autenticar_admin_request()
+        assert actor is None
+        assert error.status_code == 401
+
+        async with main.app.test_request_context("/api/admin/me"):
+            auth_error = admin_api._json_error("denied", 403, code="AUTH_ACCESS_DENIED")
+            with patch.object(admin_api, "autenticar_admin_request", return_value=(None, auth_error)):
+                current = admin_api.obter_admin_atual()
+        assert current.status_code == 403
+
+        async with main.app.test_request_context("/api/admin/me"):
+            with patch.object(admin_api, "autenticar_admin_request", return_value=({"id": "user-1", "email": "admin@example.com"}, None)):
+                current = admin_api.obter_admin_atual()
+        assert current.status_code == 200
+        assert (await current.get_json())["user"]["id"] == "user-1"
 
     @pytest.mark.asyncio
     async def test_autenticar_admin_request_covers_local_dev_bypass_and_access_denied(self):
@@ -420,6 +573,49 @@ class TestAdminApiHelperCoverage:
         assert response.status_code == 503
         payload = await response.get_json()
         assert payload["code"] == "ADMIN_DATA_LOAD_FAILED"
+
+        api_error = APIError({"message": "db fail", "code": "500", "details": "", "hint": ""})
+        failing_cache_query = MagicMock()
+        failing_cache_query.select.return_value.order.return_value.execute.side_effect = api_error
+        with patch.object(admin_api, "autenticar_admin_request", return_value=({"id": "u1", "email": "admin@example.com"}, None)), \
+             patch.object(admin_api, "supabase", MagicMock(table=MagicMock(return_value=failing_cache_query))):
+            async with main.app.test_request_context("/api/admin/cache-aprovacao"):
+                cache_error = admin_api.listar_cache_admin()
+        assert cache_error.status_code == 503
+        assert (await cache_error.get_json())["code"] == "ADMIN_DATA_LOAD_FAILED"
+
+    @pytest.mark.asyncio
+    async def test_admin_mutation_helpers_return_auth_errors_early(self):
+        actor = {"id": "u1", "email": "admin@example.com"}
+
+        async with main.app.test_request_context("/api/admin/cache-aprovacao"):
+            auth_error = admin_api._json_error("denied", 403, code="AUTH_ACCESS_DENIED")
+            with patch.object(admin_api, "autenticar_admin_request", return_value=(None, auth_error)):
+                listar_cache_resp = admin_api.listar_cache_admin()
+        assert listar_cache_resp.status_code == 403
+
+        async with main.app.test_request_context("/api/admin/gastos/tx-1", method="PATCH"):
+            auth_error = admin_api._json_error("denied", 403, code="AUTH_ACCESS_DENIED")
+            with patch.object(admin_api, "autenticar_admin_request", return_value=(None, auth_error)):
+                update_resp = admin_api.atualizar_gasto_admin("tx-1", {"bad": "payload"})
+        assert update_resp.status_code == 403
+
+        async with main.app.test_request_context("/api/admin/cache-aprovacao/cache-1/approve", method="POST"):
+            auth_error = admin_api._json_error("denied", 403, code="AUTH_ACCESS_DENIED")
+            with patch.object(admin_api, "autenticar_admin_request", return_value=(None, auth_error)):
+                approve_resp = admin_api.aprovar_cache_admin("cache-1")
+        assert approve_resp.status_code == 403
+
+        async with main.app.test_request_context("/api/admin/cache-aprovacao/cache-1/reject", method="POST"):
+            auth_error = admin_api._json_error("denied", 403, code="AUTH_ACCESS_DENIED")
+            with patch.object(admin_api, "autenticar_admin_request", return_value=(None, auth_error)):
+                reject_resp = admin_api.rejeitar_cache_admin("cache-1")
+        assert reject_resp.status_code == 403
+
+        with patch.object(admin_api, "autenticar_admin_request", return_value=(actor, None)):
+            async with main.app.test_request_context("/api/admin/gastos/tx-1", method="PATCH"):
+                invalid_payload = admin_api.atualizar_gasto_admin("tx-1", None)
+        assert invalid_payload.status_code == 400
 
     @pytest.mark.asyncio
     async def test_list_and_mutation_routes_cover_api_errors_and_not_found_paths(self):
@@ -486,6 +682,30 @@ class TestAdminApiHelperCoverage:
             async with main.app.test_request_context("/api/admin/gastos/tx-1", method="DELETE"):
                 delete_error = admin_api.deletar_gasto_admin("tx-1")
         assert delete_error.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_listar_gastos_admin_applies_optional_date_filters_independently(self):
+        actor = {"id": "u1", "email": "admin@example.com"}
+        query = MagicMock()
+        ordered_query = MagicMock()
+        query.select.return_value.order.return_value = ordered_query
+        ordered_query.gte.return_value = ordered_query
+        ordered_query.lte.return_value = ordered_query
+        ordered_query.execute.return_value = MagicMock(data=[])
+        supabase_mock = MagicMock(table=MagicMock(return_value=query))
+
+        with patch.object(admin_api, "autenticar_admin_request", return_value=(actor, None)), \
+             patch.object(admin_api, "auth_test_mode_enabled", return_value=False), \
+             patch.object(admin_api, "supabase", supabase_mock):
+            async with main.app.test_request_context("/api/admin/gastos?date_from=2026-04-01"):
+                from_only = admin_api.listar_gastos_admin()
+            async with main.app.test_request_context("/api/admin/gastos?date_to=2026-04-30"):
+                to_only = admin_api.listar_gastos_admin()
+
+        assert from_only.status_code == 200
+        assert to_only.status_code == 200
+        assert ordered_query.gte.call_args_list[0].args == ("data", "2026-04-01")
+        assert ordered_query.lte.call_args_list[0].args == ("data", "2026-04-30")
 
     @pytest.mark.asyncio
     async def test_pending_actions_cover_missing_expired_invalid_payload_and_error_paths(self):

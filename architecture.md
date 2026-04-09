@@ -44,20 +44,22 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 
 ### 2.2 Borda Administrativa (GitHub Pages → Cloud Run)
 1. O usuário acessa a SPA em um origin público controlado, por exemplo `https://admin.example.com/`.
-2. O frontend solicita o Magic Link ao backend em `POST /auth/magic-link`.
-3. O backend valida allowlist/rate limit e pede ao Supabase o envio do Magic Link com `email_redirect_to` canônico apontando para a rota pública do frontend, por exemplo `https://admin.example.com/auth/callback`; em produção, esse callback não depende mais do `redirectTo` informado pelo navegador.
-4. O frontend recebe `access_token` e `refresh_token` do Supabase na rota `/auth/callback` e persiste a sessão usando `supabase.auth.setSession(...)`, ou troca um `code` por sessão com `supabase.auth.exchangeCodeForSession(...)` quando o provedor responder nesse formato.
-5. No GitHub Pages publicado, o contexto `useAuth` reflete exclusivamente a sessão oficial do navegador via `supabase.auth.getSession()` e `onAuthStateChange(...)`; o fallback para `GET /auth/session` fica restrito a loopback/test mode para compatibilidade local.
+2. O frontend solicita o Magic Link diretamente ao Supabase com `supabase.auth.signInWithOtp(...)`, usando `shouldCreateUser: false` e `emailRedirectTo` apontando para a rota pública `/auth/callback` do próprio Pages.
+3. O Supabase envia o Magic Link diretamente e, ao clicar no e-mail, o navegador volta para `https://admin.example.com/auth/callback`.
+4. O GitHub Pages entrega o shell da SPA nessa rota via fallback `404.html`, e o `supabase-js` conclui a sessão oficial no navegador com `persistSession: true`.
+5. No GitHub Pages publicado, o contexto `useAuth` reflete exclusivamente a sessão oficial do navegador via `supabase.auth.getSession()` e `onAuthStateChange(...)`; o runtime publicado não depende mais de `GET /auth/session`.
 6. O storage legado `financemgmtbot-admin-auth-test-session` permanece restrito a loopback (`localhost`/`127.0.0.1`) para E2E e testes locais; em produção o frontend ignora e limpa esse estado assim que detectado.
-7. O storage persistido do Supabase (`financemgmtbot-admin-auth`) também é purgado explicitamente sempre que a sessão fica ausente, corrompida ou malformada; `supabase.auth.signOut()` continua apenas como limpeza complementar best-effort.
-8. Tokens Bearer do navegador passam por validação mínima de formato (`3` segmentos JWT) antes de qualquer uso. Sessões malformadas são descartadas localmente para impedir estado "UI autenticada / backend inválido".
-9. O callback `/auth/callback` só redireciona para a home depois de reconsultar a sessão persistida do Supabase e validar que o `access_token` armazenado continua utilizável; se a persistência falhar ou ficar inconsistente, o app limpa o estado local e mostra erro explícito no próprio callback.
-10. Erros de autenticação Bearer malformada retornam envelope sanitizado com `code=AUTH_SESSION_TOKEN_MALFORMED`, `detail=bearer_malformed` e `requestId`, permitindo que a UI troque o CTA de retry por re-login sem expor mensagem crua do parser JWT.
-11. O frontend chama o backend em `/api/admin/*` com `Authorization: Bearer <access_token>`; o caminho cookie+CSRF deixa de ser o fluxo oficial do GitHub Pages.
-12. O backend valida o bearer token no lado servidor com Supabase, revalida allowlists administrativas e executa a operação privilegiada com auditoria.
-13. O operador continua podendo criar, editar, excluir, aprovar e rejeitar registros a partir do painel sem expor `service_role` ao navegador; o token web oficial passa a ser o token público do Supabase, compatível com o domínio separado do GitHub Pages.
-14. O callback legado do backend (`GET /auth/callback`) passa a atuar apenas como relay de compatibilidade: ele preserva `hash` ou `query string` vindos do Supabase e redireciona o navegador para o callback do frontend, sem mais criar sessão cookie para o fluxo oficial do Pages.
-13. Falhas operacionais do painel usam envelope sanitizado com `code`, `requestId`, `retryable` e, quando aplicável, `retryAfterSeconds`; erros de sessão agora também podem incluir um `detail` curto e controlado para suporte, sem ecoar detalhes crus de provedores ou do banco.
+7. O storage persistido do Supabase e dos artefatos do painel usa namespace versionado (`financemgmtbot-admin-auth-v2`, `financemgmtbot-admin-profile-v2` e `financemgmtbot-admin-auth-test-session-v2`). Chaves `v1` são purgadas explicitamente na inicialização, no logout e em qualquer erro de autenticação inválida, sem migração entre versões.
+8. Cada deploy público do Pages pode expor um `VITE_APP_BUILD_ID` curto e não sensível apenas para diagnóstico do cliente; o login não depende mais de sincronização manual desse valor com o backend.
+9. Tokens Bearer do navegador passam por validação mínima de formato (`3` segmentos JWT) antes de qualquer uso. Sessões malformadas são descartadas localmente para impedir estado "UI autenticada / backend inválido".
+10. O callback `/auth/callback` só redireciona para a home depois de reconsultar a sessão persistida do Supabase e validar que o `access_token` armazenado continua utilizável; se a persistência falhar ou ficar inconsistente, o app limpa o estado local e mostra erro explícito no próprio callback.
+11. Erros de autenticação Bearer malformada retornam envelope sanitizado com `code=AUTH_SESSION_TOKEN_MALFORMED`, `detail=bearer_malformed` e `requestId`, permitindo que a UI troque o CTA de retry por re-login sem expor mensagem crua do parser JWT.
+12. O frontend chama o backend em `/api/admin/*` com `Authorization: Bearer <access_token>` e envia também `X-Client-Build: <buildId>` quando disponível; o backend registra `client_build` em logs estruturados relevantes para correlacionar bundle publicado e request sem expor segredo.
+13. `MainLayout` e as telas administrativas só iniciam fetches privilegiados depois que a autenticação fica estável; o antigo health check não roda mais durante `loading`, estado desautenticado ou `/auth/callback`, evitando sequências inconsistentes como `204` seguido de `401 bearer_malformed`.
+14. O backend valida o bearer token no lado servidor com Supabase, revalida allowlists administrativas e executa a operação privilegiada com auditoria.
+15. O operador continua podendo criar, editar, excluir, aprovar e rejeitar registros a partir do painel sem expor `service_role` ao navegador; o token web oficial passa a ser o token público do Supabase, compatível com o domínio separado do GitHub Pages.
+16. O callback legado do backend (`GET /auth/callback`) passa a atuar apenas como relay de compatibilidade: ele preserva `hash` ou `query string` vindos do Supabase e redireciona o navegador para o callback do frontend, sem mais criar sessão cookie para o fluxo oficial do Pages.
+17. Falhas operacionais do painel usam envelope sanitizado com `code`, `requestId`, `retryable` e, quando aplicável, `retryAfterSeconds`; erros de sessão agora também podem incluir um `detail` curto e controlado para suporte, sem ecoar detalhes crus de provedores ou do banco.
 
 ### 2.3 Separação de Superfícies
 * **GitHub Pages** hospeda apenas arquivos estáticos.
@@ -98,7 +100,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 ### 4.2 Supabase & RLS
 * O acesso web é controlado por Supabase Auth como identidade upstream e como sessão oficial do navegador no GitHub Pages; o backend mantém `admin_web_sessions` apenas para compatibilidade operacional, testes locais e fluxos legados.
 * A autorização administrativa é reforçada em quatro níveis:
-  1. Magic Link do Supabase emitido com callback canônico do frontend
+  1. Magic Link do Supabase emitido diretamente pelo SDK público do frontend com callback canônico do Pages
   2. bearer token do Supabase validado server-side no backend
   3. políticas RLS no banco
   4. allowlist opcional por email e/ou `user_id` no backend
@@ -123,11 +125,11 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `GET /api/admin/cache-aprovacao`
   - `POST /api/admin/cache-aprovacao/<id>/approve`
   - `POST /api/admin/cache-aprovacao/<id>/reject`
-* O fluxo administrativo de autenticação passa pelo backend:
-  - `POST /auth/magic-link`
+* O fluxo administrativo de autenticação oficial passa pelo Supabase e pelo frontend:
+  - emissão do Magic Link diretamente no browser com `supabase.auth.signInWithOtp(...)`
   - callback oficial no frontend `/auth/callback`
   - `GET /auth/callback` no backend apenas como relay seguro de compatibilidade para links antigos ou configuração desalinhada
-  - `GET /auth/session` e `POST /auth/logout` apenas como compatibilidade de sessão server-side
+  - `GET /auth/session` e `POST /auth/logout` apenas como compatibilidade de sessão server-side e legados internos
 
 ### 4.4 CORS e Fronteira Web
 * O backend restringe chamadas do navegador a `FRONTEND_ALLOWED_ORIGINS`.
@@ -175,19 +177,18 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 * O artefato `frontend/dist` é publicado no GitHub Pages.
 * Em desenvolvimento:
   - `BASE_URL=/`
-  - proxy `/api`, `/auth` e `/__test__` → backend local `127.0.0.1:8080`
+  - proxy `/api`, `/auth/logout` e `/__test__` → backend local `127.0.0.1:8080`
   - bypass local opcional para autenticação de UI sem OTP
 * Em produção:
   - `BASE_URL=/financemgmtbot/`
   - chamadas administrativas apontam para o Cloud Run público
-  - login oficial via backend `/auth/magic-link`
-  - o backend constrói `email_redirect_to` do Supabase usando sempre a rota pública canônica do frontend no GitHub Pages, por exemplo `/auth/callback`
-  - `redirectTo` vindo do browser só é aceito em desenvolvimento local ou `AUTH_TEST_MODE`
-  - o fallback seguro de retorno do painel usa `FRONTEND_PUBLIC_URL`, nunca `localhost`
+  - login oficial via `supabase.auth.signInWithOtp(...)` diretamente no navegador
+  - o callback público oficial é a rota `/auth/callback` do próprio GitHub Pages
   - o build oficial gera `dist/404.html` como cópia funcional de `dist/index.html`, permitindo que o GitHub Pages entregue o shell da SPA para deep links como `/financemgmtbot/auth/callback`
   - `GET /auth/callback` do backend preserva `hash`/`query string` e redireciona para o callback do frontend quando um link antigo ainda cair no `run.app`
   - a SPA manipula apenas o token público de sessão do Supabase no navegador e envia `Authorization: Bearer` para o backend administrativo
-  - o frontend exige `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` no build oficial
+  - o frontend exige `VITE_API_BASE_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `VITE_APP_BUILD_ID` no build oficial
+  - o bundle publicado usa `VITE_APP_BUILD_ID` apenas para identificar o cliente em `X-Client-Build` e nos banners de suporte
 * A SPA usa `code splitting` por rota e por dependência pesada de frontend, carregando `Dashboard`, `Histórico`, `Aprovações`, `Login` e o modal transacional sob demanda, com `manualChunks` dedicados para gráficos, tabela e vendor base.
 * Em telas mobile, o layout principal expõe um acionador discreto no canto superior esquerdo que abre um drawer lateral esquerdo com a navegação entre Dashboard, Aprovações e Histórico, preservando o menu fixo em desktop.
 * O Dashboard usa widgets com seletor de mês compacto por card, evitando um filtro global único e permitindo leitura contextual do período.
@@ -206,6 +207,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - executa `npm run test:coverage`
   - falha se a cobertura unitária do frontend ficar abaixo de `90%` em `Statements`, `Branches`, `Functions` ou `Lines`
   - valida `npm run verify:build-env`, exigindo `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` vindos de GitHub Actions `Variables` ou `Secrets`
+  - deriva `VITE_APP_BUILD_ID` a partir do SHA curto do workflow para expor um identificador curto e público do cliente em headers e banners de suporte
   - valida `npm run build`
   - valida `npm run verify:pages-fallback`, garantindo que `404.html` foi gerado e continua idêntico ao shell da SPA para o GitHub Pages
   - valida `npm run verify:bundle` para garantir que o artefato publicado continua no contrato `Supabase browser session + Authorization Bearer`
@@ -222,14 +224,14 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - fixtures de teste não devem conter literais completos que casem com scanners de segredos; tokens/JWTs simulados devem ser montados por fragmentos em tempo de execução
   - `make pre-push` é o gate local padrão antes de qualquer push e agrega secret scanning, coverage do backend, coverage do frontend, build de produção e `verify:bundle`
   - o gate local também valida `npm run verify:pages-fallback` para impedir publicação de um build sem fallback de SPA no GitHub Pages
-  - `make pre-push` e `make pre-push-full` injetam placeholders públicos seguros para `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` durante a validação local do build
-  - quando necessário validar o gate com valores públicos específicos do ambiente, os overrides locais devem usar `FRONTEND_BUILD_API_BASE_URL`, `FRONTEND_BUILD_SUPABASE_URL` e `FRONTEND_BUILD_SUPABASE_ANON_KEY`
+  - `make pre-push` e `make pre-push-full` injetam placeholders públicos seguros para `VITE_API_BASE_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `VITE_APP_BUILD_ID` durante a validação local do build
+  - quando necessário validar o gate com valores públicos específicos do ambiente, os overrides locais devem usar `FRONTEND_BUILD_API_BASE_URL`, `FRONTEND_BUILD_SUPABASE_URL`, `FRONTEND_BUILD_SUPABASE_ANON_KEY` e `FRONTEND_BUILD_APP_BUILD_ID`
   - `make pre-push-full` estende o gate padrão com `npm run test:e2e --prefix frontend` e deve ser usado para mudanças de auth, frontend, CI, build, deploy, contrato público ou segurança
   - o hook local é opt-in e pode ser instalado com `make install-git-hooks`; ele roda apenas `make pre-push`
 * `deploy-pages.yml`
   - instala dependências com `npm ci`
-  - valida `npm run verify:build-env` antes do build, aceitando `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` vindos de Repository Variables ou Secrets
-  - builda o frontend com `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` vindos de Repository Variables ou Secrets
+  - valida `npm run verify:build-env` antes do build, aceitando `VITE_API_BASE_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `VITE_APP_BUILD_ID` vindos de Repository Variables ou Secrets
+  - builda o frontend com `VITE_API_BASE_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `VITE_APP_BUILD_ID` vindos de Repository Variables ou Secrets
   - valida `npm run verify:pages-fallback` antes de publicar, garantindo que o GitHub Pages consegue servir o shell da SPA em deep links
   - valida o bundle com `npm run verify:bundle` antes de publicar o artefato no GitHub Pages, reutilizando exatamente a mesma política de scan da CI
   - publica automaticamente o SPA no GitHub Pages

@@ -2,8 +2,13 @@ import { expect, test, type APIRequestContext } from '@playwright/test';
 
 const backendBaseUrl = process.env.E2E_API_BASE_URL || 'http://127.0.0.1:8080';
 const frontendBaseUrl = process.env.E2E_FRONTEND_BASE_URL || `http://127.0.0.1:${process.env.E2E_FRONTEND_PORT || '4173'}`;
+const frontendBaseUrlPattern = frontendBaseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 test.describe.configure({ mode: 'serial' });
+
+function appRootPattern() {
+  return new RegExp(`${frontendBaseUrlPattern}/?$`);
+}
 
 async function seedTransactions(request: APIRequestContext) {
   const response = await request.post(`${backendBaseUrl}/__test__/auth/transactions`, {
@@ -44,6 +49,12 @@ async function waitForMagicLink(request: APIRequestContext, email: string) {
 test('requests a magic link, completes the callback and loads seeded transactions', async ({ page, request, browserName }) => {
   const email = `admin+${browserName}@example.com`;
   await seedTransactions(request);
+  const backendAuthCalls: string[] = [];
+
+  await page.route(`${backendBaseUrl}/auth/**`, async (route) => {
+    backendAuthCalls.push(new URL(route.request().url()).pathname);
+    await route.continue();
+  });
 
   await page.goto('/login');
 
@@ -58,15 +69,16 @@ test('requests a magic link, completes the callback and loads seeded transaction
 
   await expect.poll(async () => {
     try {
-      return await page.evaluate(() => window.localStorage.getItem('financemgmtbot-admin-auth-test-session'));
+      return await page.evaluate(() => window.localStorage.getItem('financemgmtbot-admin-auth-test-session-v2'));
     } catch {
       return null;
     }
   }).not.toBeNull();
-  await expect(page).toHaveURL(new RegExp(`${frontendBaseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`));
+  await expect(page).toHaveURL(appRootPattern());
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
   await page.goto('/historico');
   await expect(page.getByText('Mercado Playwright')).toBeVisible();
+  expect(backendAuthCalls).not.toContain('/auth/session');
 });
 
 test('completes login when the email link still targets the legacy backend callback relay', async ({ page, request, browserName }) => {
@@ -88,12 +100,12 @@ test('completes login when the email link still targets the legacy backend callb
 
   await expect.poll(async () => {
     try {
-      return await page.evaluate(() => window.localStorage.getItem('financemgmtbot-admin-auth-test-session'));
+      return await page.evaluate(() => window.localStorage.getItem('financemgmtbot-admin-auth-test-session-v2'));
     } catch {
       return null;
     }
   }).not.toBeNull();
-  await expect(page).toHaveURL(new RegExp(`${frontendBaseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`));
+  await expect(page).toHaveURL(appRootPattern());
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
   await page.goto('/historico');
   await expect(page.getByText('Mercado Playwright')).toBeVisible();
@@ -103,5 +115,5 @@ test('shows an explicit error for an expired or invalid callback link', async ({
   await page.goto('/auth/callback#error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired');
 
   await expect(page.getByText(/link de acesso invalido ou expirado/i)).toBeVisible();
-  await expect(page).toHaveURL(new RegExp(`${frontendBaseUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/auth/callback`));
+  await expect(page).toHaveURL(new RegExp(`${frontendBaseUrlPattern}/auth/callback`));
 });

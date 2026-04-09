@@ -70,6 +70,8 @@ import admin_api
 import security
 import test_support
 
+_original_lookup_admin_user = admin_api._lookup_admin_user
+
 # Restore correct references so tests can interact
 config.supabase = _mock_supabase_client
 db_repository.supabase = _mock_supabase_client
@@ -93,6 +95,13 @@ def _reset_auth_test_support():
     test_support.reset_auth_test_state()
     yield
     test_support.reset_auth_test_state()
+
+
+@pytest.fixture(autouse=True)
+def _reset_admin_lookup_mock():
+    admin_api._lookup_admin_user = _original_lookup_admin_user
+    yield
+    admin_api._lookup_admin_user = _original_lookup_admin_user
 
 
 @pytest.fixture
@@ -1250,6 +1259,7 @@ class TestAdminRoutes:
         mock_response = MagicMock()
         mock_response.user = mock_user
         config.supabase.auth.get_user = MagicMock(return_value=mock_response)
+        admin_api._lookup_admin_user = MagicMock(return_value={"user_id": user_id, "email": email})
 
     def _build_session_row(self, email="admin@example.com", user_id="user-1", expires_at="2099-04-03T23:59:59"):
         return {
@@ -1567,18 +1577,26 @@ class TestAdminRoutes:
                 "invalid JWT: unable to parse or verify signature, token is malformed: token contains an invalid number of segments"
             )
         )
+        log_calls = []
 
         async with main.app.test_client() as client:
-            resp = await client.get(
-                "/api/admin/gastos",
-                headers={"Authorization": "Bearer bad-token"},
-            )
+            with patch.object(admin_api.logger, "warning", side_effect=lambda payload: log_calls.append(payload)):
+                resp = await client.get(
+                    "/api/admin/gastos",
+                    headers={
+                        "Authorization": "Bearer bad-token",
+                        "X-Client-Build": "build-123",
+                    },
+                )
 
         assert resp.status_code == 401
         payload = await resp.get_json()
         assert payload["code"] == "AUTH_SESSION_TOKEN_MALFORMED"
         assert payload["detail"] == "bearer_malformed"
         assert payload["requestId"].startswith("req_")
+        assert log_calls
+        assert log_calls[-1]["event"] == "admin_bearer_auth_failed"
+        assert log_calls[-1]["client_build"] == "build-123"
 
     @pytest.mark.asyncio
     async def test_admin_routes_reject_bearer_tokens_for_blocked_identities(self):
@@ -1604,13 +1622,14 @@ class TestAdminRoutes:
                     headers={
                         "Origin": "https://admin.example.com",
                         "Access-Control-Request-Method": "GET",
-                        "Access-Control-Request-Headers": "authorization",
+                        "Access-Control-Request-Headers": "authorization, x-client-build",
                     },
                 )
 
         assert resp.status_code == 204
         assert resp.headers["Access-Control-Allow-Origin"] == "https://admin.example.com"
         assert "Authorization" in resp.headers["Access-Control-Allow-Headers"]
+        assert "X-Client-Build" in resp.headers["Access-Control-Allow-Headers"]
 
     @pytest.mark.asyncio
     async def test_admin_create_transaction_requires_csrf(self):
@@ -2365,7 +2384,12 @@ class TestAdminRoutesAdditional:
                 resp = await client.get("/auth/callback?code=pkce-code-1")
 
         assert resp.status_code == 302
-        assert resp.headers["Location"] == "https://admin.example.com/app/auth/callback?code=pkce-code-1"
+        redirected = urlsplit(resp.headers["Location"])
+        assert redirected.scheme == "https"
+        assert redirected.netloc == "admin.example.com"
+        assert redirected.path == "/app/auth/callback"
+        query = parse_qs(redirected.query)
+        assert query["code"] == ["pkce-code-1"]
 
     @pytest.mark.asyncio
     async def test_auth_callback_get_with_token_hash_relay_redirects_to_frontend_callback_preserving_otp_query(self):
@@ -2374,7 +2398,9 @@ class TestAdminRoutesAdditional:
                 resp = await client.get("/auth/callback?token_hash=fakehash&type=magiclink")
 
         assert resp.status_code == 302
-        assert resp.headers["Location"] == "https://admin.example.com/app/auth/callback?token_hash=fakehash&type=magiclink"
+        query = parse_qs(urlsplit(resp.headers["Location"]).query)
+        assert query["token_hash"] == ["fakehash"]
+        assert query["type"] == ["magiclink"]
 
     @pytest.mark.asyncio
     async def test_auth_callback_get_with_error_query_relay_preserves_upstream_error(self):
@@ -2434,6 +2460,7 @@ class TestAdminRoutesAdditional:
                         "access_token": "upstream-token",
                         "redirectTo": "https://admin.example.com/app/",
                     },
+                    headers={"X-Client-Build": "build-123"},
                 )
 
         assert resp.status_code == 503
@@ -2448,6 +2475,7 @@ class TestAdminRoutesAdditional:
         assert log_calls
         assert log_calls[-1]["event"] == "auth_session_storage_unavailable"
         assert log_calls[-1]["storage"] == "admin_web_sessions"
+        assert log_calls[-1]["client_build"] == "build-123"
         assert log_calls[-1]["upstream_code"] == "PGRST205"
         assert log_calls[-1]["request_id"] == payload["requestId"]
 

@@ -1,9 +1,10 @@
 import type { TransactionDraft, TransactionRecord } from '@/lib/transactions';
-import { browserAdminTestSessionAllowed } from '@/lib/auth';
+import { browserAdminAuthTestModeEnabled, getAppBuildId } from '@/lib/auth';
 import { clearBrowserAuthState, getAccessToken } from '@/lib/supabase';
 
 const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 export const localDevBypassEnabled = import.meta.env.DEV && import.meta.env.VITE_LOCAL_DEV_BYPASS_AUTH === 'true';
+const clientBuildHeaderName = 'X-Client-Build';
 
 type ApiResponse<T> = {
   status: string;
@@ -85,10 +86,9 @@ export class ApiError extends Error {
   }
 }
 
-export type AuthSessionPayload = {
+export type AdminIdentityPayload = {
   authenticated: boolean;
-  csrfToken?: string;
-  expiresAt?: string;
+  authorized: boolean;
   user?: {
     id: string;
     email?: string | null;
@@ -115,8 +115,16 @@ function buildApiUrl(path: string) {
   return `${configuredApiBaseUrl}${path}`;
 }
 
+function currentClientBuild() {
+  return getAppBuildId();
+}
+
 function isAdminApiPath(path: string) {
   return path.startsWith('/api/admin/');
+}
+
+function isAuthPath(path: string) {
+  return path.startsWith('/auth/');
 }
 
 function buildSupportMessage({
@@ -124,15 +132,20 @@ function buildSupportMessage({
   requestId,
   detail,
   diagnostic,
+  clientBuild,
 }: {
   message: string;
   requestId?: string;
   detail?: string;
   diagnostic?: string;
+  clientBuild?: string;
 }) {
   const supportMessageParts = [message];
   if (requestId) {
     supportMessageParts.push(`Codigo de suporte: ${requestId}`);
+  }
+  if (clientBuild) {
+    supportMessageParts.push(`Cliente: ${clientBuild}`);
   }
   if (detail) {
     supportMessageParts.push(`Detalhe: ${detail}`);
@@ -156,8 +169,9 @@ function createClientApiError({
   diagnostic?: string;
   retryable?: boolean;
 }) {
+  const clientBuild = currentClientBuild();
   return new ApiError(
-    buildSupportMessage({ message, diagnostic }),
+    buildSupportMessage({ message, diagnostic, clientBuild }),
     {
       code,
       diagnostic,
@@ -182,7 +196,12 @@ async function parseError(response: Response) {
     : undefined;
   const fallbackMessage = payload.message || payload.error || `Request failed with status ${response.status}`;
   const mappedMessage = ERROR_MESSAGES[code] || fallbackMessage;
-  const supportMessage = buildSupportMessage({ message: mappedMessage, requestId, detail });
+  const supportMessage = buildSupportMessage({
+    message: mappedMessage,
+    requestId,
+    detail,
+    clientBuild: currentClientBuild(),
+  });
 
   return new ApiError(supportMessage, {
     code,
@@ -198,15 +217,26 @@ export function isReauthenticationError(error: unknown): error is ApiError {
   return error instanceof ApiError && AUTH_RECOVERY_ERROR_CODES.has(error.code);
 }
 
-async function apiRequest<T>(path: string, init: RequestInit = {}, csrfToken?: string): Promise<ApiResponse<T>> {
+async function apiRequest<T>(
+  path: string,
+  init: RequestInit = {},
+  csrfToken?: string,
+  accessTokenOverride?: string | null,
+): Promise<ApiResponse<T>> {
   const headers = new Headers(init.headers);
   const method = (init.method || 'GET').toUpperCase();
   const isAdminRoute = isAdminApiPath(path);
-  const accessToken = isAdminRoute ? await getAccessToken() : null;
-  const allowLegacyCookieFallback = browserAdminTestSessionAllowed();
+  const isAuthRoute = isAuthPath(path);
+  const accessToken = accessTokenOverride ?? (isAdminRoute ? await getAccessToken() : null);
+  const allowLegacyCookieFallback = browserAdminAuthTestModeEnabled();
+  const clientBuild = currentClientBuild();
 
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
+  }
+
+  if ((isAdminRoute || isAuthRoute) && clientBuild) {
+    headers.set(clientBuildHeaderName, clientBuild);
   }
 
   if (accessToken) {
@@ -249,17 +279,17 @@ async function apiRequest<T>(path: string, init: RequestInit = {}, csrfToken?: s
   return response.json() as Promise<ApiResponse<T>>;
 }
 
-export function requestMagicLink(email: string, redirectTo: string) {
-  return apiRequest<{ message: string }>('/auth/magic-link', {
+export function requestTestMagicLink(email: string, redirectTo: string, userId?: string) {
+  return apiRequest<{ magicLink: { link: string } }>('/__test__/auth/magic-link', {
     method: 'POST',
-    body: JSON.stringify({ email, redirectTo }),
+    body: JSON.stringify({ email, redirectTo, userId }),
   });
 }
 
-export function getAuthSession() {
-  return apiRequest<AuthSessionPayload>('/auth/session', {
+export function getAdminMe(accessToken?: string | null) {
+  return apiRequest<AdminIdentityPayload>('/api/admin/me', {
     method: 'GET',
-  });
+  }, undefined, accessToken);
 }
 
 export function logoutAuthSession() {

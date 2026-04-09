@@ -49,6 +49,7 @@ export default defineConfig({
         VITE_SUPABASE_URL: 'https://your-project-ref.supabase.co',
         VITE_SUPABASE_ANON_KEY: 'public-anon-key',
         VITE_ALLOWED_ADMIN_EMAILS: 'admin@example.com,admin+chromium@example.com,admin+firefox@example.com',
+        VITE_AUTH_TEST_MODE: 'true',
         VITE_LOCAL_DEV_BYPASS_AUTH: 'false',
       },
       port: e2eFrontendPort,

@@ -1,34 +1,100 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Activity, Mail, Loader2, CheckCircle2 } from 'lucide-react';
-import { localDevBypassEnabled, requestMagicLink } from '@/lib/adminApi';
+import {
+  browserAdminAuthTestModeEnabled,
+  clearBrowserAdminLoginNotice,
+  loadBrowserAdminLoginNotice,
+} from '@/lib/auth';
+import { localDevBypassEnabled, requestTestMagicLink } from '@/lib/adminApi';
+import { useAuth } from '@/hooks/useAuth';
+import { supabase } from '@/lib/supabase';
+
+function buildCallbackUrl() {
+  return new URL('auth/callback', new URL(import.meta.env.BASE_URL, window.location.origin)).toString();
+}
+
+function isRateLimitedMessage(message: string) {
+  const normalized = message.toLowerCase();
+  return normalized.includes('rate limit') || normalized.includes('for security purposes');
+}
+
+function shouldMaskIdentityLookupFailure(message: string) {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('user not found')
+    || normalized.includes('signup')
+    || normalized.includes('sign up')
+    || normalized.includes('invalid login credentials')
+  );
+}
 
 export default function Login() {
-  const redirectTarget = new URL('auth/callback', new URL(import.meta.env.BASE_URL, window.location.origin)).toString();
+  const { authenticated, loading, localBypass } = useAuth();
   const searchParams = new URLSearchParams(window.location.search);
   const reason = searchParams.get('reason');
   const requestId = searchParams.get('requestId');
   const [email, setEmail] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(() => {
+    const loginNotice = loadBrowserAdminLoginNotice();
+    clearBrowserAdminLoginNotice();
+    return loginNotice?.message || '';
+  });
 
   if (localDevBypassEnabled) {
     window.location.replace(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
     return null;
   }
 
+  useEffect(() => {
+    if (loading) {
+      return;
+    }
+
+    if (authenticated || localBypass) {
+      window.location.replace(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
+    }
+  }, [authenticated, loading, localBypass]);
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    setLoading(true);
+    setSubmitting(true);
     setError('');
 
     try {
-      await requestMagicLink(email, redirectTarget);
+      if (browserAdminAuthTestModeEnabled()) {
+        await requestTestMagicLink(email, buildCallbackUrl());
+        setSuccess(true);
+        return;
+      }
+
+      const { error: requestError } = await supabase.auth.signInWithOtp({
+        email,
+        options: {
+          shouldCreateUser: false,
+          emailRedirectTo: buildCallbackUrl(),
+        },
+      });
+
+      if (requestError) {
+        const upstreamMessage = requestError.message || '';
+        if (isRateLimitedMessage(upstreamMessage)) {
+          throw new Error('Muitos pedidos de login em pouco tempo. Aguarde alguns minutos e tente novamente.');
+        }
+        if (shouldMaskIdentityLookupFailure(upstreamMessage)) {
+          setSuccess(true);
+          return;
+        }
+        throw new Error('Nao foi possivel enviar o link de acesso agora. Tente novamente em instantes.');
+      }
+
       setSuccess(true);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Nao foi possivel solicitar o magic link agora.');
+    } finally {
+      setSubmitting(false);
     }
-    setLoading(false);
   };
 
   return (
@@ -95,10 +161,10 @@ export default function Login() {
 
             <button
               type="submit"
-              disabled={loading || !email}
+              disabled={submitting || !email}
               className="w-full flex justify-center items-center py-2.5 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {loading ? (
+              {submitting ? (
                 <Loader2 className="h-5 w-5 animate-spin" />
               ) : (
                 'Enviar Magic Link'

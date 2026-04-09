@@ -6,7 +6,7 @@ from api_responses import json_error, json_success, with_request_id
 from postgrest.exceptions import APIError
 from quart import jsonify, request
 
-from config import ADMIN_EMAILS, ADMIN_USER_IDS, ALLOW_LOCAL_DEV_AUTH, FRONTEND_ALLOWED_ORIGINS, logger, mascarar_segredos, supabase
+from config import ADMIN_EMAILS, ADMIN_USER_IDS, ALLOW_LOCAL_DEV_AUTH, FRONTEND_ALLOWED_ORIGINS, logger, mascarar_segredos, normalize_build_id, supabase
 from db_repository import gravar_lote_no_banco
 from security import (
     SESSION_COOKIE_NAME,
@@ -105,6 +105,86 @@ def _normalize_lookup(value: str):
     return ascii_only.strip().lower()
 
 
+def _client_build_from_request():
+    return normalize_build_id(request.headers.get("X-Client-Build"))
+
+
+def _lookup_admin_user(user_id: str | None):
+    if not user_id:
+        return None
+
+    if auth_test_mode_enabled():
+        return {"user_id": user_id, "email": None}
+
+    response = (
+        supabase
+        .table("admin_users")
+        .select("user_id, email")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    rows = getattr(response, "data", None)
+    if not isinstance(rows, list) or not rows:
+        return None
+    admin_user = rows[0]
+    return admin_user if isinstance(admin_user, dict) else None
+
+
+def _authorize_admin_identity(user_id: str | None, email: str | None):
+    try:
+        admin_user = _lookup_admin_user(user_id)
+    except APIError as exc:
+        log_payload = {
+            "event": "admin_authorization_lookup_failed",
+            "error": mascarar_segredos(str(exc)),
+        }
+        client_build = _client_build_from_request()
+        if client_build:
+            log_payload["client_build"] = client_build
+        logger.warning(with_request_id(log_payload))
+        return None, _json_error(
+            "Unable to validate admin access right now.",
+            503,
+            code="AUTH_ACCESS_CHECK_FAILED",
+            retryable=True,
+        )
+    except Exception as exc:
+        log_payload = {
+            "event": "admin_authorization_lookup_unexpected",
+            "error": mascarar_segredos(str(exc)),
+        }
+        client_build = _client_build_from_request()
+        if client_build:
+            log_payload["client_build"] = client_build
+        logger.warning(with_request_id(log_payload))
+        return None, _json_error(
+            "Unable to validate admin access right now.",
+            503,
+            code="AUTH_ACCESS_CHECK_FAILED",
+            retryable=True,
+        )
+
+    if not admin_user:
+        return None, _json_error(
+            "Authenticated user is not allowed to access this admin route.",
+            403,
+            code="AUTH_ACCESS_DENIED",
+        )
+
+    normalized_email = email.lower() if isinstance(email, str) else None
+    admin_email = admin_user.get("email")
+    normalized_admin_email = admin_email.lower() if isinstance(admin_email, str) else None
+    effective_email = normalized_email or normalized_admin_email
+
+    if ADMIN_USER_IDS and user_id not in ADMIN_USER_IDS:
+        return None, _json_error("Authenticated user is not allowed to access this admin route.", 403, code="AUTH_ACCESS_DENIED")
+    if ADMIN_EMAILS and effective_email not in ADMIN_EMAILS:
+        return None, _json_error("Authenticated user is not allowed to access this admin route.", 403, code="AUTH_ACCESS_DENIED")
+
+    return {"id": user_id, "email": effective_email}, None
+
+
 def autenticar_admin_request():
     origin = request.headers.get("Origin", "")
     remote_addr = request.remote_addr or ""
@@ -125,7 +205,11 @@ def autenticar_admin_request():
                 user_id, email = _extract_user_fields(getattr(auth_response, "user", auth_response))
         except Exception as exc:
             error_text = mascarar_segredos(str(exc))
-            logger.warning(with_request_id({"event": "admin_bearer_auth_failed", "error": error_text}))
+            log_payload = {"event": "admin_bearer_auth_failed", "error": error_text}
+            client_build = _client_build_from_request()
+            if client_build:
+                log_payload["client_build"] = client_build
+            logger.warning(with_request_id(log_payload))
             if _is_malformed_bearer_error(error_text):
                 return None, json_error(
                     "Invalid or expired session.",
@@ -135,13 +219,7 @@ def autenticar_admin_request():
                 )
             return None, _json_error("Invalid or expired session.", 401, code="AUTH_SESSION_INVALID")
 
-        normalized_email = email.lower() if isinstance(email, str) else None
-        if ADMIN_USER_IDS and user_id not in ADMIN_USER_IDS:
-            return None, _json_error("Authenticated user is not allowed to access this admin route.", 403, code="AUTH_ACCESS_DENIED")
-        if ADMIN_EMAILS and normalized_email not in ADMIN_EMAILS:
-            return None, _json_error("Authenticated user is not allowed to access this admin route.", 403, code="AUTH_ACCESS_DENIED")
-
-        return {"id": user_id, "email": normalized_email}, None
+        return _authorize_admin_identity(user_id, email)
 
     if ALLOW_LOCAL_DEV_AUTH and not session_token and (is_allowed_origin or is_loopback):
         return {"id": "local-dev", "email": "local-dev@localhost"}, None
@@ -152,7 +230,11 @@ def autenticar_admin_request():
     try:
         session = resolve_admin_session(session_token)
     except Exception as exc:
-        logger.warning(with_request_id({"event": "admin_session_lookup_failed", "error": mascarar_segredos(str(exc))}))
+        log_payload = {"event": "admin_session_lookup_failed", "error": mascarar_segredos(str(exc))}
+        client_build = _client_build_from_request()
+        if client_build:
+            log_payload["client_build"] = client_build
+        logger.warning(with_request_id(log_payload))
         return None, _json_error("Invalid or expired session.", 401, code="AUTH_SESSION_INVALID")
 
     if not session:
@@ -160,18 +242,31 @@ def autenticar_admin_request():
 
     user_id = session.get("user_id")
     email = session.get("email")
-    normalized_email = email.lower() if isinstance(email, str) else None
-    if ADMIN_USER_IDS and user_id not in ADMIN_USER_IDS:
-        return None, _json_error("Authenticated user is not allowed to access this admin route.", 403, code="AUTH_ACCESS_DENIED")
-    if ADMIN_EMAILS and normalized_email not in ADMIN_EMAILS:
-        return None, _json_error("Authenticated user is not allowed to access this admin route.", 403, code="AUTH_ACCESS_DENIED")
+    actor, authorization_error = _authorize_admin_identity(user_id, email)
+    if authorization_error:
+        return None, authorization_error
 
     if request.method in {"POST", "PATCH", "DELETE"}:
         csrf_token = request.headers.get("X-CSRF-Token")
         if not validate_csrf_token(session_token, csrf_token):
             return None, _json_error("Missing or invalid CSRF token.", 403, code="AUTH_CSRF_INVALID")
 
-    return {"id": user_id, "email": normalized_email}, None
+    return actor, None
+
+
+def obter_admin_atual():
+    actor, auth_error = autenticar_admin_request()
+    if auth_error:
+        return auth_error
+
+    return _json_success(
+        {
+            "authenticated": True,
+            "authorized": True,
+            "user": actor,
+        },
+        200,
+    )
 
 
 def _normalize_transaction_payload(payload: dict[str, Any] | None):

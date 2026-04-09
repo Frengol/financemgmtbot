@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Aprovacoes from './Aprovacoes';
@@ -38,9 +38,15 @@ describe('Aprovacoes', () => {
     });
   });
 
-  it('loads pending receipts and approves one item', async () => {
+  it('loads pending receipts and approves one item with bearer-only auth state', async () => {
     const eventSpy = vi.fn();
     window.addEventListener('transactions:changed', eventSpy);
+    mockUseAuth.mockReturnValue({
+      authenticated: true,
+      csrfToken: '',
+      localBypass: false,
+      signOut: mockSignOut,
+    });
     mockGetPendingReceipts.mockResolvedValue({
       items: [{
         id: 'C1',
@@ -68,7 +74,7 @@ describe('Aprovacoes', () => {
     await userEvent.click(screen.getByRole('button', { name: /Aprovar/i }));
 
     await waitFor(() => {
-      expect(mockApprovePendingReceipt).toHaveBeenCalledWith('C1', 'csrf-token');
+      expect(mockApprovePendingReceipt).toHaveBeenCalledWith('C1', '');
     });
     await waitFor(() => {
       expect(screen.queryByText('Arroz')).not.toBeInTheDocument();
@@ -77,9 +83,9 @@ describe('Aprovacoes', () => {
     window.removeEventListener('transactions:changed', eventSpy);
   });
 
-  it('shows session error before rejecting when there is no access token', async () => {
+  it('keeps approvals empty when the admin session is unavailable before rejection', async () => {
     mockUseAuth.mockReturnValue({
-      authenticated: true,
+      authenticated: false,
       csrfToken: '',
       localBypass: false,
     });
@@ -95,16 +101,14 @@ describe('Aprovacoes', () => {
 
     render(<Aprovacoes />);
 
-    expect(await screen.findByText(/Cafe/)).toBeInTheDocument();
-    await userEvent.click(screen.getAllByRole('button')[1]);
-
-    expect(await screen.findByText('Sua sessão expirou. Faça login novamente.')).toBeInTheDocument();
+    expect(await screen.findByText('A caixa de aprovações está vazia. Tudo atualizado!')).toBeInTheDocument();
+    expect(screen.queryByText(/Cafe/)).not.toBeInTheDocument();
     expect(mockRejectPendingReceipt).not.toHaveBeenCalled();
   });
 
-  it('shows session error before approving when there is no access token', async () => {
+  it('keeps approvals empty when the admin session is unavailable before approval', async () => {
     mockUseAuth.mockReturnValue({
-      authenticated: true,
+      authenticated: false,
       csrfToken: '',
       localBypass: false,
     });
@@ -120,11 +124,82 @@ describe('Aprovacoes', () => {
 
     render(<Aprovacoes />);
 
+    expect(await screen.findByText('A caixa de aprovações está vazia. Tudo atualizado!')).toBeInTheDocument();
+    expect(screen.queryByText(/Leite/)).not.toBeInTheDocument();
+    expect(mockApprovePendingReceipt).not.toHaveBeenCalled();
+  });
+
+  it('shows a session error when approval becomes unavailable after the item is already loaded', async () => {
+    const authState = {
+      authenticated: true,
+      csrfToken: '',
+      localBypass: false,
+      signOut: mockSignOut,
+    };
+    mockUseAuth.mockImplementation(() => authState);
+    mockGetPendingReceipts.mockResolvedValue({
+      items: [{
+        id: 'C2B',
+        kind: 'receipt_batch',
+        expires_at: '2026-03-20T10:00:00Z',
+        created_at: '2026-03-19T10:00:00Z',
+        preview: { itens: ['Leite'], itens_count: 1, total_estimado: 7 },
+      }],
+    });
+
+    const { rerender } = render(<Aprovacoes />);
+
     expect(await screen.findByText(/Leite/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: /Aprovar/i }));
+
+    await act(async () => {
+      authState.authenticated = false;
+      rerender(<Aprovacoes />);
+    });
 
     expect(await screen.findByText('Sua sessão expirou. Faça login novamente.')).toBeInTheDocument();
+    expect(screen.getByText(/Leite/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /Aprovar/i }));
+    window.dispatchEvent(new CustomEvent('transactions:changed'));
+
     expect(mockApprovePendingReceipt).not.toHaveBeenCalled();
+    expect(mockGetPendingReceipts).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a session error when rejection becomes unavailable after the item is already loaded', async () => {
+    const authState = {
+      authenticated: true,
+      csrfToken: '',
+      localBypass: false,
+      signOut: mockSignOut,
+    };
+    mockUseAuth.mockImplementation(() => authState);
+    mockGetPendingReceipts.mockResolvedValue({
+      items: [{
+        id: 'C2C',
+        kind: 'receipt_batch',
+        expires_at: '2026-03-20T10:00:00Z',
+        created_at: '2026-03-19T10:00:00Z',
+        preview: { itens: ['Cafe'], itens_count: 1, total_estimado: 8 },
+      }],
+    });
+
+    const { rerender } = render(<Aprovacoes />);
+
+    expect(await screen.findByText(/Cafe/)).toBeInTheDocument();
+
+    await act(async () => {
+      authState.authenticated = false;
+      rerender(<Aprovacoes />);
+    });
+
+    expect(await screen.findByText('Sua sessão expirou. Faça login novamente.')).toBeInTheDocument();
+    expect(screen.getByText(/Cafe/)).toBeInTheDocument();
+    const buttons = screen.getAllByRole('button');
+    await userEvent.click(buttons[buttons.length - 1]);
+    window.dispatchEvent(new CustomEvent('transactions:changed'));
+
+    expect(mockRejectPendingReceipt).not.toHaveBeenCalled();
+    expect(mockGetPendingReceipts).toHaveBeenCalledTimes(1);
   });
 
   it('renders the empty state when there are no pending receipts', async () => {
@@ -148,9 +223,31 @@ describe('Aprovacoes', () => {
     expect(mockGetPendingReceipts).not.toHaveBeenCalled();
   });
 
-  it('renders delete confirmations and rejects them successfully', async () => {
+  it('ignores refresh events while the admin session is unavailable and the queue is empty', async () => {
+    mockUseAuth.mockReturnValue({
+      authenticated: false,
+      csrfToken: '',
+      localBypass: false,
+    });
+
+    render(<Aprovacoes />);
+
+    expect(await screen.findByText('A caixa de aprovações está vazia. Tudo atualizado!')).toBeInTheDocument();
+    window.dispatchEvent(new CustomEvent('transactions:changed'));
+
+    expect(mockGetPendingReceipts).not.toHaveBeenCalled();
+    expect(screen.queryByText('Sua sessão expirou. Faça login novamente.')).not.toBeInTheDocument();
+  });
+
+  it('renders delete confirmations and rejects them successfully with bearer-only auth state', async () => {
     const eventSpy = vi.fn();
     window.addEventListener('transactions:changed', eventSpy);
+    mockUseAuth.mockReturnValue({
+      authenticated: true,
+      csrfToken: '',
+      localBypass: false,
+      signOut: mockSignOut,
+    });
     mockGetPendingReceipts
       .mockResolvedValueOnce({
         items: [{
@@ -177,7 +274,7 @@ describe('Aprovacoes', () => {
     await userEvent.click(screen.getAllByRole('button')[1]);
 
     await waitFor(() => {
-      expect(mockRejectPendingReceipt).toHaveBeenCalledWith('D1', 'csrf-token');
+      expect(mockRejectPendingReceipt).toHaveBeenCalledWith('D1', '');
     });
     await waitFor(() => {
       expect(screen.queryByText(/Excluir registros/i)).not.toBeInTheDocument();
@@ -241,6 +338,41 @@ describe('Aprovacoes', () => {
 
     expect(await screen.findByText(/Excluir registros/i)).toBeInTheDocument();
     await userEvent.click(screen.getAllByRole('button')[1]);
+
+    expect(await screen.findByText(/detalhe: bearer_malformed/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Fazer login novamente' }));
+    expect(mockSignOut).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers re-login when approval fails with malformed auth', async () => {
+    mockGetPendingReceipts.mockResolvedValue({
+      items: [{
+        id: 'D-approve-auth',
+        kind: 'receipt_batch',
+        expires_at: '2026-03-20T10:00:00Z',
+        created_at: '2026-03-19T10:00:00Z',
+        preview: {
+          summary: 'Cupom pendente',
+          itens: ['Arroz'],
+          itens_count: 1,
+          total_estimado: 10,
+        },
+      }],
+    });
+    mockApprovePendingReceipt.mockRejectedValue(new ApiError(
+      'Sua sessao de acesso e invalida. Faca login novamente. Codigo de suporte: req_pending_approve_auth Detalhe: bearer_malformed',
+      {
+        code: 'AUTH_SESSION_TOKEN_MALFORMED',
+        detail: 'bearer_malformed',
+        status: 401,
+        requestId: 'req_pending_approve_auth',
+      },
+    ));
+
+    render(<Aprovacoes />);
+
+    expect(await screen.findByText(/Arroz/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /Aprovar/i }));
 
     expect(await screen.findByText(/detalhe: bearer_malformed/i)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Fazer login novamente' }));

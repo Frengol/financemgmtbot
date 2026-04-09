@@ -10,10 +10,23 @@ export default function Aprovacoes() {
   const [error, setError] = useState<ApiError | Error | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
 
+  const createSessionUnavailableError = () => new ApiError(
+    'Sua sessão expirou. Faça login novamente.',
+    {
+      code: 'AUTH_SESSION_INVALID',
+      diagnostic: 'auth_state_unusable',
+      status: 401,
+    },
+  );
+
   const fetchCache = async () => {
     if (!authenticated && !localBypass) {
-      setItems([]);
-      setError(null);
+      if (items.length > 0) {
+        setError(createSessionUnavailableError());
+      } else {
+        setItems([]);
+        setError(null);
+      }
       return;
     }
 
@@ -32,6 +45,16 @@ export default function Aprovacoes() {
   };
 
   useEffect(() => {
+    if (!authenticated && !localBypass) {
+      if (items.length > 0) {
+        setError(createSessionUnavailableError());
+      } else {
+        setItems([]);
+        setError(null);
+      }
+      return;
+    }
+
     void fetchCache();
   }, [authenticated, localBypass]);
 
@@ -45,8 +68,8 @@ export default function Aprovacoes() {
   }, [authenticated, localBypass]);
 
   const handleAprovar = async (item: PendingApprovalItem) => {
-    if ((!authenticated || !csrfToken) && !localBypass) {
-      setError(new Error("Sua sessão expirou. Faça login novamente."));
+    if (!authenticated && !localBypass) {
+      setError(createSessionUnavailableError());
       return;
     }
 
@@ -67,8 +90,8 @@ export default function Aprovacoes() {
   };
 
   const handleRejeitar = async (id: string) => {
-    if ((!authenticated || !csrfToken) && !localBypass) {
-      setError(new Error("Sua sessão expirou. Faça login novamente."));
+    if (!authenticated && !localBypass) {
+      setError(createSessionUnavailableError());
       return;
     }
 

@@ -20,10 +20,24 @@ export default function Historico() {
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [fetching, setFetching] = useState(true);
 
+  const createSessionUnavailableError = () => new ApiError(
+    'Nao foi possivel validar sua sessao. Entre novamente.',
+    {
+      code: 'AUTH_SESSION_INVALID',
+      diagnostic: 'auth_state_unusable',
+      status: 401,
+    },
+  );
+
   const fetchGastos = async () => {
     setFetching(true);
     if (!authenticated && !localBypass) {
-      setData([]);
+      if (data.length > 0) {
+        setError(createSessionUnavailableError());
+      } else {
+        setData([]);
+        setError(null);
+      }
       setFetching(false);
       return;
     }
@@ -47,6 +61,17 @@ export default function Historico() {
   };
 
   useEffect(() => {
+    if (!authenticated && !localBypass) {
+      setFetching(false);
+      if (data.length > 0) {
+        setError(createSessionUnavailableError());
+      } else {
+        setData([]);
+        setError(null);
+      }
+      return;
+    }
+
     void fetchGastos();
   }, [authenticated, localBypass]);
 
@@ -66,8 +91,8 @@ export default function Historico() {
         return;
       }
 
-      if ((!authenticated || !csrfToken) && !localBypass) {
-        setError(new Error("Nao foi possivel validar sua sessao. Entre novamente."));
+      if (!authenticated && !localBypass) {
+        setError(createSessionUnavailableError());
         return;
       }
 

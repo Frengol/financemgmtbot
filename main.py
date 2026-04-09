@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from quart import Quart, Response, jsonify, redirect, request
 
@@ -13,9 +13,10 @@ from admin_api import (
     deletar_gasto_admin,
     listar_cache_admin,
     listar_gastos_admin,
+    obter_admin_atual,
     rejeitar_cache_admin,
 )
-from config import ADMIN_EMAILS, ADMIN_USER_IDS, AUTH_CALLBACK_PUBLIC_URL, FRONTEND_ALLOWED_ORIGINS, FRONTEND_PUBLIC_URL, SECRET_TOKEN, logger, mascarar_segredos, normalize_frontend_origin, supabase
+from config import ADMIN_EMAILS, ADMIN_USER_IDS, AUTH_CALLBACK_PUBLIC_URL, FRONTEND_ALLOWED_ORIGINS, FRONTEND_PUBLIC_URL, SECRET_TOKEN, logger, mascarar_segredos, normalize_build_id, normalize_frontend_origin, supabase
 from handlers import processar_update_assincrono
 from security import (
     AdminSessionStorageUnavailableError,
@@ -75,7 +76,11 @@ def _extract_user_fields(user):
 
 
 def _browser_cors_enabled():
-    return request.path.startswith("/api/admin") or request.path.startswith("/auth")
+    return (
+        request.path.startswith("/api/admin")
+        or request.path.startswith("/auth")
+        or (auth_test_mode_enabled() and request.path.startswith("/__test__/auth"))
+    )
 
 
 def _origin_allowed(origin: str):
@@ -190,6 +195,10 @@ def _sanitize_frontend_redirect_target(candidate: str | None):
     return default_target
 
 
+def _extract_client_build_header():
+    return normalize_build_id(request.headers.get("X-Client-Build"))
+
+
 def _allow_frontend_redirect_override():
     return auth_test_mode_enabled() or _is_loopback_request()
 
@@ -235,7 +244,7 @@ def _sanitize_frontend_app_redirect_target(candidate: str | None):
     return default_target
 
 
-def _build_callback_url(frontend_redirect: str):
+def _build_callback_url(frontend_redirect: str, *, mode: str):
     return frontend_redirect
 
 
@@ -243,8 +252,18 @@ def _build_frontend_callback_relay_target():
     query_string = request.query_string.decode("utf-8", errors="ignore").strip()
     redirect_to = _default_frontend_auth_callback_url()
     if not query_string:
-        return redirect_to
-    return f"{redirect_to}?{query_string}"
+        return _build_callback_url(redirect_to, mode="canonical")
+
+    parsed = urlsplit(_build_callback_url(redirect_to, mode="canonical"))
+    incoming_pairs = parse_qsl(query_string, keep_blank_values=True)
+    incoming_keys = {key for key, _value in incoming_pairs}
+    preserved_pairs = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key not in incoming_keys
+    ]
+    merged_query = urlencode([*preserved_pairs, *incoming_pairs])
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, merged_query, parsed.fragment))
 
 
 def _extract_magic_link_retry_after_seconds(error_text: str):
@@ -282,6 +301,9 @@ def _log_auth_session_storage_unavailable(exc: AdminSessionStorageUnavailableErr
         "storage": "admin_web_sessions",
         "request_id": request_id,
     }
+    client_build = _extract_client_build_header()
+    if client_build:
+        log_payload["client_build"] = client_build
     if exc.upstream_code:
         log_payload["upstream_code"] = exc.upstream_code
     logger.error(with_request_id(log_payload))
@@ -311,7 +333,10 @@ def _build_fragment_bridge_html(redirect_to: str):
       (async function () {{
         const redirectTo = new URL({serialized_redirect});
         if (window.location.search) {{
-          redirectTo.search = window.location.search;
+          const sourceSearch = new URLSearchParams(window.location.search);
+          sourceSearch.forEach((value, key) => {{
+            redirectTo.searchParams.set(key, value);
+          }});
         }}
         if (window.location.hash) {{
           redirectTo.hash = window.location.hash;
@@ -360,7 +385,7 @@ async def harden_response(response):
     origin = request.headers.get("Origin")
     if origin and _browser_cors_enabled() and _origin_allowed(origin):
         response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-CSRF-Token"
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-CSRF-Token, X-Client-Build"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Vary"] = "Origin"
@@ -383,16 +408,18 @@ async def auth_magic_link():
     email = sanitize_plain_text(payload.get("email"), 160).lower()
     try:
         redirect_to, redirect_mode = _resolve_magic_link_callback_url(payload.get("redirectTo"))
-        callback_url = _build_callback_url(redirect_to)
+        callback_url = _build_callback_url(redirect_to, mode=redirect_mode)
     except RuntimeError as exc:
         return _auth_redirect_config_error(exc)
     remote_addr = request.remote_addr or "unknown"
+    client_build = _extract_client_build_header()
     logger.info(
         with_request_id(
             {
                 "event": "auth_magic_link_callback_selected",
                 "mode": redirect_mode,
                 "callback_url": callback_url,
+                "client_build": client_build,
             }
         )
     )
@@ -465,7 +492,14 @@ async def auth_callback():
     try:
         auth_response = supabase.auth.get_user(access_token)
     except Exception as exc:
-        logger.warning(with_request_id({"event": "auth_callback_get_user_failed", "error": mascarar_segredos(str(exc))}))
+        log_payload = {
+            "event": "auth_callback_get_user_failed",
+            "error": mascarar_segredos(str(exc)),
+        }
+        client_build = _extract_client_build_header()
+        if client_build:
+            log_payload["client_build"] = client_build
+        logger.warning(with_request_id(log_payload))
         return _json_error("Invalid or expired upstream session.", 401, code="AUTH_SESSION_INVALID")
 
     user_id, email = _extract_user_fields(getattr(auth_response, "user", auth_response))
@@ -486,8 +520,10 @@ async def auth_callback():
     return _set_session_cookies(response, session["token"], session["csrf_token"])
 
 
-@app.route("/__test__/auth/reset", methods=["POST"])
+@app.route("/__test__/auth/reset", methods=["POST", "OPTIONS"])
 async def auth_test_reset():
+    if request.method == "OPTIONS":
+        return "", 204
     if not _test_support_request_allowed():
         return _json_error("Not found.", 404)
 
@@ -495,8 +531,10 @@ async def auth_test_reset():
     return _json_success({"reset": True}, 200)
 
 
-@app.route("/__test__/auth/transactions", methods=["POST"])
+@app.route("/__test__/auth/transactions", methods=["POST", "OPTIONS"])
 async def auth_test_transactions():
+    if request.method == "OPTIONS":
+        return "", 204
     if not _test_support_request_allowed():
         return _json_error("Not found.", 404)
 
@@ -509,8 +547,10 @@ async def auth_test_transactions():
     return _json_success({"transactions": seeded}, 200)
 
 
-@app.route("/__test__/auth/magic-link", methods=["GET", "POST"])
+@app.route("/__test__/auth/magic-link", methods=["GET", "POST", "OPTIONS"])
 async def auth_test_magic_link():
+    if request.method == "OPTIONS":
+        return "", 204
     if not _test_support_request_allowed():
         return _json_error("Not found.", 404)
 
@@ -526,7 +566,7 @@ async def auth_test_magic_link():
     user_id = sanitize_plain_text(payload.get("userId"), 120) or None
     try:
         redirect_to = _sanitize_frontend_redirect_target(payload.get("redirectTo"))
-        callback_url = _build_callback_url(redirect_to)
+        callback_url = _build_callback_url(redirect_to, mode="local_override")
     except RuntimeError as exc:
         return _auth_redirect_config_error(exc)
 
@@ -534,8 +574,10 @@ async def auth_test_magic_link():
     return _json_success({"magicLink": magic_link}, 200)
 
 
-@app.route("/__test__/auth/verify", methods=["GET"])
+@app.route("/__test__/auth/verify", methods=["GET", "OPTIONS"])
 async def auth_test_verify():
+    if request.method == "OPTIONS":
+        return "", 204
     if not _test_support_request_allowed():
         return _json_error("Not found.", 404)
 
@@ -612,6 +654,13 @@ async def auth_logout():
 
     response = _json_success({"loggedOut": True}, 200)
     return _clear_session_cookies(response)
+
+
+@app.route("/api/admin/me", methods=["GET", "OPTIONS"])
+async def admin_me():
+    if request.method == "OPTIONS":
+        return "", 204
+    return obter_admin_atual()
 
 
 @app.route("/", methods=["POST"])

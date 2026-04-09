@@ -2,26 +2,51 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthProvider, useAuth } from './useAuth';
+import { ApiError } from '@/lib/adminApi';
 
-const mockGetAuthSession = vi.fn();
+const mockGetAdminMe = vi.fn();
+const mockLogoutAuthSession = vi.fn();
 const mockGetSession = vi.fn();
 const mockOnAuthStateChange = vi.fn();
-const mockSignOut = vi.fn();
 const mockClearBrowserAuthState = vi.fn();
-const mockLogoutAuthSession = vi.fn();
-const mockBrowserAdminTestSessionAllowed = vi.fn();
+const mockPurgeLegacyBrowserAuthStorage = vi.fn();
+const mockSetCachedBrowserAccessToken = vi.fn();
+const mockBrowserAdminAuthTestModeEnabled = vi.fn();
+const mockLoadBrowserAdminTestSession = vi.fn();
+const mockSaveBrowserAdminProfile = vi.fn();
+const mockSaveBrowserAdminLoginNotice = vi.fn();
+const mockClearBrowserAdminLoginNotice = vi.fn();
+const mockDecodeAccessTokenIdentity = vi.fn();
 
 function buildJwtLikeToken(...segments: string[]) {
   return segments.join('.');
 }
 
+vi.mock('@/lib/adminApi', () => ({
+  ApiError: class ApiError extends Error {
+    code: string;
+    status: number;
+
+    constructor(message: string, { code, status }: { code: string; status: number }) {
+      super(message);
+      this.name = 'ApiError';
+      this.code = code;
+      this.status = status;
+    }
+  },
+  getAdminMe: (...args: unknown[]) => mockGetAdminMe(...args),
+  logoutAuthSession: (...args: unknown[]) => mockLogoutAuthSession(...args),
+  localDevBypassEnabled: false,
+}));
+
 vi.mock('@/lib/supabase', () => ({
   clearBrowserAuthState: (...args: unknown[]) => mockClearBrowserAuthState(...args),
+  purgeLegacyBrowserAuthStorage: (...args: unknown[]) => mockPurgeLegacyBrowserAuthStorage(...args),
+  setCachedBrowserAccessToken: (...args: unknown[]) => mockSetCachedBrowserAccessToken(...args),
   supabase: {
     auth: {
       getSession: (...args: unknown[]) => mockGetSession(...args),
       onAuthStateChange: (...args: unknown[]) => mockOnAuthStateChange(...args),
-      signOut: (...args: unknown[]) => mockSignOut(...args),
     },
   },
 }));
@@ -30,15 +55,14 @@ vi.mock('@/lib/auth', async () => {
   const actual = await vi.importActual<typeof import('@/lib/auth')>('@/lib/auth');
   return {
     ...actual,
-    browserAdminTestSessionAllowed: (...args: unknown[]) => mockBrowserAdminTestSessionAllowed(...args),
+    browserAdminAuthTestModeEnabled: (...args: unknown[]) => mockBrowserAdminAuthTestModeEnabled(...args),
+    loadBrowserAdminTestSession: (...args: unknown[]) => mockLoadBrowserAdminTestSession(...args),
+    saveBrowserAdminProfile: (...args: unknown[]) => mockSaveBrowserAdminProfile(...args),
+    saveBrowserAdminLoginNotice: (...args: unknown[]) => mockSaveBrowserAdminLoginNotice(...args),
+    clearBrowserAdminLoginNotice: (...args: unknown[]) => mockClearBrowserAdminLoginNotice(...args),
+    decodeAccessTokenIdentity: (...args: unknown[]) => mockDecodeAccessTokenIdentity(...args),
   };
 });
-
-vi.mock('@/lib/adminApi', () => ({
-  getAuthSession: (...args: unknown[]) => mockGetAuthSession(...args),
-  logoutAuthSession: (...args: unknown[]) => mockLogoutAuthSession(...args),
-  localDevBypassEnabled: false,
-}));
 
 function AuthHarness() {
   const { authenticated, user, csrfToken, loading, refreshSession, signOut } = useAuth();
@@ -61,16 +85,23 @@ function AuthHarness() {
 
 describe('useAuth', () => {
   beforeEach(() => {
-    mockGetAuthSession.mockReset();
+    mockGetAdminMe.mockReset();
+    mockLogoutAuthSession.mockReset();
     mockGetSession.mockReset();
     mockOnAuthStateChange.mockReset();
-    mockSignOut.mockReset();
     mockClearBrowserAuthState.mockReset();
-    mockLogoutAuthSession.mockReset();
-    mockBrowserAdminTestSessionAllowed.mockReset();
-    mockBrowserAdminTestSessionAllowed.mockReturnValue(true);
-    window.localStorage.clear();
-    window.history.pushState({}, '', '/#access_token=abc&refresh_token=def');
+    mockPurgeLegacyBrowserAuthStorage.mockReset();
+    mockSetCachedBrowserAccessToken.mockReset();
+    mockBrowserAdminAuthTestModeEnabled.mockReset();
+    mockLoadBrowserAdminTestSession.mockReset();
+    mockSaveBrowserAdminProfile.mockReset();
+    mockSaveBrowserAdminLoginNotice.mockReset();
+    mockClearBrowserAdminLoginNotice.mockReset();
+    mockDecodeAccessTokenIdentity.mockReset();
+
+    mockBrowserAdminAuthTestModeEnabled.mockReturnValue(false);
+    mockLoadBrowserAdminTestSession.mockReturnValue(null);
+    mockGetSession.mockResolvedValue({ data: { session: null } });
     mockOnAuthStateChange.mockReturnValue({
       data: {
         subscription: {
@@ -78,10 +109,21 @@ describe('useAuth', () => {
         },
       },
     });
+    mockGetAdminMe.mockResolvedValue({
+      authenticated: true,
+      authorized: true,
+      user: {
+        id: 'user-1',
+        email: 'admin@example.com',
+      },
+    });
+    mockClearBrowserAuthState.mockResolvedValue(undefined);
+    mockLogoutAuthSession.mockResolvedValue({ loggedOut: true });
+    mockDecodeAccessTokenIdentity.mockReturnValue(null);
   });
 
-  it('loads the Supabase session and refreshes on focus', async () => {
-    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-1', 'signature-segment');
+  it('hydrates the app from the official Supabase browser session and validates admin access', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload', 'signature');
     mockGetSession.mockResolvedValue({
       data: {
         session: {
@@ -104,153 +146,53 @@ describe('useAuth', () => {
     expect(screen.getByTestId('authenticated')).toHaveTextContent('yes');
     expect(screen.getByTestId('email')).toHaveTextContent('admin@example.com');
     expect(screen.getByTestId('csrf')).toHaveTextContent('');
-
-    window.dispatchEvent(new Event('focus'));
-
-    await waitFor(() => {
-      expect(mockGetSession).toHaveBeenCalledTimes(2);
-    });
-    expect(mockGetAuthSession).not.toHaveBeenCalled();
-  });
-
-  it('falls back to the backend session lookup when the browser session is missing', async () => {
-    mockGetSession.mockResolvedValue({
-      data: {
-        session: null,
-      },
-    });
-    mockGetAuthSession.mockResolvedValue({
-      authenticated: true,
-      user: { id: 'user-1', email: 'admin@example.com' },
-      csrfToken: 'csrf-token',
-    });
-
-    render(
-      <AuthProvider>
-        <AuthHarness />
-      </AuthProvider>,
-    );
-
-    await waitFor(() => {
-      expect(screen.getByTestId('loading')).toHaveTextContent('ready');
-    });
-
-    expect(screen.getByTestId('authenticated')).toHaveTextContent('yes');
-    expect(screen.getByTestId('email')).toHaveTextContent('admin@example.com');
-    expect(screen.getByTestId('csrf')).toHaveTextContent('csrf-token');
-  });
-
-  it('does not call the legacy backend auth session fallback on the published Pages runtime', async () => {
-    mockBrowserAdminTestSessionAllowed.mockReturnValue(false);
-    mockGetSession.mockResolvedValue({
-      data: {
-        session: null,
-      },
-    });
-
-    render(
-      <AuthProvider>
-        <AuthHarness />
-      </AuthProvider>,
-    );
-
-    await waitFor(() => {
-      expect(screen.getByTestId('loading')).toHaveTextContent('ready');
-    });
-
-    expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
-    expect(mockGetAuthSession).not.toHaveBeenCalled();
-  });
-
-  it('clears malformed browser auth state before falling back to the backend session', async () => {
-    window.localStorage.setItem('financemgmtbot-admin-profile', JSON.stringify({
-      id: 'stale-user',
-      email: 'stale@example.com',
-    }));
-
-    mockGetSession.mockResolvedValue({
-      data: {
-        session: {
-          access_token: 'not-a-jwt',
-          user: { id: 'user-malformed', email: 'broken@example.com' },
-        },
-      },
-    });
-    mockGetAuthSession.mockResolvedValue({
-      authenticated: true,
-      user: { id: 'user-1', email: 'admin@example.com' },
-      csrfToken: 'csrf-token',
-    });
-    mockClearBrowserAuthState.mockImplementation(async () => {
-      window.localStorage.removeItem('financemgmtbot-admin-profile');
-      window.localStorage.removeItem('financemgmtbot-admin-auth-test-session');
-    });
-
-    render(
-      <AuthProvider>
-        <AuthHarness />
-      </AuthProvider>,
-    );
-
-    await waitFor(() => {
-      expect(screen.getByTestId('loading')).toHaveTextContent('ready');
-    });
-
-    expect(mockClearBrowserAuthState).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId('authenticated')).toHaveTextContent('yes');
-    expect(screen.getByTestId('email')).toHaveTextContent('admin@example.com');
-    expect(window.localStorage.getItem('financemgmtbot-admin-profile')).toBeNull();
-    expect(window.localStorage.getItem('financemgmtbot-admin-auth-test-session')).toBeNull();
-  });
-
-  it('hydrates the authorized user from JWT claims when the Supabase session omits user metadata', async () => {
-    const jwtPayload = btoa(JSON.stringify({
-      sub: 'user-claims',
+    expect(mockGetAdminMe).toHaveBeenCalledWith(accessToken);
+    expect(mockSetCachedBrowserAccessToken).toHaveBeenCalledWith(accessToken);
+    expect(mockSaveBrowserAdminProfile).toHaveBeenCalledWith({
+      id: 'user-1',
       email: 'admin@example.com',
-      exp: 9999999999,
-    }))
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/g, '');
-
-    mockGetSession.mockResolvedValue({
-      data: {
-        session: {
-          access_token: `header.${jwtPayload}.signature`,
-          user: null,
-        },
-      },
     });
-
-    render(
-      <AuthProvider>
-        <AuthHarness />
-      </AuthProvider>,
-    );
-
-    await waitFor(() => {
-      expect(screen.getByTestId('loading')).toHaveTextContent('ready');
-    });
-
-    expect(screen.getByTestId('authenticated')).toHaveTextContent('yes');
-    expect(screen.getByTestId('email')).toHaveTextContent('admin@example.com');
-    expect(screen.getByTestId('csrf')).toHaveTextContent('');
-    expect(mockGetAuthSession).not.toHaveBeenCalled();
   });
 
-  it('accepts the browser auth test session fallback used by the integrated magic-link tests', async () => {
-    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-2', 'signature-segment');
-    window.localStorage.setItem('financemgmtbot-admin-auth-test-session', JSON.stringify({
+  it('uses the auth test session only in local auth test mode', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-test', 'signature');
+    mockBrowserAdminAuthTestModeEnabled.mockReturnValue(true);
+    mockLoadBrowserAdminTestSession.mockReturnValue({
       accessToken,
-      refreshToken: 'auth-test-refresh',
+      refreshToken: 'refresh-1',
       user: {
         id: 'auth-test-user',
         email: 'admin@example.com',
       },
-    }));
-    mockGetSession.mockResolvedValue({
-      data: {
-        session: null,
+    });
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading')).toHaveTextContent('ready');
+    });
+
+    expect(screen.getByTestId('authenticated')).toHaveTextContent('yes');
+    expect(screen.getByTestId('email')).toHaveTextContent('admin@example.com');
+    expect(mockGetSession).not.toHaveBeenCalled();
+    expect(mockGetAdminMe).not.toHaveBeenCalled();
+    expect(mockOnAuthStateChange).not.toHaveBeenCalled();
+    expect(mockSetCachedBrowserAccessToken).toHaveBeenCalledWith(accessToken);
+  });
+
+  it('does not let an empty Supabase session overwrite a valid local auth test session', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-test', 'signature');
+    mockBrowserAdminAuthTestModeEnabled.mockReturnValue(true);
+    mockLoadBrowserAdminTestSession.mockReturnValue({
+      accessToken,
+      refreshToken: 'refresh-1',
+      user: {
+        id: 'auth-test-user',
+        email: 'admin@example.com',
       },
     });
 
@@ -266,17 +208,20 @@ describe('useAuth', () => {
 
     expect(screen.getByTestId('authenticated')).toHaveTextContent('yes');
     expect(screen.getByTestId('email')).toHaveTextContent('admin@example.com');
-    expect(mockGetAuthSession).not.toHaveBeenCalled();
+    expect(mockGetSession).not.toHaveBeenCalled();
+    expect(mockOnAuthStateChange).not.toHaveBeenCalled();
+    expect(mockClearBrowserAuthState).not.toHaveBeenCalled();
   });
 
-  it('falls back to a logged-out state when both session lookups fail', async () => {
-    window.localStorage.setItem('financemgmtbot-admin-profile', JSON.stringify({
-      id: 'stale-user',
-      email: 'stale@example.com',
-    }));
-    window.localStorage.setItem('financemgmtbot-admin-auth-test-session', '{bad-json');
-    mockGetSession.mockRejectedValue(new Error('network'));
-    mockGetAuthSession.mockRejectedValue(new Error('network'));
+  it('clears malformed browser auth state instead of falling back to /auth/session', async () => {
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: 'not-a-jwt',
+          user: { id: 'user-1', email: 'broken@example.com' },
+        },
+      },
+    });
 
     render(
       <AuthProvider>
@@ -289,114 +234,15 @@ describe('useAuth', () => {
     });
 
     expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
-    expect(window.localStorage.getItem('financemgmtbot-admin-profile')).toBeNull();
-    expect(window.localStorage.getItem('financemgmtbot-admin-auth-test-session')).toBeNull();
+    expect(mockClearBrowserAuthState).toHaveBeenCalledTimes(1);
+    expect(mockSaveBrowserAdminLoginNotice).toHaveBeenCalledWith({
+      message: 'Sua sessao de acesso e invalida. Faca login novamente. Diagnostico: auth_state_unusable',
+    });
+    expect(mockGetAdminMe).not.toHaveBeenCalled();
   });
 
-  it('signs out through Supabase, clears local auth state and clears legacy backend cookies best-effort', async () => {
-    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-3', 'signature-segment');
-    mockGetSession.mockResolvedValue({
-      data: {
-        session: {
-          access_token: accessToken,
-          user: { id: 'user-1', email: 'admin@example.com' },
-        },
-      },
-    });
-    mockSignOut.mockResolvedValue({ error: null });
-    mockClearBrowserAuthState.mockResolvedValue(undefined);
-    mockLogoutAuthSession.mockResolvedValue({ loggedOut: true });
-
-    render(
-      <AuthProvider>
-        <AuthHarness />
-      </AuthProvider>,
-    );
-
-    await waitFor(() => {
-      expect(screen.getByTestId('authenticated')).toHaveTextContent('yes');
-    });
-
-    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
-
-    await waitFor(() => {
-      expect(mockClearBrowserAuthState).toHaveBeenCalledTimes(1);
-      expect(mockLogoutAuthSession).toHaveBeenCalledTimes(1);
-    });
-    expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
-    expect(screen.getByTestId('csrf')).toHaveTextContent('');
-  });
-
-  it('allows manual refresh, reacts to auth state changes and throws outside the provider', async () => {
-    const refreshAccessToken = buildJwtLikeToken('header-segment', 'payload-segment-4', 'signature-segment');
-    let authStateHandler: ((event: string, session: { access_token?: string; user?: { id: string; email?: string | null } } | null) => void) | undefined;
-    mockOnAuthStateChange.mockImplementation((handler: typeof authStateHandler) => {
-      authStateHandler = handler;
-      return {
-        data: {
-          subscription: {
-            unsubscribe: vi.fn(),
-          },
-        },
-      };
-    });
-    mockGetSession
-      .mockResolvedValueOnce({
-        data: {
-          session: null,
-        },
-      })
-      .mockResolvedValueOnce({
-        data: {
-          session: {
-            access_token: refreshAccessToken,
-            user: { id: 'user-2', email: 'admin2@example.com' },
-          },
-        },
-      })
-      .mockResolvedValueOnce({
-        data: {
-          session: null,
-        },
-      });
-    mockGetAuthSession
-      .mockResolvedValueOnce({
-        authenticated: false,
-      })
-      .mockResolvedValueOnce({
-        authenticated: false,
-      });
-
-    render(
-      <AuthProvider>
-        <AuthHarness />
-      </AuthProvider>,
-    );
-
-    await waitFor(() => {
-      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
-    });
-
-    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    await waitFor(() => {
-      expect(screen.getByTestId('authenticated')).toHaveTextContent('yes');
-    });
-    authStateHandler?.('SIGNED_OUT', null);
-    await waitFor(() => {
-      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
-    });
-    expect(mockGetAuthSession).toHaveBeenCalledTimes(2);
-
-    function InvalidHarness() {
-      useAuth();
-      return null;
-    }
-
-    expect(() => render(<InvalidHarness />)).toThrow('useAuth must be used within AuthProvider.');
-  });
-
-  it('falls back to refreshSession when the auth state change does not resolve a usable user', async () => {
-    const malformedToken = 'not-a-jwt';
+  it('reacts to auth state changes and signs out cleanly', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-refresh', 'signature');
     let authStateHandler: ((event: string, session: { access_token?: string; user?: { id?: string; email?: string | null } | null } | null) => void) | undefined;
     mockOnAuthStateChange.mockImplementation((handler: typeof authStateHandler) => {
       authStateHandler = handler;
@@ -408,67 +254,7 @@ describe('useAuth', () => {
         },
       };
     });
-    mockGetSession
-      .mockResolvedValueOnce({
-        data: {
-          session: null,
-        },
-      })
-      .mockResolvedValueOnce({
-        data: {
-          session: null,
-        },
-      });
-    mockGetAuthSession
-      .mockResolvedValueOnce({
-        authenticated: false,
-      })
-      .mockResolvedValueOnce({
-        authenticated: false,
-      });
-
-    render(
-      <AuthProvider>
-        <AuthHarness />
-      </AuthProvider>,
-    );
-
-    await waitFor(() => {
-      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
-    });
-
-    authStateHandler?.('SIGNED_IN', {
-      access_token: malformedToken,
-      user: null,
-    });
-
-    await waitFor(() => {
-      expect(mockGetSession).toHaveBeenCalledTimes(2);
-    });
-    expect(mockGetAuthSession).toHaveBeenCalledTimes(2);
-  });
-
-  it('hydrates the authenticated state directly from a valid auth state change session', async () => {
-    const accessToken = buildJwtLikeToken('header-segment', 'payload-segment-5', 'signature-segment');
-    let authStateHandler: ((event: string, session: { access_token?: string; user?: { id?: string; email?: string | null } | null } | null) => void) | undefined;
-    mockOnAuthStateChange.mockImplementation((handler: typeof authStateHandler) => {
-      authStateHandler = handler;
-      return {
-        data: {
-          subscription: {
-            unsubscribe: vi.fn(),
-          },
-        },
-      };
-    });
-    mockGetSession.mockResolvedValue({
-      data: {
-        session: null,
-      },
-    });
-    mockGetAuthSession.mockResolvedValue({
-      authenticated: false,
-    });
+    mockGetSession.mockResolvedValue({ data: { session: null } });
 
     render(
       <AuthProvider>
@@ -482,26 +268,69 @@ describe('useAuth', () => {
 
     authStateHandler?.('SIGNED_IN', {
       access_token: accessToken,
-      user: { id: 'user-3', email: 'admin3@example.com' },
+      user: { id: 'user-2', email: 'admin2@example.com' },
     });
 
     await waitFor(() => {
       expect(screen.getByTestId('authenticated')).toHaveTextContent('yes');
     });
-    expect(screen.getByTestId('email')).toHaveTextContent('admin3@example.com');
-    expect(screen.getByTestId('csrf')).toHaveTextContent('');
+
+    authStateHandler?.('SIGNED_OUT', null);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+
+    await waitFor(() => {
+      expect(mockClearBrowserAuthState).toHaveBeenCalled();
+      expect(mockLogoutAuthSession).toHaveBeenCalledTimes(1);
+    });
   });
 
-  it('preserves the magic-link token fragment while the auth callback route is mounting', async () => {
-    window.history.pushState({}, '', '/auth/callback#access_token=abc&refresh_token=def');
+  it('treats an empty initial browser session as logged out in the published flow', async () => {
+    let authStateHandler: ((event: string, session: { access_token?: string; user?: { id?: string; email?: string | null } | null } | null) => void) | undefined;
+    mockOnAuthStateChange.mockImplementation((handler: typeof authStateHandler) => {
+      authStateHandler = handler;
+      return {
+        data: {
+          subscription: {
+            unsubscribe: vi.fn(),
+          },
+        },
+      };
+    });
+    mockGetSession.mockResolvedValue({ data: { session: null } });
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    });
+
+    authStateHandler?.('INITIAL_SESSION', null);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    });
+  });
+
+  it('persists a short validation failure notice when backend authorization throws a non-api error', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload', 'signature');
     mockGetSession.mockResolvedValue({
       data: {
-        session: null,
+        session: {
+          access_token: accessToken,
+          user: { id: 'user-1', email: 'admin@example.com' },
+        },
       },
     });
-    mockGetAuthSession.mockResolvedValue({
-      authenticated: false,
-    });
+    mockGetAdminMe.mockRejectedValue(new Error('network boom'));
 
     render(
       <AuthProvider>
@@ -513,13 +342,249 @@ describe('useAuth', () => {
       expect(screen.getByTestId('loading')).toHaveTextContent('ready');
     });
 
-    expect(window.location.hash).toContain('access_token=abc');
-    expect(window.location.hash).toContain('refresh_token=def');
-    expect(mockGetAuthSession).not.toHaveBeenCalled();
+    expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    expect(mockSaveBrowserAdminLoginNotice).toHaveBeenCalledWith({
+      message: 'Nao foi possivel validar sua sessao agora. Faca login novamente. Diagnostico: auth_validation_failed',
+    });
+    expect(mockClearBrowserAuthState).toHaveBeenCalled();
   });
 
-  it('supports local development bypass without calling the backend logout route', async () => {
+  it('keeps the backend auth message when validation fails with a typed ApiError', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload', 'signature');
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: { id: 'user-1', email: 'admin@example.com' },
+        },
+      },
+    });
+    mockGetAdminMe.mockRejectedValue(new ApiError('Seu usuario nao esta autorizado a acessar o painel.', {
+      code: 'AUTH_ACCESS_DENIED',
+      status: 403,
+    }));
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    });
+
+    expect(mockSaveBrowserAdminLoginNotice).toHaveBeenCalledWith({
+      message: 'Seu usuario nao esta autorizado a acessar o painel.',
+    });
+  });
+
+  it('logs out when the backend responds with an unauthenticated or unauthorized payload', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-denied', 'signature');
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: { id: 'user-1', email: 'admin@example.com' },
+        },
+      },
+    });
+    mockGetAdminMe.mockResolvedValue({
+      authenticated: false,
+      authorized: false,
+      user: null,
+    });
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    });
+
+    expect(mockSaveBrowserAdminLoginNotice).toHaveBeenCalledWith({
+      message: 'Seu usuario nao esta autorizado a acessar o painel.',
+    });
+    expect(mockClearBrowserAuthState).toHaveBeenCalled();
+  });
+
+  it('clears browser state when reading the persisted Supabase session throws unexpectedly', async () => {
+    mockGetSession.mockRejectedValue(new Error('session read failed'));
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading')).toHaveTextContent('ready');
+    });
+
+    expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    expect(mockClearBrowserAuthState).toHaveBeenCalled();
+  });
+
+  it('uses the decoded access token identity when the backend response omits the user payload', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-fallback', 'signature');
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: null,
+        },
+      },
+    });
+    mockGetAdminMe.mockResolvedValue({
+      authenticated: true,
+      authorized: true,
+      user: null,
+    });
+    mockDecodeAccessTokenIdentity.mockReturnValue({
+      id: 'token-user',
+      email: 'token@example.com',
+    });
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('yes');
+    });
+
+    expect(screen.getByTestId('email')).toHaveTextContent('token@example.com');
+    expect(mockSaveBrowserAdminProfile).toHaveBeenCalledWith({
+      id: 'token-user',
+      email: 'token@example.com',
+    });
+  });
+
+  it('logs the browser out when neither backend nor token claims provide a usable identity', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-empty', 'signature');
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: null,
+        },
+      },
+    });
+    mockGetAdminMe.mockResolvedValue({
+      authenticated: true,
+      authorized: true,
+      user: null,
+    });
+    mockDecodeAccessTokenIdentity.mockReturnValue(null);
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    });
+
+    expect(mockSaveBrowserAdminLoginNotice).toHaveBeenCalledWith({
+      message: 'Nao foi possivel validar sua sessao agora. Faca login novamente.',
+    });
+    expect(mockClearBrowserAuthState).toHaveBeenCalled();
+  });
+
+  it('keeps the browser flow logged out when an auth event arrives without an access token', async () => {
+    let authStateHandler: ((event: string, session: { access_token?: string; user?: { id?: string; email?: string | null } | null } | null) => void) | undefined;
+    mockOnAuthStateChange.mockImplementation((handler: typeof authStateHandler) => {
+      authStateHandler = handler;
+      return {
+        data: {
+          subscription: {
+            unsubscribe: vi.fn(),
+          },
+        },
+      };
+    });
+    mockGetSession.mockResolvedValue({ data: { session: null } });
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    });
+
+    authStateHandler?.('SIGNED_IN', { user: { id: 'user-1', email: 'admin@example.com' } });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    });
+  });
+
+  it('ignores late auth events after the provider unmounts', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-late', 'signature');
+    let authStateHandler: ((event: string, session: { access_token?: string; user?: { id?: string; email?: string | null } | null } | null) => void) | undefined;
+    mockOnAuthStateChange.mockImplementation((handler: typeof authStateHandler) => {
+      authStateHandler = handler;
+      return {
+        data: {
+          subscription: {
+            unsubscribe: vi.fn(),
+          },
+        },
+      };
+    });
+    mockGetSession.mockResolvedValue({ data: { session: null } });
+
+    const view = render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    });
+
+    view.unmount();
+    authStateHandler?.('SIGNED_IN', {
+      access_token: accessToken,
+      user: { id: 'user-1', email: 'admin@example.com' },
+    });
+
+    expect(mockGetAdminMe).not.toHaveBeenCalledWith(accessToken);
+  });
+
+  it('stays logged out in auth test mode when no deterministic local session exists', async () => {
+    mockBrowserAdminAuthTestModeEnabled.mockReturnValue(true);
+    mockLoadBrowserAdminTestSession.mockReturnValue(null);
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading')).toHaveTextContent('ready');
+    });
+
+    expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    expect(mockGetSession).not.toHaveBeenCalled();
+    expect(mockOnAuthStateChange).not.toHaveBeenCalled();
+  });
+
+  it('supports local development bypass without touching Supabase or backend auth routes', async () => {
     vi.resetModules();
+
     const bypassGetSession = vi.fn();
     const bypassOnAuthStateChange = vi.fn().mockReturnValue({
       data: {
@@ -528,24 +593,26 @@ describe('useAuth', () => {
         },
       },
     });
-    const bypassSignOut = vi.fn();
     const bypassClearBrowserAuthState = vi.fn();
+    const bypassPurgeLegacyBrowserAuthStorage = vi.fn();
     const bypassLogout = vi.fn();
 
+    vi.doMock('@/lib/adminApi', () => ({
+      ApiError: class ApiError extends Error {},
+      getAdminMe: vi.fn(),
+      logoutAuthSession: (...args: unknown[]) => bypassLogout(...args),
+      localDevBypassEnabled: true,
+    }));
     vi.doMock('@/lib/supabase', () => ({
       clearBrowserAuthState: (...args: unknown[]) => bypassClearBrowserAuthState(...args),
+      purgeLegacyBrowserAuthStorage: (...args: unknown[]) => bypassPurgeLegacyBrowserAuthStorage(...args),
+      setCachedBrowserAccessToken: vi.fn(),
       supabase: {
         auth: {
           getSession: (...args: unknown[]) => bypassGetSession(...args),
           onAuthStateChange: (...args: unknown[]) => bypassOnAuthStateChange(...args),
-          signOut: (...args: unknown[]) => bypassSignOut(...args),
         },
       },
-    }));
-    vi.doMock('@/lib/adminApi', () => ({
-      getAuthSession: (...args: unknown[]) => bypassGetSession(...args),
-      logoutAuthSession: (...args: unknown[]) => bypassLogout(...args),
-      localDevBypassEnabled: true,
     }));
 
     const authModule = await import('./useAuth');
@@ -582,9 +649,17 @@ describe('useAuth', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Bypass sign out' }));
 
     expect(bypassGetSession).not.toHaveBeenCalled();
-    expect(bypassSignOut).not.toHaveBeenCalled();
-    expect(bypassClearBrowserAuthState).not.toHaveBeenCalled();
     expect(bypassLogout).not.toHaveBeenCalled();
-    expect(screen.getByTestId('bypass-authenticated')).toHaveTextContent('no');
+    expect(bypassClearBrowserAuthState).not.toHaveBeenCalled();
+    expect(bypassPurgeLegacyBrowserAuthStorage).toHaveBeenCalledTimes(1);
+  });
+
+  it('throws outside the provider', () => {
+    function InvalidHarness() {
+      useAuth();
+      return null;
+    }
+
+    expect(() => render(<InvalidHarness />)).toThrow('useAuth must be used within AuthProvider.');
   });
 });

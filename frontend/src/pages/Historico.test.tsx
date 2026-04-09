@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Historico from './Historico';
@@ -46,9 +46,16 @@ describe('Historico', () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
   });
 
-  it('loads transactions, normalizes fallbacks and deletes a row', async () => {
+  it('loads transactions, normalizes fallbacks and deletes a row with bearer-only auth state', async () => {
     const eventSpy = vi.fn();
     window.addEventListener('transactions:changed', eventSpy);
+    mockUseAuth.mockReturnValue({
+      authenticated: true,
+      csrfToken: '',
+      loading: false,
+      localBypass: false,
+      signOut: mockSignOut,
+    });
     mockGetTransactions
       .mockResolvedValueOnce({
         transactions: [{
@@ -75,7 +82,7 @@ describe('Historico', () => {
     await userEvent.click(screen.getAllByTitle('Excluir')[0]);
 
     await waitFor(() => {
-      expect(mockDeleteTransaction).toHaveBeenCalledWith('tx-1', 'csrf-token');
+      expect(mockDeleteTransaction).toHaveBeenCalledWith('tx-1', '');
     });
     await waitFor(() => {
       expect(screen.queryByText('Compra do mes')).not.toBeInTheDocument();
@@ -84,9 +91,9 @@ describe('Historico', () => {
     window.removeEventListener('transactions:changed', eventSpy);
   });
 
-  it('shows auth error before deleting when the session is unavailable', async () => {
+  it('keeps the history empty when the admin session is unavailable', async () => {
     mockUseAuth.mockReturnValue({
-      authenticated: true,
+      authenticated: false,
       csrfToken: '',
       loading: false,
       localBypass: false,
@@ -106,11 +113,50 @@ describe('Historico', () => {
 
     render(<Historico />);
 
-    expect(await screen.findByText('Compra')).toBeInTheDocument();
-    await userEvent.click(screen.getAllByTitle('Excluir')[0]);
+    expect(await screen.findByText('Mostrando 0 registros')).toBeInTheDocument();
+    expect(screen.queryByText('Compra')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Excluir')).not.toBeInTheDocument();
+    expect(mockDeleteTransaction).not.toHaveBeenCalled();
+  });
+
+  it('shows an auth error when the session becomes unavailable after a row is already loaded', async () => {
+    const authState = {
+      authenticated: true,
+      csrfToken: '',
+      loading: false,
+      localBypass: false,
+      signOut: mockSignOut,
+    };
+    mockUseAuth.mockImplementation(() => authState);
+    mockGetTransactions.mockResolvedValue({
+      transactions: [{
+        id: 'tx-1',
+        data: '2026-03-19',
+        natureza: 'Essencial',
+        categoria: 'Mercado',
+        descricao: 'Compra protegida por sessao',
+        valor: 10,
+        conta: 'Nubank',
+        metodo_pagamento: 'Pix',
+      }],
+    });
+
+    const { rerender } = render(<Historico />);
+
+    expect(await screen.findByText('Compra protegida por sessao')).toBeInTheDocument();
+
+    await act(async () => {
+      authState.authenticated = false;
+      rerender(<Historico />);
+    });
 
     expect(await screen.findByText('Nao foi possivel validar sua sessao. Entre novamente.')).toBeInTheDocument();
+    expect(screen.getByText('Compra protegida por sessao')).toBeInTheDocument();
+    await userEvent.click(screen.getAllByTitle('Excluir')[0]);
+    window.dispatchEvent(new CustomEvent('transactions:changed'));
+
     expect(mockDeleteTransaction).not.toHaveBeenCalled();
+    expect(mockGetTransactions).toHaveBeenCalledTimes(1);
   });
 
   it('opens edit mode with the selected transaction', async () => {
@@ -210,6 +256,23 @@ describe('Historico', () => {
 
     expect(await screen.findByText('Mostrando 0 registros')).toBeInTheDocument();
     expect(mockGetTransactions).not.toHaveBeenCalled();
+  });
+
+  it('ignores refresh events while the session is unavailable and no rows are loaded', async () => {
+    mockUseAuth.mockReturnValue({
+      authenticated: false,
+      csrfToken: '',
+      loading: false,
+      localBypass: false,
+    });
+
+    render(<Historico />);
+
+    expect(await screen.findByText('Mostrando 0 registros')).toBeInTheDocument();
+    window.dispatchEvent(new CustomEvent('transactions:changed'));
+
+    expect(mockGetTransactions).not.toHaveBeenCalled();
+    expect(screen.queryByText('Nao foi possivel validar sua sessao. Entre novamente.')).not.toBeInTheDocument();
   });
 
   it('does not delete when the confirmation dialog is cancelled', async () => {
