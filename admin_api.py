@@ -22,6 +22,7 @@ from test_support import auth_test_mode_enabled, list_seeded_transactions, resol
 from utils import CATEGORIA_MAP, inferir_natureza
 
 AUDIT_TABLE = "auditoria_admin"
+MAX_BEARER_TOKEN_CHARS = 8192
 ALLOWED_TRANSACTION_FIELDS = {
     "data",
     "valor",
@@ -81,13 +82,25 @@ def _extract_user_fields(user: Any):
 
 
 def _extract_bearer_token():
-    authorization = sanitize_plain_text(request.headers.get("Authorization"), 400)
-    if not authorization:
+    authorization = request.headers.get("Authorization")
+    if authorization is None:
         return None
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token.strip():
+
+    raw_header = str(authorization).replace("\x00", "").strip()
+    if not raw_header:
         return None
-    return token.strip()
+
+    parts = raw_header.split(None, 1)
+    if len(parts) != 2:
+        return None
+
+    scheme, token = parts
+    normalized_token = token.strip()
+    if scheme.lower() != "bearer" or not normalized_token:
+        return None
+    if len(normalized_token) > MAX_BEARER_TOKEN_CHARS:
+        return None
+    return normalized_token
 
 
 def _is_malformed_bearer_error(error_text: str):

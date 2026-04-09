@@ -1599,6 +1599,25 @@ class TestAdminRoutes:
         assert log_calls[-1]["client_build"] == "build-123"
 
     @pytest.mark.asyncio
+    async def test_admin_me_accepts_long_valid_bearer_without_truncating_it(self):
+        self._mock_admin_user()
+        long_segment = "a" * 180
+        long_bearer = f"{long_segment}.{long_segment}.{long_segment}"
+
+        async with main.app.test_client() as client:
+            with patch.object(admin_api, "ADMIN_EMAILS", frozenset({"admin@example.com"})), patch.object(admin_api, "ADMIN_USER_IDS", frozenset({"user-1"})):
+                resp = await client.get(
+                    "/api/admin/me",
+                    headers={"Authorization": f"Bearer {long_bearer}"},
+                )
+
+        assert resp.status_code == 200
+        payload = await resp.get_json()
+        assert payload["authenticated"] is True
+        assert payload["authorized"] is True
+        config.supabase.auth.get_user.assert_called_once_with(long_bearer)
+
+    @pytest.mark.asyncio
     async def test_admin_routes_reject_bearer_tokens_for_blocked_identities(self):
         self._mock_admin_user(email="blocked@example.com", user_id="user-9")
 

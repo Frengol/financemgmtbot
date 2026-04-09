@@ -419,6 +419,28 @@ class TestAdminApiHelperCoverage:
         ):
             assert admin_api._extract_bearer_token() == "valid.token.value"
 
+        long_segment = "a" * 180
+        long_bearer = f"{long_segment}.{long_segment}.{long_segment}"
+        async with main.app.test_request_context(
+            "/api/admin/gastos",
+            headers={"Authorization": f"Bearer   {long_bearer}   "},
+        ):
+            assert admin_api._extract_bearer_token() == long_bearer
+
+        async with main.app.test_request_context(
+            "/api/admin/gastos",
+            headers={"Authorization": "Bearer    "},
+        ):
+            assert admin_api._extract_bearer_token() is None
+
+        huge_segment = "b" * 2800
+        huge_bearer = f"{huge_segment}.{huge_segment}.{huge_segment}"
+        async with main.app.test_request_context(
+            "/api/admin/gastos",
+            headers={"Authorization": f"Bearer {huge_bearer}"},
+        ):
+            assert admin_api._extract_bearer_token() is None
+
         assert admin_api._lookup_admin_user(None) is None
 
         with patch.object(admin_api, "auth_test_mode_enabled", return_value=True):
