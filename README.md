@@ -37,6 +37,12 @@ Local auth integration test mode:
 - GitHub Pages publishes only the frontend SPA.
 - Cloud Run continues to host the Python backend and admin API.
 - Set the published frontend to talk only to your intended public backend origin, for example `https://api.example.com`.
+- The backend deployment source of truth is now [`cloudbuild.yaml`](cloudbuild.yaml), which builds the checked-in `Dockerfile`, pushes the image to Artifact Registry and deploys Cloud Run by image digest.
+- The productive backend deployment path no longer supports Cloud Run source deploy with buildpacks; disable the old source-build trigger after moving the service to the versioned Cloud Build trigger.
+- Run the backend Cloud Build trigger with a dedicated service account scoped to minimum roles only:
+  - `Artifact Registry Writer`
+  - `Cloud Run Admin`
+  - `Service Account User` on the Cloud Run runtime identity
 
 ## GitHub Actions
 
@@ -51,6 +57,7 @@ Local auth integration test mode:
   - Repository Variable or Secret: `VITE_SUPABASE_URL`
   - Repository Variable or Secret: `VITE_SUPABASE_ANON_KEY`
 - Important: the frontend now depends on the admin API base URL and the public Supabase browser-auth values at build time.
+- Backend deploys are intentionally kept outside GitHub Actions in this repository; Cloud Build now owns the container build and Cloud Run rollout via the checked-in [`cloudbuild.yaml`](cloudbuild.yaml).
 - For public repositories on GitHub.com, GitHub Secret Scanning runs automatically; keep it enabled and verify in `Security` that alerts are visible.
 - In your GitHub user settings, enable `Push protection for yourself` so GitHub can block pushes that contain recognized secrets.
 
@@ -101,3 +108,15 @@ Before push:
   - `make audit-frontend-deps`
 - install the optional local Git hook with:
   - `make install-git-hooks`
+
+## Cloud Run backend deploy
+
+- Create or update a Cloud Build trigger that points to [`cloudbuild.yaml`](cloudbuild.yaml) in this repository.
+- Keep the trigger building the checked-in `Dockerfile`; do not use Cloud Run source deploy with buildpacks for the backend anymore.
+- The default substitutions in [`cloudbuild.yaml`](cloudbuild.yaml) target:
+  - Artifact Registry host `southamerica-east1-docker.pkg.dev`
+  - repository `cloud-run-source-deploy`
+  - image `financemgmtbot-git`
+  - service `financemgmtbot-git`
+  - region `southamerica-east1`
+- If your service names differ, override the substitutions in the trigger instead of editing the deploy logic in the Google Cloud console.

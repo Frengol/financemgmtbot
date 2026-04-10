@@ -1,5 +1,5 @@
 # 📜 Manifesto de Arquitetura: Finance Mgmt Bot
-**Versão:** V3.3.3 — *GitHub Pages com Sessão Supabase no Browser, Runtime Admin Bearer-Only e Relay Seguro de Compatibilidade*
+**Versão:** V3.3.4 — *GitHub Pages com Sessão Supabase no Browser, Runtime Admin Bearer-Only e Deploy do Cloud Run por Imagem*
 
 ## Visão Geral do Produto
 O sistema é um Assistente Pessoal (Copilot) Financeiro multimodal orientado a eventos. O núcleo operacional continua centrado no Telegram, onde textos, cupons fiscais e áudios são recebidos e processados via Webhook assíncrono. A evolução V3 introduziu uma segunda superfície oficial: um **Painel Administrativo Web** publicado estaticamente no GitHub Pages, delegando autenticação e operações sensíveis a um backend Python hospedado no Google Cloud Run. A versão atual V3.3 mantém o frontend estático e o backend sem custo extra, mas corrige o problema estrutural de cookie cross-site retornando o painel oficial para **sessão Supabase no browser** e **Bearer token validado server-side** nas rotas `/api/admin/*`, preservando o hardening que não depende de cookie de terceira parte: logs sanitizados, envelope de erro com `requestId`, `cache_aprovacao` cifrada com TTL, headers anti-cache e allowlists administrativas no backend.
@@ -17,6 +17,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 
 * **Gateway Assíncrono & API Backend:** `Quart` — Responsável pelo Webhook Telegram e pela superfície administrativa `/api/admin/*`.
 * **Hospedagem Backend:** `Google Cloud Run` — Runtime containerizado para o backend Python com variáveis sensíveis providas por Secret Manager.
+* **Build e Deploy do Backend:** `Google Cloud Build` + `Artifact Registry` — Build versionado do `Dockerfile`, publicação da imagem e rollout do Cloud Run por digest.
 * **Frontend Administrativo:** `React` + `Vite` + `Tailwind CSS` + `@tremor/react` — SPA publicada estaticamente no GitHub Pages, com Dashboard analítico, Histórico editável e fila de Aprovações.
 * **Persistência & Auth:** `Supabase` / `PostgreSQL` / `GoTrue` — Banco de dados operacional, autenticação upstream do Magic Link e políticas de RLS.
 * **Motores Cognitivos (Uso Restrito):**
@@ -154,6 +155,17 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 
 ### 5.1 Backend
 * O backend Python é empacotado em contêiner e executado no Google Cloud Run.
+* O deploy produtivo do backend parte do arquivo versionado `cloudbuild.yaml`, não do caminho de source deploy com buildpacks do Cloud Run.
+* O pipeline do backend:
+  - executa `docker build --pull` a partir do `Dockerfile` do repositório
+  - publica a imagem em Artifact Registry com tag baseada em `SHORT_SHA`
+  - resolve o digest publicado
+  - executa `gcloud run deploy --image IMAGE@DIGEST`
+* O trigger de Cloud Build do backend deve rodar com uma service account dedicada e mínima:
+  - `Artifact Registry Writer`
+  - `Cloud Run Admin`
+  - `Service Account User` sobre a identidade de runtime do Cloud Run
+* O trigger legado de Cloud Run source deploy com buildpacks deve ser desativado depois da migração, para evitar regressão para um caminho de build não versionado.
 * O serviço recebe:
   - `SUPABASE_URL`
   - `SUPABASE_KEY` (`service_role`)
@@ -166,6 +178,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `FRONTEND_PUBLIC_URL`
   - opcionalmente `DATA_ENCRYPTION_KEY`
   - opcionalmente `ALLOW_LOCAL_DEV_AUTH` apenas fora de produção
+* O `Dockerfile` do backend não instala mais toolchain de build ou `libpq-dev` no runtime final; a imagem roda apenas com dependências Python e usuário não-root.
 
 ### 5.2 Frontend
 * O frontend é buildado pelo Vite.
@@ -247,6 +260,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `architecture.md` — manifesto vivo da topologia e dos fluxos de segurança
 * Evidências de pentest, anotações operacionais e notebooks de segurança devem permanecer fora do repositório público ou passar por redação completa antes de publicação.
 * Toda publicação pública deve partir de um clone Git íntegro e passar pela checklist documentada em `PUBLIC_RELEASE.md`, incluindo auditoria de histórico e validação de supply chain.
+* O contexto de build do backend deve ser protegido por `.dockerignore`, impedindo que `.env`, artefatos locais, logs baixados e caches entrem acidentalmente na imagem.
 
 ---
 

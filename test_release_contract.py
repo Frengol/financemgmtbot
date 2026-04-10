@@ -60,3 +60,26 @@ def test_ci_and_pages_deploy_workflows_require_api_and_supabase_public_env():
     assert "npm run verify:bundle" in ci_workflow
     assert "npm run verify:bundle" in deploy_workflow
     assert "      - '.github/workflows/deploy-pages.yml'" in deploy_workflow
+
+
+def test_backend_cloud_build_contract_uses_dockerfile_image_deploy():
+    cloudbuild = (REPO_ROOT / "cloudbuild.yaml").read_text(encoding="utf-8")
+
+    assert 'gcr.io/cloud-builders/docker' in cloudbuild
+    assert 'gcr.io/cloud-builders/gcloud' in cloudbuild
+    assert '--image' in cloudbuild
+    assert 'gcr.io/k8s-skaffold/pack' not in cloudbuild
+    assert '--source' not in cloudbuild
+    assert 'logging: "CLOUD_LOGGING_ONLY"' in cloudbuild
+
+
+def test_backend_container_contract_is_runtime_only_and_protected_by_dockerignore():
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    dockerignore = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
+
+    assert "gcc" not in dockerfile
+    assert "libpq-dev" not in dockerfile
+    assert "USER financebotuser" in dockerfile
+    assert ".env" in dockerignore
+    assert ".env.*" in dockerignore
+    assert "downloaded-logs-*" in dockerignore

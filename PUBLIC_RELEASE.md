@@ -14,6 +14,7 @@ Use this checklist before publishing the repository to a public remote.
 ## 2. Audit current content
 
 - Keep `.env`, `.env.*`, local reports, coverage artifacts and security notes out of the public repository.
+- Keep `.dockerignore` aligned with those exclusions so local secrets and reports are not copied into backend container builds.
 - Verify examples and docs still use placeholders only.
 - Run the local safety checks:
   - `make test-backend`
@@ -51,3 +52,4 @@ Only publish when all of the following are true:
 - `gitleaks` is clean on content and history
 - docs and examples contain placeholders only
 - the release is being made from a healthy Git clone
+- backend deploys from the checked-in `cloudbuild.yaml` and `Dockerfile`, not from an implicit Cloud Run source-build path

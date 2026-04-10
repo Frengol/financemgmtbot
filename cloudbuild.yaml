@@ -1,0 +1,55 @@
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    id: "build-image"
+    args:
+      - "build"
+      - "--pull"
+      - "-t"
+      - "${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}"
+      - "."
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "push-image"
+    args:
+      - "push"
+      - "${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}"
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: "capture-image-digest"
+    entrypoint: "/bin/sh"
+    args:
+      - "-c"
+      - |
+        set -eu
+        docker inspect --format='{{index .RepoDigests 0}}' \
+          "${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}" \
+          > /workspace/image_ref.txt
+
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: "deploy-cloud-run"
+    entrypoint: "/bin/sh"
+    args:
+      - "-c"
+      - |
+        set -eu
+        IMAGE_REF="$(cat /workspace/image_ref.txt)"
+        gcloud run deploy "${_SERVICE_NAME}" \
+          --image "${IMAGE_REF}" \
+          --region "${_REGION}" \
+          --platform managed \
+          --quiet
+
+images:
+  - "${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}"
+
+substitutions:
+  _AR_HOSTNAME: "southamerica-east1-docker.pkg.dev"
+  _AR_REPOSITORY: "cloud-run-source-deploy"
+  _IMAGE_NAME: "financemgmtbot-git"
+  _SERVICE_NAME: "financemgmtbot-git"
+  _REGION: "southamerica-east1"
+
+options:
+  logging: "CLOUD_LOGGING_ONLY"
+
+timeout: "1200s"
