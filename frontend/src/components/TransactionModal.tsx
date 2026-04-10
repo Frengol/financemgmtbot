@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Loader2, X } from 'lucide-react';
-import { createTransaction, updateTransaction } from '@/lib/adminApi';
+import { createTransaction, updateTransaction } from '@/features/admin/api';
 import {
   accountOptions,
   formatTransactionValue,
@@ -18,7 +18,7 @@ function emitTransactionsChanged() {
 }
 
 export default function TransactionModal() {
-  const { authenticated, csrfToken, loading: authLoading, localBypass } = useAuth();
+  const { authenticated, loading: authLoading, localBypass } = useAuth();
   const { close, draft, editingId, isOpen, setDraft } = useTransactionComposer();
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
@@ -71,9 +71,9 @@ export default function TransactionModal() {
       setError('');
 
       if (editingId) {
-        await updateTransaction(editingId, payload, csrfToken);
+        await updateTransaction(editingId, payload);
       } else {
-        await createTransaction(payload, csrfToken);
+        await createTransaction(payload);
       }
 
       emitTransactionsChanged();

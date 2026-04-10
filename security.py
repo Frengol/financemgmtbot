@@ -1,6 +1,5 @@
 import base64
 import hashlib
-import hmac
 import html
 import json
 import os
@@ -11,16 +10,10 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
-from postgrest.exceptions import APIError
 
-from config import logger, mascarar_segredos, supabase
-from test_support import auth_test_mode_enabled, load_admin_session, revoke_admin_session as revoke_test_admin_session, store_admin_session, update_admin_session
+from config import logger, supabase
 from utils import get_brasilia_time
 
-SESSION_COOKIE_NAME = "fm_admin_session"
-CSRF_COOKIE_NAME = "fm_csrf"
-SESSION_IDLE_HOURS = 8
-SESSION_ABSOLUTE_HOURS = 24
 PENDING_TTL_HOURS = 24
 PENDING_KEY_VERSION = "v1"
 MAX_WEBHOOK_BODY_BYTES = int(os.environ.get("MAX_WEBHOOK_BODY_BYTES") or 262_144)
@@ -29,38 +22,10 @@ MAX_TELEGRAM_AUDIO_BYTES = int(os.environ.get("MAX_TELEGRAM_AUDIO_BYTES") or 12_
 
 _RATE_LIMIT_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
 
-
-class AdminSessionStorageUnavailableError(RuntimeError):
-    def __init__(self, message: str, *, upstream_code: str | None = None):
-        super().__init__(message)
-        self.upstream_code = upstream_code
-
-
-def _extract_upstream_error_code(exc: Exception):
-    code = getattr(exc, "code", None)
-    if code:
-        return str(code)
-
-    payload = getattr(exc, "json", None)
-    if isinstance(payload, dict) and payload.get("code"):
-        return str(payload["code"])
-
-    return None
-
-
-def _is_missing_admin_session_storage(exc: Exception):
-    message = mascarar_segredos(str(exc)).lower()
-    code = (_extract_upstream_error_code(exc) or "").upper()
-    return code == "PGRST205" or (
-        "admin_web_sessions" in message and "schema cache" in message
-    )
-
-
 def _derive_secret(label: str):
     seed = "|".join(
         [
             label,
-            os.environ.get("APP_SESSION_SECRET") or "",
             os.environ.get("SUPABASE_KEY") or "",
             os.environ.get("TELEGRAM_SECRET_TOKEN") or "",
         ]
@@ -81,8 +46,6 @@ def _fernet_key():
 
 
 FERNET = Fernet(_fernet_key())
-SESSION_SECRET = _derive_secret("session-secret")
-CSRF_SECRET = _derive_secret("csrf-secret")
 
 
 def sanitize_plain_text(value: Any, max_length: int, default: str = ""):
@@ -102,25 +65,6 @@ def hash_optional(value: str | None):
     return hash_text(value)
 
 
-def generate_session_token():
-    return secrets.token_urlsafe(32)
-
-
-def hash_session_token(session_token: str):
-    return hash_text(session_token)
-
-
-def build_csrf_token(session_token: str):
-    return hmac.new(CSRF_SECRET, session_token.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-def validate_csrf_token(session_token: str, provided_token: str | None):
-    if not provided_token:
-        return False
-    expected = build_csrf_token(session_token)
-    return hmac.compare_digest(expected, provided_token)
-
-
 def _parse_timestamp(value: str | None):
     if not value:
         return None
@@ -130,124 +74,6 @@ def _parse_timestamp(value: str | None):
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone().replace(tzinfo=None)
     return parsed
-
-
-def create_admin_session(user_id: str, email: str | None, user_agent: str | None, ip_address: str | None):
-    session_token = generate_session_token()
-    now = get_brasilia_time()
-    expires_at = now + timedelta(hours=SESSION_IDLE_HOURS)
-    session_id_hash = hash_session_token(session_token)
-    if auth_test_mode_enabled():
-        store_admin_session(
-            session_id_hash=session_id_hash,
-            user_id=user_id,
-            email=(email or "").lower() or None,
-            created_at=now.isoformat(),
-            last_seen_at=now.isoformat(),
-            expires_at=expires_at.isoformat(),
-        )
-    else:
-        payload = {
-            "session_id_hash": session_id_hash,
-            "user_id": user_id,
-            "email": (email or "").lower() or None,
-            "created_at": now.isoformat(),
-            "last_seen_at": now.isoformat(),
-            "expires_at": expires_at.isoformat(),
-            "revoked_at": None,
-            "user_agent_hash": hash_optional(user_agent),
-            "ip_hash": hash_optional(ip_address),
-        }
-        try:
-            supabase.table("admin_web_sessions").insert(payload).execute()
-        except APIError as exc:
-            if _is_missing_admin_session_storage(exc):
-                raise AdminSessionStorageUnavailableError(
-                    "admin_web_sessions storage unavailable.",
-                    upstream_code=_extract_upstream_error_code(exc),
-                ) from exc
-            raise
-    return {
-        "token": session_token,
-        "csrf_token": build_csrf_token(session_token),
-        "expires_at": expires_at.isoformat(),
-    }
-
-
-def resolve_admin_session(session_token: str | None):
-    if not session_token:
-        return None
-
-    session_id_hash = hash_session_token(session_token)
-    if auth_test_mode_enabled():
-        session_row = load_admin_session(session_id_hash)
-        if not session_row:
-            return None
-    else:
-        response = (
-            supabase
-            .table("admin_web_sessions")
-            .select("session_id_hash, user_id, email, created_at, last_seen_at, expires_at, revoked_at")
-            .eq("session_id_hash", session_id_hash)
-            .execute()
-        )
-        if not getattr(response, "data", None):
-            return None
-
-        session_row = response.data[0]
-    now = get_brasilia_time()
-    created_at = _parse_timestamp(session_row.get("created_at")) or now
-    expires_at = _parse_timestamp(session_row.get("expires_at")) or created_at
-    revoked_at = _parse_timestamp(session_row.get("revoked_at"))
-    absolute_expiry = created_at + timedelta(hours=SESSION_ABSOLUTE_HOURS)
-
-    if revoked_at is not None or expires_at <= now or absolute_expiry <= now:
-        return None
-
-    refreshed_expiry = min(now + timedelta(hours=SESSION_IDLE_HOURS), absolute_expiry)
-    try:
-        if auth_test_mode_enabled():
-            update_admin_session(
-                session_id_hash,
-                last_seen_at=now.isoformat(),
-                expires_at=refreshed_expiry.isoformat(),
-            )
-        else:
-            (
-                supabase
-                .table("admin_web_sessions")
-                .update({"last_seen_at": now.isoformat(), "expires_at": refreshed_expiry.isoformat()})
-                .eq("session_id_hash", session_id_hash)
-                .execute()
-            )
-    except Exception as exc:
-        logger.warning({"event": "admin_session_refresh_failed", "error": mascarar_segredos(str(exc))})
-
-    return {
-        "user_id": session_row.get("user_id"),
-        "email": session_row.get("email"),
-        "expires_at": refreshed_expiry.isoformat(),
-        "csrf_token": build_csrf_token(session_token),
-    }
-
-
-def revoke_admin_session(session_token: str | None):
-    if not session_token:
-        return
-
-    now = get_brasilia_time().isoformat()
-    session_id_hash = hash_session_token(session_token)
-    if auth_test_mode_enabled():
-        revoke_test_admin_session(session_id_hash, revoked_at=now, expires_at=now)
-        return
-
-    (
-        supabase
-        .table("admin_web_sessions")
-        .update({"revoked_at": now, "expires_at": now})
-        .eq("session_id_hash", session_id_hash)
-        .execute()
-    )
 
 
 def encrypt_pending_payload(payload: dict[str, Any]):

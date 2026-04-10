@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Historico from './Historico';
-import { ApiError } from '@/lib/adminApi';
+import { ApiError } from '@/features/admin/api';
 
 const mockDeleteTransaction = vi.fn();
 const mockGetTransactions = vi.fn();
@@ -10,8 +10,8 @@ const mockUseAuth = vi.fn();
 const mockOpenEdit = vi.fn();
 const mockSignOut = vi.fn();
 
-vi.mock('@/lib/adminApi', async () => {
-  const actual = await vi.importActual<typeof import('@/lib/adminApi')>('@/lib/adminApi');
+vi.mock('@/features/admin/api', async () => {
+  const actual = await vi.importActual<typeof import('@/features/admin/api')>('@/features/admin/api');
   return {
     ...actual,
     deleteTransaction: (...args: unknown[]) => mockDeleteTransaction(...args),
@@ -37,7 +37,6 @@ describe('Historico', () => {
     mockSignOut.mockReset();
     mockUseAuth.mockReturnValue({
       authenticated: true,
-      csrfToken: 'csrf-token',
       loading: false,
       localBypass: false,
       signOut: mockSignOut,
@@ -51,7 +50,6 @@ describe('Historico', () => {
     window.addEventListener('transactions:changed', eventSpy);
     mockUseAuth.mockReturnValue({
       authenticated: true,
-      csrfToken: '',
       loading: false,
       localBypass: false,
       signOut: mockSignOut,
@@ -82,7 +80,7 @@ describe('Historico', () => {
     await userEvent.click(screen.getAllByTitle('Excluir')[0]);
 
     await waitFor(() => {
-      expect(mockDeleteTransaction).toHaveBeenCalledWith('tx-1', '');
+      expect(mockDeleteTransaction).toHaveBeenCalledWith('tx-1');
     });
     await waitFor(() => {
       expect(screen.queryByText('Compra do mes')).not.toBeInTheDocument();
@@ -94,7 +92,6 @@ describe('Historico', () => {
   it('keeps the history empty when the admin session is unavailable', async () => {
     mockUseAuth.mockReturnValue({
       authenticated: false,
-      csrfToken: '',
       loading: false,
       localBypass: false,
     });
@@ -122,7 +119,6 @@ describe('Historico', () => {
   it('shows an auth error when the session becomes unavailable after a row is already loaded', async () => {
     const authState = {
       authenticated: true,
-      csrfToken: '',
       loading: false,
       localBypass: false,
       signOut: mockSignOut,
@@ -150,7 +146,7 @@ describe('Historico', () => {
       rerender(<Historico />);
     });
 
-    expect(await screen.findByText('Nao foi possivel validar sua sessao. Entre novamente.')).toBeInTheDocument();
+    expect(await screen.findByText('Sua sessao expirou. Faca login novamente.')).toBeInTheDocument();
     expect(screen.getByText('Compra protegida por sessao')).toBeInTheDocument();
     await userEvent.click(screen.getAllByTitle('Excluir')[0]);
     window.dispatchEvent(new CustomEvent('transactions:changed'));
@@ -247,7 +243,6 @@ describe('Historico', () => {
   it('skips loading history when the session is unavailable', async () => {
     mockUseAuth.mockReturnValue({
       authenticated: false,
-      csrfToken: '',
       loading: false,
       localBypass: false,
     });
@@ -261,7 +256,6 @@ describe('Historico', () => {
   it('ignores refresh events while the session is unavailable and no rows are loaded', async () => {
     mockUseAuth.mockReturnValue({
       authenticated: false,
-      csrfToken: '',
       loading: false,
       localBypass: false,
     });
@@ -300,7 +294,6 @@ describe('Historico', () => {
   it('shows an auth loading error before deleting', async () => {
     mockUseAuth.mockReturnValue({
       authenticated: true,
-      csrfToken: 'csrf-token',
       loading: true,
       localBypass: false,
     });
@@ -326,7 +319,6 @@ describe('Historico', () => {
   it('filters, paginates and allows local bypass deletes', async () => {
     mockUseAuth.mockReturnValue({
       authenticated: false,
-      csrfToken: '',
       loading: false,
       localBypass: true,
     });
@@ -361,7 +353,7 @@ describe('Historico', () => {
 
     await userEvent.click(screen.getAllByTitle('Excluir')[0]);
     await waitFor(() => {
-      expect(mockDeleteTransaction).toHaveBeenCalledWith('tx-11', '');
+      expect(mockDeleteTransaction).toHaveBeenCalledWith('tx-11');
     });
   });
 });

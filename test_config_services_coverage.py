@@ -44,7 +44,6 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, **overrides: str):
     optional_defaults = {
         "AUTH_TEST_MODE": "false",
         "FRONTEND_PUBLIC_URL": "",
-        "AUTH_CALLBACK_PUBLIC_URL": "",
         "FRONTEND_ALLOWED_ORIGINS": "",
         "ALLOW_LOCAL_DEV_AUTH": "false",
         "SUPABASE_ADMIN_EMAILS": "",
@@ -111,8 +110,6 @@ class TestConfigCoverage:
         )
         assert module.normalize_public_url("https://admin.example.com/app", trailing_slash=True) == "https://admin.example.com/app/"
         assert module.normalize_public_url("nota-url") == ""
-        assert module.normalize_build_id("build-2026.04_08") == "build-2026.04_08"
-        assert module.normalize_build_id("build id with spaces") == ""
         assert module.mascarar_segredos(REQUIRED_ENV["SUPABASE_KEY"]) == "[MASKED_SUPABASE_KEY]"
 
     def test_auth_test_mode_uses_magicmock_supabase_and_normalizes_public_urls(self, monkeypatch: pytest.MonkeyPatch):
@@ -120,7 +117,6 @@ class TestConfigCoverage:
             monkeypatch,
             AUTH_TEST_MODE="true",
             FRONTEND_PUBLIC_URL="https://admin.example.com/app",
-            AUTH_CALLBACK_PUBLIC_URL="https://api.example.com/auth/callback/",
             FRONTEND_ALLOWED_ORIGINS="https://admin.example.com/app/,https://other.example.com/path",
         )
 
@@ -133,7 +129,6 @@ class TestConfigCoverage:
         assert isinstance(module.supabase, MagicMock)
         mock_create_client.assert_not_called()
         assert module.FRONTEND_PUBLIC_URL == "https://admin.example.com/app/"
-        assert module.AUTH_CALLBACK_PUBLIC_URL == "https://api.example.com/auth/callback"
         assert module.FRONTEND_ALLOWED_ORIGINS == frozenset({"https://admin.example.com", "https://other.example.com"})
 
     def test_missing_required_environment_variable_fails_fast(self, monkeypatch: pytest.MonkeyPatch):

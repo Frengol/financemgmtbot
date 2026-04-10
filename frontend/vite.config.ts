@@ -11,7 +11,6 @@ export default defineConfig(({ mode }) => ({
     proxy: {
       '/api': devProxyTarget,
       '/__test__': devProxyTarget,
-      '/auth/logout': devProxyTarget,
     },
   },
   resolve: {

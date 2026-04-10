@@ -11,7 +11,6 @@ _STATE_LOCK = Lock()
 _MAGIC_LINKS_BY_TOKEN: dict[str, dict[str, str | bool]] = {}
 _MAGIC_LINKS_BY_EMAIL: dict[str, list[dict[str, str | bool]]] = {}
 _SEEDED_TRANSACTIONS: list[dict[str, object]] = []
-_SESSIONS_BY_HASH: dict[str, dict[str, str | None]] = {}
 _ACCESS_TOKENS: dict[str, dict[str, str | None]] = {}
 
 
@@ -24,7 +23,6 @@ def reset_auth_test_state():
         _MAGIC_LINKS_BY_TOKEN.clear()
         _MAGIC_LINKS_BY_EMAIL.clear()
         _SEEDED_TRANSACTIONS.clear()
-        _SESSIONS_BY_HASH.clear()
         _ACCESS_TOKENS.clear()
 
 
@@ -32,9 +30,8 @@ def _normalize_email(email: str | None):
     return (email or "").strip().lower()
 
 
-def _build_magic_link_verify_url(callback_url: str, token_hash: str):
-    callback_public_url = (os.environ.get("AUTH_CALLBACK_PUBLIC_URL") or "http://127.0.0.1:8080/auth/callback").strip()
-    parsed_callback = urlsplit(callback_public_url)
+def _build_magic_link_verify_url(verify_base_url: str, callback_url: str, token_hash: str):
+    parsed_callback = urlsplit(verify_base_url.strip())
     verify_base = urlunsplit((parsed_callback.scheme, parsed_callback.netloc, "/__test__/auth/verify", "", ""))
     return (
         f"{verify_base}?token_hash={quote(token_hash, safe='')}"
@@ -68,6 +65,7 @@ def capture_magic_link(
     *,
     email: str,
     callback_url: str,
+    verify_base_url: str,
     user_id: str | None = None,
 ):
     normalized_email = _normalize_email(email)
@@ -82,7 +80,7 @@ def capture_magic_link(
         "access_token": access_token,
         "refresh_token": refresh_token,
         "callback_url": callback_url,
-        "link": _build_magic_link_verify_url(callback_url, token_hash),
+        "link": _build_magic_link_verify_url(verify_base_url, callback_url, token_hash),
     }
 
     with _STATE_LOCK:
@@ -151,53 +149,3 @@ def list_seeded_transactions(date_from: str | None = None, date_to: str | None =
 
     filtered.sort(key=lambda item: str(item.get("data") or ""), reverse=True)
     return filtered
-
-
-def store_admin_session(
-    *,
-    session_id_hash: str,
-    user_id: str,
-    email: str | None,
-    created_at: str,
-    last_seen_at: str,
-    expires_at: str,
-    revoked_at: str | None = None,
-):
-    payload = {
-        "session_id_hash": session_id_hash,
-        "user_id": user_id,
-        "email": _normalize_email(email),
-        "created_at": created_at,
-        "last_seen_at": last_seen_at,
-        "expires_at": expires_at,
-        "revoked_at": revoked_at,
-    }
-    with _STATE_LOCK:
-        _SESSIONS_BY_HASH[session_id_hash] = payload
-    return dict(payload)
-
-
-def load_admin_session(session_id_hash: str):
-    with _STATE_LOCK:
-        payload = _SESSIONS_BY_HASH.get(session_id_hash)
-        return dict(payload) if payload else None
-
-
-def update_admin_session(session_id_hash: str, *, last_seen_at: str, expires_at: str):
-    with _STATE_LOCK:
-        payload = _SESSIONS_BY_HASH.get(session_id_hash)
-        if not payload:
-            return None
-        payload["last_seen_at"] = last_seen_at
-        payload["expires_at"] = expires_at
-        return dict(payload)
-
-
-def revoke_admin_session(session_id_hash: str, *, revoked_at: str, expires_at: str):
-    with _STATE_LOCK:
-        payload = _SESSIONS_BY_HASH.get(session_id_hash)
-        if not payload:
-            return None
-        payload["revoked_at"] = revoked_at
-        payload["expires_at"] = expires_at
-        return dict(payload)

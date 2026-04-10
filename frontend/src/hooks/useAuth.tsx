@@ -12,8 +12,7 @@ import {
   ApiError,
   getAdminMe,
   localDevBypassEnabled,
-  logoutAuthSession,
-} from '@/lib/adminApi';
+} from '@/features/admin/api';
 import {
   browserAdminAuthTestModeEnabled,
   clearBrowserAdminLoginNotice,
@@ -21,13 +20,13 @@ import {
   loadBrowserAdminTestSession,
   saveBrowserAdminLoginNotice,
   saveBrowserAdminProfile,
-} from '@/lib/auth';
+} from '@/features/auth/lib/browserState';
 import {
   clearBrowserAuthState,
   purgeLegacyBrowserAuthStorage,
   setCachedBrowserAccessToken,
   supabase,
-} from '@/lib/supabase';
+} from '@/features/auth/lib/supabaseBrowserSession';
 
 type AuthUser = {
   id: string;
@@ -37,7 +36,6 @@ type AuthUser = {
 type AuthContextValue = {
   authenticated: boolean;
   user: AuthUser | null;
-  csrfToken: string;
   loading: boolean;
   localBypass: boolean;
   refreshSession: () => Promise<void>;
@@ -47,7 +45,6 @@ type AuthContextValue = {
 type AuthState = {
   authenticated: boolean;
   user: AuthUser | null;
-  csrfToken: string;
   loading: boolean;
   localBypass: boolean;
 };
@@ -57,7 +54,6 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 const UNAUTHENTICATED_STATE: AuthState = {
   authenticated: false,
   user: null,
-  csrfToken: '',
   loading: true,
   localBypass: false,
 };
@@ -68,7 +64,6 @@ const LOCAL_BYPASS_STATE: AuthState = {
     id: 'local-dev',
     email: 'local-dev@localhost',
   },
-  csrfToken: 'local-dev-csrf',
   loading: false,
   localBypass: true,
 };
@@ -110,7 +105,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setSafeState({
       authenticated: false,
       user: null,
-      csrfToken: '',
       loading,
       localBypass: false,
     });
@@ -167,7 +161,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSafeState({
         authenticated: true,
         user: authorizedUser,
-        csrfToken: '',
         loading: false,
         localBypass: false,
       });
@@ -210,7 +203,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setSafeState({
           authenticated: true,
           user: authTestSession.user,
-          csrfToken: '',
           loading: false,
           localBypass: false,
         });
@@ -247,11 +239,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     await clearBrowserAuthState();
-    try {
-      await logoutAuthSession();
-    } catch {
-      // Legacy cookie cleanup is best-effort only.
-    }
     clearBrowserAdminLoginNotice();
     setLoggedOutState(false);
   }, [setLoggedOutState]);
@@ -299,7 +286,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AuthContextValue>(() => ({
     authenticated: state.authenticated,
     user: state.user,
-    csrfToken: state.csrfToken,
     loading: state.loading,
     localBypass: state.localBypass,
     refreshSession,

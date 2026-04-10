@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Aprovacoes from './Aprovacoes';
-import { ApiError } from '@/lib/adminApi';
+import { ApiError } from '@/features/admin/api';
 
 const mockApprovePendingReceipt = vi.fn();
 const mockGetPendingReceipts = vi.fn();
@@ -10,8 +10,8 @@ const mockRejectPendingReceipt = vi.fn();
 const mockUseAuth = vi.fn();
 const mockSignOut = vi.fn();
 
-vi.mock('@/lib/adminApi', async () => {
-  const actual = await vi.importActual<typeof import('@/lib/adminApi')>('@/lib/adminApi');
+vi.mock('@/features/admin/api', async () => {
+  const actual = await vi.importActual<typeof import('@/features/admin/api')>('@/features/admin/api');
   return {
     ...actual,
     approvePendingReceipt: (...args: unknown[]) => mockApprovePendingReceipt(...args),
@@ -32,7 +32,6 @@ describe('Aprovacoes', () => {
     mockSignOut.mockReset();
     mockUseAuth.mockReturnValue({
       authenticated: true,
-      csrfToken: 'csrf-token',
       localBypass: false,
       signOut: mockSignOut,
     });
@@ -43,7 +42,6 @@ describe('Aprovacoes', () => {
     window.addEventListener('transactions:changed', eventSpy);
     mockUseAuth.mockReturnValue({
       authenticated: true,
-      csrfToken: '',
       localBypass: false,
       signOut: mockSignOut,
     });
@@ -74,7 +72,7 @@ describe('Aprovacoes', () => {
     await userEvent.click(screen.getByRole('button', { name: /Aprovar/i }));
 
     await waitFor(() => {
-      expect(mockApprovePendingReceipt).toHaveBeenCalledWith('C1', '');
+      expect(mockApprovePendingReceipt).toHaveBeenCalledWith('C1');
     });
     await waitFor(() => {
       expect(screen.queryByText('Arroz')).not.toBeInTheDocument();
@@ -86,7 +84,6 @@ describe('Aprovacoes', () => {
   it('keeps approvals empty when the admin session is unavailable before rejection', async () => {
     mockUseAuth.mockReturnValue({
       authenticated: false,
-      csrfToken: '',
       localBypass: false,
     });
     mockGetPendingReceipts.mockResolvedValue({
@@ -109,7 +106,6 @@ describe('Aprovacoes', () => {
   it('keeps approvals empty when the admin session is unavailable before approval', async () => {
     mockUseAuth.mockReturnValue({
       authenticated: false,
-      csrfToken: '',
       localBypass: false,
     });
     mockGetPendingReceipts.mockResolvedValue({
@@ -132,7 +128,6 @@ describe('Aprovacoes', () => {
   it('shows a session error when approval becomes unavailable after the item is already loaded', async () => {
     const authState = {
       authenticated: true,
-      csrfToken: '',
       localBypass: false,
       signOut: mockSignOut,
     };
@@ -156,7 +151,7 @@ describe('Aprovacoes', () => {
       rerender(<Aprovacoes />);
     });
 
-    expect(await screen.findByText('Sua sessão expirou. Faça login novamente.')).toBeInTheDocument();
+    expect(await screen.findByText('Sua sessao expirou. Faca login novamente.')).toBeInTheDocument();
     expect(screen.getByText(/Leite/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: /Aprovar/i }));
     window.dispatchEvent(new CustomEvent('transactions:changed'));
@@ -168,7 +163,6 @@ describe('Aprovacoes', () => {
   it('shows a session error when rejection becomes unavailable after the item is already loaded', async () => {
     const authState = {
       authenticated: true,
-      csrfToken: '',
       localBypass: false,
       signOut: mockSignOut,
     };
@@ -192,7 +186,7 @@ describe('Aprovacoes', () => {
       rerender(<Aprovacoes />);
     });
 
-    expect(await screen.findByText('Sua sessão expirou. Faça login novamente.')).toBeInTheDocument();
+    expect(await screen.findByText('Sua sessao expirou. Faca login novamente.')).toBeInTheDocument();
     expect(screen.getByText(/Cafe/)).toBeInTheDocument();
     const buttons = screen.getAllByRole('button');
     await userEvent.click(buttons[buttons.length - 1]);
@@ -213,7 +207,6 @@ describe('Aprovacoes', () => {
   it('skips loading when the admin session is unavailable', async () => {
     mockUseAuth.mockReturnValue({
       authenticated: false,
-      csrfToken: '',
       localBypass: false,
     });
 
@@ -226,7 +219,6 @@ describe('Aprovacoes', () => {
   it('ignores refresh events while the admin session is unavailable and the queue is empty', async () => {
     mockUseAuth.mockReturnValue({
       authenticated: false,
-      csrfToken: '',
       localBypass: false,
     });
 
@@ -244,7 +236,6 @@ describe('Aprovacoes', () => {
     window.addEventListener('transactions:changed', eventSpy);
     mockUseAuth.mockReturnValue({
       authenticated: true,
-      csrfToken: '',
       localBypass: false,
       signOut: mockSignOut,
     });
@@ -274,7 +265,7 @@ describe('Aprovacoes', () => {
     await userEvent.click(screen.getAllByRole('button')[1]);
 
     await waitFor(() => {
-      expect(mockRejectPendingReceipt).toHaveBeenCalledWith('D1', '');
+      expect(mockRejectPendingReceipt).toHaveBeenCalledWith('D1');
     });
     await waitFor(() => {
       expect(screen.queryByText(/Excluir registros/i)).not.toBeInTheDocument();

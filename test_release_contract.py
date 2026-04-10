@@ -10,7 +10,8 @@ def test_frontend_public_build_restores_supabase_runtime_dependency_for_pages_au
     dependencies = package_json.get("dependencies", {})
 
     assert "@supabase/supabase-js" in dependencies
-    assert (REPO_ROOT / "frontend" / "src" / "lib" / "supabase.ts").exists()
+    assert (REPO_ROOT / "frontend" / "src" / "features" / "auth" / "lib" / "supabaseBrowserSession.ts").exists()
+    assert not (REPO_ROOT / "frontend" / "src" / "lib" / "supabase.ts").exists()
 
 
 def test_public_frontend_contract_files_require_supabase_env_again():

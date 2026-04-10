@@ -50,7 +50,7 @@ describe('verifyBundleDirectory', () => {
       const authEmail = 'admin' + '@' + 'example.com';
       supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
       supabase.auth.onAuthStateChange(() => {});
-      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc' } });
     `);
 
     expect(
@@ -108,8 +108,8 @@ describe('verifyBundleDirectory', () => {
       const authEmail = 'admin' + '@' + 'example.com';
       supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
       supabase.auth.onAuthStateChange(() => {});
-      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
-      fetch('/api/admin/gastos', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc' } });
+      fetch('/api/admin/gastos', { headers: { Authorization: 'Bearer abc' } });
       const legacyBridge = '/auth/callback';
     `);
 
@@ -130,7 +130,7 @@ describe('verifyBundleDirectory', () => {
       supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
       supabase.auth.onAuthStateChange(() => {});
       fetch('/__test__/auth/magic-link', { method: 'POST' });
-      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc' } });
     `);
 
     expect(
@@ -150,7 +150,7 @@ describe('verifyBundleDirectory', () => {
       const authEmail = 'admin' + '@' + 'example.com';
       supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
       supabase.auth.onAuthStateChange(() => {});
-      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc' } });
     `);
 
     expect(
@@ -171,7 +171,7 @@ describe('verifyBundleDirectory', () => {
       const authEmail = 'admin' + '@' + 'example.com';
       supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
       supabase.auth.onAuthStateChange(() => {});
-      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc' } });
     `);
 
     expect(
@@ -192,7 +192,7 @@ describe('verifyBundleDirectory', () => {
       const authEmail = 'admin' + '@' + 'example.com';
       supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
       supabase.auth.onAuthStateChange(() => {});
-      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc' } });
     `);
 
     expect(
@@ -213,7 +213,7 @@ describe('verifyBundleDirectory', () => {
       supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
       supabase.auth.onAuthStateChange(() => {});
       fetch('/auth/session');
-      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc', 'X-Client-Build': 'build-verify-1' } });
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc' } });
     `);
 
     expect(
@@ -223,5 +223,26 @@ describe('verifyBundleDirectory', () => {
           supabaseAnonKey: PUBLIC_SUPABASE_ANON_KEY,
         }),
     ).toThrow(/legacy auth session path/i);
+  });
+
+  it('rejects a bundle that still ships the legacy auth logout path', () => {
+    const dir = createBundleDir(`
+      const supabaseUrl = '${PUBLIC_SUPABASE_URL}';
+      const supabaseAnonKey = '${PUBLIC_SUPABASE_ANON_KEY}';
+      const storageKey = 'financemgmtbot-admin-auth-v2';
+      const authEmail = 'admin' + '@' + 'example.com';
+      supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
+      supabase.auth.onAuthStateChange(() => {});
+      fetch('/auth/logout', { method: 'POST' });
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc' } });
+    `);
+
+    expect(
+      () =>
+        verifyBundleDirectory(dir, {
+          supabaseUrl: PUBLIC_SUPABASE_URL,
+          supabaseAnonKey: PUBLIC_SUPABASE_ANON_KEY,
+        }),
+    ).toThrow(/legacy logout path/i);
   });
 });

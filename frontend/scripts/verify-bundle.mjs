@@ -23,10 +23,6 @@ const requiredPatterns = [
     description: 'bearer authorization transport',
     regex: /Authorization/,
   },
-  {
-    description: 'client build correlation header',
-    regex: /X-Client-Build/,
-  },
 ];
 
 const forbiddenLiteralPatterns = [
@@ -66,6 +62,10 @@ const forbiddenPublishedLegacyPathPatterns = [
   {
     description: 'legacy magic link path',
     regex: /(^|[^_A-Za-z0-9/.-])\/auth\/magic-link\b/g,
+  },
+  {
+    description: 'legacy logout path',
+    regex: /(^|[^_A-Za-z0-9/.-])\/auth\/logout\b/g,
   },
 ];
 

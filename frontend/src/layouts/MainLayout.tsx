@@ -1,7 +1,7 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
 import { CopyPlus, LayoutDashboard, History, CheckSquare, Activity, LogOut, Menu, X } from "lucide-react";
 import { useState, useEffect } from "react";
-import { getTransactions } from "@/lib/adminApi";
+import { getAdminMe } from "@/features/admin/api";
 import { useAuth } from "@/hooks/useAuth";
 import { useTransactionComposer } from "@/hooks/useTransactionComposer";
 
@@ -36,7 +36,7 @@ export default function MainLayout() {
 
     const checkStatus = async () => {
       try {
-        await getTransactions({ dateFrom: '2000-01-01', dateTo: '2000-01-01' });
+        await getAdminMe();
         if (!cancelled) {
           setIsOnline(true);
         }

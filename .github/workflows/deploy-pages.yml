@@ -38,15 +38,11 @@ jobs:
         working-directory: ./frontend
         run: npm ci
 
-      - name: Derive frontend build id
-        run: echo "VITE_APP_BUILD_ID=${GITHUB_SHA::12}" >> "$GITHUB_ENV"
-
       - name: Validate build environment
         env:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || secrets.VITE_API_BASE_URL }}
           VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_APP_BUILD_ID: ${{ env.VITE_APP_BUILD_ID }}
         working-directory: ./frontend
         run: npm run verify:build-env
 
@@ -55,7 +51,6 @@ jobs:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || secrets.VITE_API_BASE_URL }}
           VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_APP_BUILD_ID: ${{ env.VITE_APP_BUILD_ID }}
         working-directory: ./frontend
         run: npm run build
 
@@ -64,7 +59,6 @@ jobs:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || secrets.VITE_API_BASE_URL }}
           VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_APP_BUILD_ID: ${{ env.VITE_APP_BUILD_ID }}
         working-directory: ./frontend
         run: npm run verify:pages-fallback
 
@@ -73,7 +67,6 @@ jobs:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || secrets.VITE_API_BASE_URL }}
           VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_APP_BUILD_ID: ${{ env.VITE_APP_BUILD_ID }}
         working-directory: ./frontend
         run: npm run verify:bundle
 

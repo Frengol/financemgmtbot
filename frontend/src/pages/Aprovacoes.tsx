@@ -1,23 +1,15 @@
 import { useEffect, useState } from "react";
-import { ApiError, approvePendingReceipt, getPendingReceipts, isReauthenticationError, rejectPendingReceipt, type PendingApprovalItem } from "@/lib/adminApi";
+import { ApiError, approvePendingReceipt, getPendingReceipts, rejectPendingReceipt, type PendingApprovalItem } from "@/features/admin/api";
 import { useAuth } from "@/hooks/useAuth";
 import { Check, X, CreditCard, ListMinus } from "lucide-react";
-import { clearBrowserAdminArtifacts } from "@/lib/auth";
+import AdminRequestErrorBanner from "@/features/admin/components/AdminRequestErrorBanner";
+import { createSessionUnavailableError, normalizeAdminPageError } from "@/features/admin/lib/pageErrors";
 
 export default function Aprovacoes() {
-  const { authenticated, csrfToken, localBypass, signOut } = useAuth();
+  const { authenticated, localBypass, signOut } = useAuth();
   const [items, setItems] = useState<PendingApprovalItem[]>([]);
   const [error, setError] = useState<ApiError | Error | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
-
-  const createSessionUnavailableError = () => new ApiError(
-    'Sua sessão expirou. Faça login novamente.',
-    {
-      code: 'AUTH_SESSION_INVALID',
-      diagnostic: 'auth_state_unusable',
-      status: 401,
-    },
-  );
 
   const fetchCache = async () => {
     if (!authenticated && !localBypass) {
@@ -37,10 +29,7 @@ export default function Aprovacoes() {
       }
       setError(null);
     } catch (fetchError) {
-      if (isReauthenticationError(fetchError)) {
-        clearBrowserAdminArtifacts();
-      }
-      setError(fetchError instanceof Error ? fetchError : new Error("Nao foi possivel carregar as aprovacoes agora."));
+      setError(normalizeAdminPageError(fetchError, "Nao foi possivel carregar as aprovacoes agora."));
     }
   };
 
@@ -76,14 +65,11 @@ export default function Aprovacoes() {
     try {
       setPendingId(item.id);
       setError(null);
-      await approvePendingReceipt(item.id, csrfToken);
+      await approvePendingReceipt(item.id);
       setItems((current) => current.filter((currentItem) => currentItem.id !== item.id));
       window.dispatchEvent(new CustomEvent('transactions:changed'));
     } catch (approveError) {
-      if (isReauthenticationError(approveError)) {
-        clearBrowserAdminArtifacts();
-      }
-      setError(approveError instanceof Error ? approveError : new Error("Nao foi possivel aprovar o cupom pendente."));
+      setError(normalizeAdminPageError(approveError, "Nao foi possivel aprovar o cupom pendente."));
     } finally {
       setPendingId(null);
     }
@@ -98,14 +84,11 @@ export default function Aprovacoes() {
     try {
       setPendingId(id);
       setError(null);
-      await rejectPendingReceipt(id, csrfToken);
+      await rejectPendingReceipt(id);
       setItems((current) => current.filter((currentItem) => currentItem.id !== id));
       window.dispatchEvent(new CustomEvent('transactions:changed'));
     } catch (rejectError) {
-      if (isReauthenticationError(rejectError)) {
-        clearBrowserAdminArtifacts();
-      }
-      setError(rejectError instanceof Error ? rejectError : new Error("Nao foi possivel rejeitar o cupom pendente."));
+      setError(normalizeAdminPageError(rejectError, "Nao foi possivel rejeitar o cupom pendente."));
     } finally {
       setPendingId(null);
     }
@@ -123,18 +106,10 @@ export default function Aprovacoes() {
   return (
     <div className="space-y-6">
       {error && (
-        <div className="flex flex-col gap-3 rounded-lg border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-700 md:flex-row md:items-center md:justify-between">
-          <span>{error.message}</span>
-          {isReauthenticationError(error) ? (
-            <button
-              type="button"
-              onClick={() => void signOut()}
-              className="inline-flex items-center justify-center rounded-lg border border-rose-200 bg-white px-3 py-2 font-medium text-rose-700 transition hover:bg-rose-100"
-            >
-              Fazer login novamente
-            </button>
-          ) : null}
-        </div>
+        <AdminRequestErrorBanner
+          error={error}
+          onReauthenticate={() => void signOut()}
+        />
       )}
       {items.length === 0 ? null : (
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">

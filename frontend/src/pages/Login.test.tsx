@@ -9,7 +9,7 @@ const mockLoadBrowserAdminLoginNotice = vi.fn();
 const mockClearBrowserAdminLoginNotice = vi.fn();
 const mockUseAuth = vi.fn();
 
-vi.mock('@/lib/supabase', () => ({
+vi.mock('@/features/auth/lib/supabaseBrowserSession', () => ({
   supabase: {
     auth: {
       signInWithOtp: (...args: unknown[]) => mockSignInWithOtp(...args),
@@ -17,7 +17,7 @@ vi.mock('@/lib/supabase', () => ({
   },
 }));
 
-vi.mock('@/lib/adminApi', () => ({
+vi.mock('@/features/admin/api', () => ({
   localDevBypassEnabled: false,
   requestTestMagicLink: (...args: unknown[]) => mockRequestTestMagicLink(...args),
 }));
@@ -26,8 +26,8 @@ vi.mock('@/hooks/useAuth', () => ({
   useAuth: () => mockUseAuth(),
 }));
 
-vi.mock('@/lib/auth', async () => {
-  const actual = await vi.importActual<typeof import('@/lib/auth')>('@/lib/auth');
+vi.mock('@/features/auth/lib/browserState', async () => {
+  const actual = await vi.importActual<typeof import('@/features/auth/lib/browserState')>('@/features/auth/lib/browserState');
   return {
     ...actual,
     browserAdminAuthTestModeEnabled: () => import.meta.env.VITE_AUTH_TEST_MODE === 'true',

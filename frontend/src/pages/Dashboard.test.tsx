@@ -2,14 +2,14 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Dashboard from './Dashboard';
-import { ApiError } from '@/lib/adminApi';
+import { ApiError } from '@/features/admin/api';
 
 const mockGetTransactions = vi.fn();
 const mockUseAuth = vi.fn();
 const mockSignOut = vi.fn();
 
-vi.mock('@/lib/adminApi', async () => {
-  const actual = await vi.importActual<typeof import('@/lib/adminApi')>('@/lib/adminApi');
+vi.mock('@/features/admin/api', async () => {
+  const actual = await vi.importActual<typeof import('@/features/admin/api')>('@/features/admin/api');
   return {
     ...actual,
     getTransactions: (...args: unknown[]) => mockGetTransactions(...args),

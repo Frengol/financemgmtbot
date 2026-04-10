@@ -30,7 +30,6 @@ type PendingItem = {
 type MockState = {
   authenticated: boolean;
   magicLinkRequests: Array<{ email: string; redirectTo: string }>;
-  signOutCalls: number;
   transactions: TransactionRecord[];
   pendingItems: PendingItem[];
 };
@@ -69,7 +68,6 @@ async function installApiMocks(page: Page, stateOverrides: Partial<MockState> = 
   const state: MockState = {
     authenticated: true,
     magicLinkRequests: [],
-    signOutCalls: 0,
     transactions: [
       {
         id: 'tx-1',
@@ -178,12 +176,6 @@ async function installApiMocks(page: Page, stateOverrides: Partial<MockState> = 
         email: 'admin@example.com',
       },
     });
-  });
-
-  await page.route('**/auth/logout', async (route) => {
-    state.authenticated = false;
-    state.signOutCalls += 1;
-    return jsonResponse(route, { status: 'ok', loggedOut: true });
   });
 
   await page.route('**/api/admin/gastos?*', async (route) => {

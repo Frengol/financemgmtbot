@@ -6,11 +6,11 @@ import MainLayout from './MainLayout';
 
 const mockSignOut = vi.fn();
 const mockOpenCreate = vi.fn();
-const mockGetTransactions = vi.fn();
+const mockGetAdminMe = vi.fn();
 const mockUseAuth = vi.fn();
 
-vi.mock('@/lib/adminApi', () => ({
-  getTransactions: (...args: unknown[]) => mockGetTransactions(...args),
+vi.mock('@/features/admin/api', () => ({
+  getAdminMe: (...args: unknown[]) => mockGetAdminMe(...args),
 }));
 
 vi.mock('@/hooks/useAuth', () => ({
@@ -25,8 +25,12 @@ vi.mock('@/hooks/useTransactionComposer', () => ({
 
 describe('MainLayout mobile navigation', () => {
   beforeEach(() => {
-    mockGetTransactions.mockReset();
-    mockGetTransactions.mockResolvedValue({ transactions: [] });
+    mockGetAdminMe.mockReset();
+    mockGetAdminMe.mockResolvedValue({
+      authenticated: true,
+      authorized: true,
+      user: { id: 'user-1', email: 'test@example.com' },
+    });
     mockSignOut.mockReset();
     mockOpenCreate.mockReset();
     mockUseAuth.mockReset();
@@ -74,7 +78,7 @@ describe('MainLayout mobile navigation', () => {
 
   it('tracks online and offline state and triggers quick-create shortcuts', async () => {
     const user = userEvent.setup();
-    mockGetTransactions.mockRejectedValueOnce(new Error('offline'));
+    mockGetAdminMe.mockRejectedValueOnce(new Error('offline'));
 
     renderLayout();
 
@@ -95,7 +99,7 @@ describe('MainLayout mobile navigation', () => {
     renderLayout('/auth/callback');
 
     expect(await screen.findByText('Offline')).toBeInTheDocument();
-    expect(mockGetTransactions).not.toHaveBeenCalled();
+    expect(mockGetAdminMe).not.toHaveBeenCalled();
   });
 
   it('closes the mobile menu on escape, overlay click, navigation and mobile sign-out', async () => {

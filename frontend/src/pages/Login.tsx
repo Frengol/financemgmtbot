@@ -4,10 +4,10 @@ import {
   browserAdminAuthTestModeEnabled,
   clearBrowserAdminLoginNotice,
   loadBrowserAdminLoginNotice,
-} from '@/lib/auth';
-import { localDevBypassEnabled, requestTestMagicLink } from '@/lib/adminApi';
+} from '@/features/auth/lib/browserState';
+import { localDevBypassEnabled, requestTestMagicLink } from '@/features/admin/api';
 import { useAuth } from '@/hooks/useAuth';
-import { supabase } from '@/lib/supabase';
+import { supabase } from '@/features/auth/lib/supabaseBrowserSession';
 
 function buildCallbackUrl() {
   return new URL('auth/callback', new URL(import.meta.env.BASE_URL, window.location.origin)).toString();

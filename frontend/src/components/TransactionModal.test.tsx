@@ -10,7 +10,7 @@ const mockClose = vi.fn();
 const mockSetDraft = vi.fn();
 const mockComposer = vi.fn();
 
-vi.mock('@/lib/adminApi', () => ({
+vi.mock('@/features/admin/api', () => ({
   createTransaction: (...args: unknown[]) => mockCreateTransaction(...args),
   updateTransaction: (...args: unknown[]) => mockUpdateTransaction(...args),
 }));
@@ -31,7 +31,6 @@ describe('TransactionModal', () => {
     mockSetDraft.mockReset();
     mockUseAuth.mockReturnValue({
       authenticated: true,
-      csrfToken: 'csrf-token',
       loading: false,
       localBypass: false,
     });
@@ -70,7 +69,7 @@ describe('TransactionModal', () => {
       expect(mockCreateTransaction).toHaveBeenCalledWith(expect.objectContaining({
         valor: 45.9,
         descricao: 'Compra inicial',
-      }), 'csrf-token');
+      }));
     });
     expect(mockClose).toHaveBeenCalled();
     expect(eventSpy).toHaveBeenCalled();
@@ -80,7 +79,6 @@ describe('TransactionModal', () => {
   it('shows a session validation error before saving without access token', async () => {
     mockUseAuth.mockReturnValue({
       authenticated: false,
-      csrfToken: '',
       loading: false,
       localBypass: false,
     });
@@ -119,7 +117,7 @@ describe('TransactionModal', () => {
       expect(mockUpdateTransaction).toHaveBeenCalledWith('tx-2', expect.objectContaining({
         descricao: 'Cinema',
         valor: 55,
-      }), 'csrf-token');
+      }));
     });
   });
 
@@ -168,7 +166,6 @@ describe('TransactionModal', () => {
   it('shows auth loading error before submitting', async () => {
     mockUseAuth.mockReturnValue({
       authenticated: true,
-      csrfToken: 'csrf-token',
       loading: true,
       localBypass: false,
     });
@@ -182,7 +179,6 @@ describe('TransactionModal', () => {
   it('shows validation errors for invalid numeric input', async () => {
     mockUseAuth.mockReturnValue({
       authenticated: true,
-      csrfToken: 'csrf-token',
       loading: false,
       localBypass: false,
     });
@@ -200,7 +196,6 @@ describe('TransactionModal', () => {
   it('surfaces backend save errors, supports local bypass and allows closing the modal', async () => {
     mockUseAuth.mockReturnValue({
       authenticated: false,
-      csrfToken: '',
       loading: false,
       localBypass: true,
     });
@@ -214,7 +209,7 @@ describe('TransactionModal', () => {
     mockCreateTransaction.mockResolvedValueOnce({ transaction: { id: 'tx-3' } });
     await userEvent.click(screen.getByRole('button', { name: 'Criar transacao' }));
     await waitFor(() => {
-      expect(mockCreateTransaction).toHaveBeenLastCalledWith(expect.objectContaining({ descricao: 'Compra inicial' }), '');
+      expect(mockCreateTransaction).toHaveBeenLastCalledWith(expect.objectContaining({ descricao: 'Compra inicial' }));
     });
 
     await userEvent.click(screen.getByRole('button', { name: 'Cancelar' }));

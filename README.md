@@ -6,22 +6,21 @@ Backend local:
 - create `.env` based on `.env.example`
 - fill the required secrets before starting `main.py`
 - set `FRONTEND_PUBLIC_URL` to the published frontend URL in production
-- keep `AUTH_CALLBACK_PUBLIC_URL` only for local integration tests and legacy backend callback compatibility
 - in production, the published frontend talks directly to Supabase Auth for Magic Link issuance and callback completion; Cloud Run only validates Bearer tokens and serves `/api/admin/*`
+- the backend relay `/auth/callback` is derived from `FRONTEND_PUBLIC_URL` and kept only for compatibility with older links
+- the backend no longer exposes `/auth/magic-link`, `/auth/session` or `/auth/logout` as part of the productive panel flow
 
 Frontend local:
 - create `frontend/.env.development` based on `frontend/.env.development.example`
-- keep `VITE_API_BASE_URL=` empty in local development to use the Vite proxy for `/api`, `/auth/logout` and local test-support routes
+- keep `VITE_API_BASE_URL=` empty in local development to use the Vite proxy for `/api` and local test-support routes
 - set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` to the public values used by the GitHub Pages login flow
-- keep `VITE_APP_BUILD_ID=dev-local` or another short non-secret identifier if you want client-build diagnostics locally
 
 GitHub Pages:
 - create `frontend/.env.production` based on `frontend/.env.production.example`
-- set `VITE_API_BASE_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` and `VITE_APP_BUILD_ID` only after you have a public backend URL and public Supabase browser-auth values
+- set `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` only after you have a public backend URL and public Supabase browser-auth values
 - prefer GitHub Actions `Variables` for the three `VITE_*` values, and use a GitHub Actions `Secret` with the same name as fallback if your repository policy blocks Variables
 - production builds now fail fast with `npm run verify:build-env` when any required `VITE_*` value is missing or invalid
 - production builds also generate `frontend/dist/404.html` as a copy of `index.html`, so GitHub Pages can serve the SPA shell for deep links such as `/financemgmtbot/auth/callback`
-- production builds use `VITE_APP_BUILD_ID` only as a short public client identifier in diagnostics and the `X-Client-Build` request header; login no longer depends on synchronizing that value with Cloud Run
 
 Supabase Auth:
 - in `Authentication -> URL Configuration`, set `Site URL` to your published frontend callback, for example `https://admin.example.com/auth/callback`
@@ -31,7 +30,7 @@ Supabase Auth:
 
 Local auth integration test mode:
 - `AUTH_TEST_MODE=true` is reserved for local Playwright/backend integration and must never be enabled in Cloud Run production
-- in this mode, the backend captures deterministic magic links and keeps test sessions/data in memory instead of calling upstream auth or the real `admin_web_sessions` table
+- in this mode, the backend captures deterministic magic links and keeps auth test state/data in memory instead of calling upstream auth
 
 ## Deployment model
 
@@ -46,7 +45,6 @@ Local auth integration test mode:
 - The CI workflow also runs `pip-audit`, `npm audit --omit=dev`, a built-asset scan that allows only the expected public Supabase frontend values while blocking backend secrets/unexpected JWTs, and a full-history `gitleaks` job when the repository is checked out in GitHub Actions.
 - [`.github/workflows/deploy-pages.yml`](.github/workflows/deploy-pages.yml) validates the build environment, builds the frontend and deploys `frontend/dist` to GitHub Pages.
 - the frontend publication flow now validates `npm run verify:pages-fallback` after the build to guarantee that `404.html` exists and matches the SPA shell expected by GitHub Pages.
-- the Pages workflow now derives `VITE_APP_BUILD_ID` from the short GitHub SHA so the published bundle exposes a stable public client identifier in support banners and API headers.
 - In the repository settings, set the Pages source to `GitHub Actions`.
 - Create these GitHub Actions settings before merging:
   - Repository Variable or Secret: `VITE_API_BASE_URL`
@@ -96,7 +94,7 @@ Before push:
 - run `make pre-push` before every push
 - run `make pre-push-full` for auth, frontend, CI, build, deploy, public-contract or security-sensitive changes
 - `make pre-push` and `make pre-push-full` now inject safe public placeholders for `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` during local build validation, so the gate works out of the box without exporting production values
-- if you want to validate the local gate against specific public runtime values, override `FRONTEND_BUILD_API_BASE_URL`, `FRONTEND_BUILD_SUPABASE_URL`, `FRONTEND_BUILD_SUPABASE_ANON_KEY` and `FRONTEND_BUILD_APP_BUILD_ID` when invoking `make pre-push`
+- if you want to validate the local gate against specific public runtime values, override `FRONTEND_BUILD_API_BASE_URL`, `FRONTEND_BUILD_SUPABASE_URL` and `FRONTEND_BUILD_SUPABASE_ANON_KEY` when invoking `make pre-push`
 - `make pre-push` now also checks the GitHub Pages SPA fallback by validating that `dist/404.html` matches `dist/index.html`
 - if the change touches dependencies or publication, also run:
   - `make audit-backend-deps`

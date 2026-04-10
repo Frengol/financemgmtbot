@@ -81,16 +81,6 @@ def normalize_public_url(raw_url: str | None, *, trailing_slash: bool = False):
     return f"{base}/" if trailing_slash else base
 
 
-def normalize_build_id(raw_value: str | None):
-    normalized = (raw_value or "").strip()
-    if not normalized:
-        return ""
-    if len(normalized) > 32:
-        return ""
-    if not all(char.isalnum() or char in "._-" for char in normalized):
-        return ""
-    return normalized
-
 REQUIRED_VARS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_SECRET_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"]
 for var in REQUIRED_VARS:
     if not os.environ.get(var):
@@ -112,7 +102,6 @@ ADMIN_USER_IDS = frozenset(
 )
 FRONTEND_ALLOWED_ORIGINS = parse_frontend_allowed_origins(os.environ.get("FRONTEND_ALLOWED_ORIGINS"))
 FRONTEND_PUBLIC_URL = normalize_public_url(os.environ.get("FRONTEND_PUBLIC_URL"), trailing_slash=True)
-AUTH_CALLBACK_PUBLIC_URL = normalize_public_url(os.environ.get("AUTH_CALLBACK_PUBLIC_URL"))
 ALLOW_LOCAL_DEV_AUTH = (os.environ.get("ALLOW_LOCAL_DEV_AUTH") or "").strip().lower() == "true"
 AUTH_TEST_MODE = (os.environ.get("AUTH_TEST_MODE") or "").strip().lower() == "true"
 

@@ -30,7 +30,7 @@ Use this checklist before publishing the repository to a public remote.
   - `git fetch --all --tags --prune`
 - Review history for leaks:
   - `git log --all -p`
-  - `git grep -n 'service_role\\|SUPABASE_KEY\\|APP_SESSION_SECRET\\|DATA_ENCRYPTION_KEY' $(git rev-list --all)`
+  - `git grep -n 'service_role\\|SUPABASE_KEY\\|DATA_ENCRYPTION_KEY' $(git rev-list --all)`
 - Run a secret scanner over the repository and history:
   - `gitleaks detect --source . --redact`
 

@@ -19,7 +19,7 @@ const mockClearBrowserAdminTestSession = vi.fn();
 const mockDecodeAccessTokenIdentity = vi.fn();
 const mockBrowserAdminAuthTestModeEnabled = vi.fn();
 
-vi.mock('@/lib/supabase', () => ({
+vi.mock('@/features/auth/lib/supabaseBrowserSession', () => ({
   clearBrowserAuthState: (...args: unknown[]) => mockClearBrowserAuthState(...args),
   setCachedBrowserAccessToken: (...args: unknown[]) => mockSetCachedBrowserAccessToken(...args),
   supabase: {
@@ -30,16 +30,16 @@ vi.mock('@/lib/supabase', () => ({
   },
 }));
 
-vi.mock('@/lib/adminApi', async () => {
-  const actual = await vi.importActual<typeof import('@/lib/adminApi')>('@/lib/adminApi');
+vi.mock('@/features/admin/api', async () => {
+  const actual = await vi.importActual<typeof import('@/features/admin/api')>('@/features/admin/api');
   return {
     ...actual,
     getAdminMe: (...args: unknown[]) => mockGetAdminMe(...args),
   };
 });
 
-vi.mock('@/lib/auth', async () => {
-  const actual = await vi.importActual<typeof import('@/lib/auth')>('@/lib/auth');
+vi.mock('@/features/auth/lib/browserState', async () => {
+  const actual = await vi.importActual<typeof import('@/features/auth/lib/browserState')>('@/features/auth/lib/browserState');
   return {
     ...actual,
     saveBrowserAdminProfile: (...args: unknown[]) => mockSaveBrowserAdminProfile(...args),

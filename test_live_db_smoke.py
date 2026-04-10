@@ -34,14 +34,14 @@ if missing_vars:
     pytest.skip(f"LIVE_DB_SMOKE missing required env vars: {', '.join(missing_vars)}", allow_module_level=True)
 
 
-import admin_api  # noqa: E402
+from admin_runtime import auth as admin_auth  # noqa: E402
 import main  # noqa: E402
 
 
 @pytest.mark.asyncio
 async def test_live_db_smoke_reads_transactions_through_admin_route():
     async with main.app.test_client() as client:
-        with patch.object(admin_api, "ALLOW_LOCAL_DEV_AUTH", True):
+        with patch.object(admin_auth, "ALLOW_LOCAL_DEV_AUTH", True):
             response = await client.get(
                 "/api/admin/gastos?date_from=2000-01-01&date_to=2100-01-01",
                 headers={"Origin": "http://127.0.0.1:5173"},

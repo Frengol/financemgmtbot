@@ -1,16 +1,17 @@
-const configuredAdminEmails = (import.meta.env.VITE_ALLOWED_ADMIN_EMAILS || "")
-  .split(",")
+const configuredAdminEmails = (import.meta.env.VITE_ALLOWED_ADMIN_EMAILS || '')
+  .split(',')
   .map((email) => email.trim().toLowerCase())
   .filter(Boolean);
 
 const authTestModeEnabled = import.meta.env.VITE_AUTH_TEST_MODE === 'true';
+
 export const legacyBrowserAdminProfileStorageKey = 'financemgmtbot-admin-profile';
 export const browserAdminProfileStorageKey = 'financemgmtbot-admin-profile-v2';
 export const legacyBrowserAdminTestSessionStorageKey = 'financemgmtbot-admin-auth-test-session';
 export const browserAdminTestSessionStorageKey = 'financemgmtbot-admin-auth-test-session-v2';
 export const browserAdminLoginNoticeStorageKey = 'financemgmtbot-admin-login-notice-v1';
+
 const jwtSegmentPattern = /^[A-Za-z0-9_-]+$/;
-const buildIdPattern = /^[A-Za-z0-9._-]{1,32}$/;
 
 export type BrowserAdminProfile = {
   id: string;
@@ -29,18 +30,6 @@ export type BrowserAdminLoginNotice = {
 
 function isLoopbackHostname(hostname: string) {
   return ['localhost', '127.0.0.1', '::1'].includes((hostname || '').toLowerCase());
-}
-
-export function normalizeBuildId(value?: string | null) {
-  const normalized = (value || '').trim();
-  if (!normalized || !buildIdPattern.test(normalized)) {
-    return null;
-  }
-  return normalized;
-}
-
-export function getAppBuildId() {
-  return normalizeBuildId(import.meta.env.VITE_APP_BUILD_ID) || 'dev-local';
 }
 
 function removeStorageKeys(keys: string[]) {
@@ -124,6 +113,7 @@ export function clearBrowserAdminLoginNotice() {
   if (typeof window === 'undefined') {
     return;
   }
+
   window.sessionStorage.removeItem(browserAdminLoginNoticeStorageKey);
 }
 
@@ -145,6 +135,7 @@ export function decodeAccessTokenIdentity(token?: string | null): BrowserAdminPr
     const normalized = segments[1].replace(/-/g, '+').replace(/_/g, '/');
     const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
     let decodedPayload = '';
+
     if (typeof window !== 'undefined' && typeof window.atob === 'function') {
       decodedPayload = window.atob(padded);
     } else if (typeof Buffer !== 'undefined') {
@@ -152,6 +143,7 @@ export function decodeAccessTokenIdentity(token?: string | null): BrowserAdminPr
     } else {
       return null;
     }
+
     const decoded = JSON.parse(decodedPayload) as { sub?: string; email?: string | null };
     if (!decoded.sub) {
       return null;

@@ -10,9 +10,9 @@ import {
   saveBrowserAdminLoginNotice,
   saveBrowserAdminProfile,
   saveBrowserAdminTestSession,
-} from '@/lib/auth';
-import { ApiError, getAdminMe } from '@/lib/adminApi';
-import { clearBrowserAuthState, setCachedBrowserAccessToken, supabase } from '@/lib/supabase';
+} from '@/features/auth/lib/browserState';
+import { ApiError, getAdminMe } from '@/features/admin/api';
+import { clearBrowserAuthState, setCachedBrowserAccessToken, supabase } from '@/features/auth/lib/supabaseBrowserSession';
 
 function decodeAuthValue(value: string | null) {
   if (!value) {

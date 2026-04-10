@@ -1,7 +1,7 @@
 .PHONY: test-backend test-backend-coverage test-backend-live-db-smoke test-frontend test-frontend-coverage test-frontend-e2e audit-backend-deps audit-frontend-deps audit-repo-security pre-push pre-push-full install-git-hooks
 
 BACKEND_COVERAGE_ARGS = \
-	--cov=admin_api \
+	--cov=admin_runtime \
 	--cov=ai_service \
 	--cov=config \
 	--cov=core_logic \
@@ -11,17 +11,17 @@ BACKEND_COVERAGE_ARGS = \
 	--cov=security \
 	--cov=telegram_service \
 	--cov=utils \
+	--cov=web_app \
 	--cov-branch \
 	--cov-config=.coveragerc \
 	--cov-report=term-missing \
 	--cov-report=xml:coverage/backend/coverage.xml
 
-FRONTEND_BUILD_ENV_UNSET = env -u VITE_API_BASE_URL -u VITE_SUPABASE_URL -u VITE_SUPABASE_ANON_KEY -u VITE_APP_BUILD_ID
+FRONTEND_BUILD_ENV_UNSET = env -u VITE_API_BASE_URL -u VITE_SUPABASE_URL -u VITE_SUPABASE_ANON_KEY
 FRONTEND_BUILD_API_BASE_URL ?= https://api.example.com
 FRONTEND_BUILD_SUPABASE_URL ?= https://your-project-ref.supabase.co
 FRONTEND_BUILD_SUPABASE_ANON_KEY ?= public-anon-key
-FRONTEND_BUILD_APP_BUILD_ID ?= local-build
-FRONTEND_BUILD_ENV = env VITE_API_BASE_URL=$(FRONTEND_BUILD_API_BASE_URL) VITE_SUPABASE_URL=$(FRONTEND_BUILD_SUPABASE_URL) VITE_SUPABASE_ANON_KEY=$(FRONTEND_BUILD_SUPABASE_ANON_KEY) VITE_APP_BUILD_ID=$(FRONTEND_BUILD_APP_BUILD_ID)
+FRONTEND_BUILD_ENV = env VITE_API_BASE_URL=$(FRONTEND_BUILD_API_BASE_URL) VITE_SUPABASE_URL=$(FRONTEND_BUILD_SUPABASE_URL) VITE_SUPABASE_ANON_KEY=$(FRONTEND_BUILD_SUPABASE_ANON_KEY)
 
 test-backend:
 	pytest -q

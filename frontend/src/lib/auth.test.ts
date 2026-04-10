@@ -18,7 +18,7 @@ describe('isAllowedAdminEmail', () => {
 
   it('allows any e-mail when no allowlist is configured', async () => {
     vi.stubEnv('VITE_ALLOWED_ADMIN_EMAILS', '');
-    const { isAllowedAdminEmail } = await import('./auth');
+    const { isAllowedAdminEmail } = await import('@/features/auth/lib/browserState');
 
     expect(isAllowedAdminEmail('admin@example.com')).toBe(true);
     expect(isAllowedAdminEmail()).toBe(true);
@@ -26,7 +26,7 @@ describe('isAllowedAdminEmail', () => {
 
   it('enforces the configured allowlist in a case-insensitive way', async () => {
     vi.stubEnv('VITE_ALLOWED_ADMIN_EMAILS', 'admin@example.com,finance@example.com');
-    const { isAllowedAdminEmail } = await import('./auth');
+    const { isAllowedAdminEmail } = await import('@/features/auth/lib/browserState');
 
     expect(isAllowedAdminEmail('ADMIN@example.com')).toBe(true);
     expect(isAllowedAdminEmail('blocked@example.com')).toBe(false);
@@ -34,7 +34,7 @@ describe('isAllowedAdminEmail', () => {
   });
 
   it('decodes access token identities and ignores malformed payloads', async () => {
-    const { decodeAccessTokenIdentity, isJwtShapeValid } = await import('./auth');
+    const { decodeAccessTokenIdentity, isJwtShapeValid } = await import('@/features/auth/lib/browserState');
     const payload = btoa(JSON.stringify({ sub: 'user-1', email: 'admin@example.com' }))
       .replace(/\+/g, '-')
       .replace(/\//g, '_')
@@ -63,12 +63,11 @@ describe('isAllowedAdminEmail', () => {
       decodeAccessTokenIdentity,
       loadBrowserAdminProfile,
       loadBrowserAdminTestSession,
-      normalizeBuildId,
       saveBrowserAdminProfile,
       clearBrowserAdminProfile,
       saveBrowserAdminTestSession,
       clearBrowserAdminTestSession,
-    } = await import('./auth');
+    } = await import('@/features/auth/lib/browserState');
     const originalAtob = window.atob;
     Object.defineProperty(window, 'atob', {
       configurable: true,
@@ -98,8 +97,6 @@ describe('isAllowedAdminEmail', () => {
 
     vi.stubGlobal('Buffer', undefined);
     expect(decodeAccessTokenIdentity(buildJwtLikeToken('header-segment', payload, 'signature-segment'))).toBeNull();
-    expect(normalizeBuildId('release.2026_04-08')).toBe('release.2026_04-08');
-    expect(normalizeBuildId('bad build id')).toBeNull();
 
     vi.unstubAllGlobals();
     Object.defineProperty(window, 'atob', {
@@ -113,7 +110,7 @@ describe('isAllowedAdminEmail', () => {
       saveBrowserAdminProfile,
       loadBrowserAdminProfile,
       clearBrowserAdminProfile,
-    } = await import('./auth');
+    } = await import('@/features/auth/lib/browserState');
 
     saveBrowserAdminProfile({ id: 'user-1', email: 'admin@example.com' });
     expect(loadBrowserAdminProfile()).toEqual({ id: 'user-1', email: 'admin@example.com' });
@@ -136,7 +133,7 @@ describe('isAllowedAdminEmail', () => {
     const {
       loadBrowserAdminProfile,
       loadBrowserAdminTestSession,
-    } = await import('./auth');
+    } = await import('@/features/auth/lib/browserState');
 
     window.localStorage.setItem('financemgmtbot-admin-profile', JSON.stringify({ id: 'legacy-user', email: 'legacy@example.com' }));
     window.localStorage.setItem('financemgmtbot-admin-auth-test-session', JSON.stringify({
@@ -155,7 +152,7 @@ describe('isAllowedAdminEmail', () => {
       saveBrowserAdminTestSession,
       loadBrowserAdminTestSession,
       clearBrowserAdminTestSession,
-    } = await import('./auth');
+    } = await import('@/features/auth/lib/browserState');
     const validJwt = buildJwtLikeToken('header-segment', 'payload-segment', 'signature-segment');
 
     saveBrowserAdminTestSession({
@@ -199,7 +196,7 @@ describe('isAllowedAdminEmail', () => {
     const {
       saveBrowserAdminProfile,
       saveBrowserAdminTestSession,
-    } = await import('./auth');
+    } = await import('@/features/auth/lib/browserState');
 
     saveBrowserAdminProfile({ id: '' as unknown as string, email: 'invalid@example.com' });
     expect(window.localStorage.getItem('financemgmtbot-admin-profile-v2')).toBeNull();
@@ -216,7 +213,7 @@ describe('isAllowedAdminEmail', () => {
       browserAdminTestSessionAllowed,
       loadBrowserAdminTestSession,
       saveBrowserAdminTestSession,
-    } = await import('./auth');
+    } = await import('@/features/auth/lib/browserState');
     const originalWindow = window;
     const validJwt = buildJwtLikeToken('header-segment', 'payload-segment', 'signature-segment');
 
@@ -247,7 +244,7 @@ describe('isAllowedAdminEmail', () => {
       loadBrowserAdminTestSession,
       saveBrowserAdminProfile,
       saveBrowserAdminTestSession,
-    } = await import('./auth');
+    } = await import('@/features/auth/lib/browserState');
     const validJwt = buildJwtLikeToken('header-segment', 'payload-segment', 'signature-segment');
 
     window.localStorage.setItem('financemgmtbot-admin-profile', JSON.stringify({ id: 'legacy-user', email: 'legacy@example.com' }));
@@ -277,7 +274,7 @@ describe('isAllowedAdminEmail', () => {
   });
 
   it('clears browser admin artifacts safely even when no window is available', async () => {
-    const { clearBrowserAdminArtifacts, browserAdminTestSessionAllowed } = await import('./auth');
+    const { clearBrowserAdminArtifacts, browserAdminTestSessionAllowed } = await import('@/features/auth/lib/browserState');
 
     vi.stubGlobal('window', undefined);
 
@@ -290,7 +287,7 @@ describe('isAllowedAdminEmail', () => {
       clearBrowserAdminLoginNotice,
       loadBrowserAdminLoginNotice,
       saveBrowserAdminLoginNotice,
-    } = await import('./auth');
+    } = await import('@/features/auth/lib/browserState');
 
     saveBrowserAdminLoginNotice({ message: 'notice-1' });
     expect(loadBrowserAdminLoginNotice()).toEqual({ message: 'notice-1' });
@@ -309,24 +306,12 @@ describe('isAllowedAdminEmail', () => {
     expect(window.sessionStorage.getItem('financemgmtbot-admin-login-notice-v1')).toBeNull();
   });
 
-  it('resolves a safe public build id for client diagnostics', async () => {
-    vi.stubEnv('VITE_APP_BUILD_ID', 'build-auth-1');
-    const { getAppBuildId, normalizeBuildId } = await import('./auth');
-
-    expect(getAppBuildId()).toBe('build-auth-1');
-    expect(normalizeBuildId('release.2026_04-08')).toBe('release.2026_04-08');
-  });
-
-  it('drops invalid build ids and safely handles environments without window when touching auth test storage', async () => {
-    vi.stubEnv('VITE_APP_BUILD_ID', 'bad build id');
+  it('safely handles environments without window when touching auth test storage', async () => {
     const {
       browserAdminTestSessionAllowed,
-      getAppBuildId,
       saveBrowserAdminTestSession,
-    } = await import('./auth');
+    } = await import('@/features/auth/lib/browserState');
     const validJwt = buildJwtLikeToken('header-segment', 'payload-segment', 'signature-segment');
-
-    expect(getAppBuildId()).toBe('dev-local');
 
     vi.stubGlobal('window', undefined);
     expect(browserAdminTestSessionAllowed()).toBe(false);

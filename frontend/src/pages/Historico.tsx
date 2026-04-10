@@ -1,33 +1,25 @@
 import { useEffect, useState, useMemo } from "react";
-import { ApiError, deleteTransaction, getTransactions, isReauthenticationError } from "@/lib/adminApi";
+import { ApiError, deleteTransaction, getTransactions } from "@/features/admin/api";
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable, getFilteredRowModel, getPaginationRowModel } from '@tanstack/react-table';
 import { useAuth } from "@/hooks/useAuth";
 import { useTransactionComposer } from "@/hooks/useTransactionComposer";
 import { Edit, Loader2, Search, Trash2 } from "lucide-react";
-import { clearBrowserAdminArtifacts } from "@/lib/auth";
 import { normalizeNatureLabel, type TransactionRecord } from "@/lib/transactions";
+import AdminRequestErrorBanner from "@/features/admin/components/AdminRequestErrorBanner";
+import { createSessionUnavailableError, normalizeAdminPageError } from "@/features/admin/lib/pageErrors";
 
 type Gasto = TransactionRecord;
 
 const columnHelper = createColumnHelper<Gasto>();
 
 export default function Historico() {
-  const { authenticated, csrfToken, loading, localBypass, signOut } = useAuth();
+  const { authenticated, loading, localBypass, signOut } = useAuth();
   const { openEdit } = useTransactionComposer();
   const [data, setData] = useState<Gasto[]>([]);
   const [globalFilter, setGlobalFilter] = useState("");
   const [error, setError] = useState<ApiError | Error | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [fetching, setFetching] = useState(true);
-
-  const createSessionUnavailableError = () => new ApiError(
-    'Nao foi possivel validar sua sessao. Entre novamente.',
-    {
-      code: 'AUTH_SESSION_INVALID',
-      diagnostic: 'auth_state_unusable',
-      status: 401,
-    },
-  );
 
   const fetchGastos = async () => {
     setFetching(true);
@@ -52,10 +44,7 @@ export default function Historico() {
       })));
       setError(null);
     } catch (fetchError) {
-      if (isReauthenticationError(fetchError)) {
-        clearBrowserAdminArtifacts();
-      }
-      setError(fetchError instanceof Error ? fetchError : new Error("Nao foi possivel carregar o historico agora."));
+      setError(normalizeAdminPageError(fetchError, "Nao foi possivel carregar o historico agora."));
     }
     setFetching(false);
   };
@@ -99,14 +88,11 @@ export default function Historico() {
       try {
         setPendingDeleteId(id);
         setError(null);
-        await deleteTransaction(id, csrfToken);
+        await deleteTransaction(id);
         setData((current) => current.filter((item) => item.id !== id));
         window.dispatchEvent(new CustomEvent('transactions:changed'));
       } catch (deleteError) {
-        if (isReauthenticationError(deleteError)) {
-          clearBrowserAdminArtifacts();
-        }
-        setError(deleteError instanceof Error ? deleteError : new Error("Nao foi possivel excluir o registro."));
+        setError(normalizeAdminPageError(deleteError, "Nao foi possivel excluir o registro."));
       } finally {
         setPendingDeleteId(null);
       }
@@ -160,7 +146,7 @@ export default function Historico() {
         </div>
       ),
     })
-  ], [authenticated, csrfToken, loading, localBypass, openEdit, pendingDeleteId]);
+  ], [authenticated, loading, localBypass, openEdit, pendingDeleteId]);
 
   const table = useReactTable({
     data,
@@ -190,18 +176,10 @@ export default function Historico() {
             </div>
           </div>
           {error && (
-            <div className="flex flex-col gap-3 rounded-lg border border-rose-100 bg-rose-50 px-4 py-3 text-sm text-rose-700 md:flex-row md:items-center md:justify-between">
-              <span>{error.message}</span>
-              {isReauthenticationError(error) ? (
-                <button
-                  type="button"
-                  onClick={() => void signOut()}
-                  className="inline-flex items-center justify-center rounded-lg border border-rose-200 bg-white px-3 py-2 font-medium text-rose-700 transition hover:bg-rose-100"
-                >
-                  Fazer login novamente
-                </button>
-              ) : null}
-            </div>
+            <AdminRequestErrorBanner
+              error={error}
+              onReauthenticate={() => void signOut()}
+            />
           )}
         </div>
       </div>

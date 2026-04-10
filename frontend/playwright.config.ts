@@ -34,7 +34,6 @@ export default defineConfig({
         SUPABASE_ADMIN_EMAILS: 'admin@example.com,admin+chromium@example.com,admin+firefox@example.com',
         FRONTEND_ALLOWED_ORIGINS: `${e2eFrontendBaseUrl},http://localhost:${e2eFrontendPort}`,
         FRONTEND_PUBLIC_URL: `${e2eFrontendBaseUrl}/`,
-        AUTH_CALLBACK_PUBLIC_URL: `${e2eBackendBaseUrl}/auth/callback`,
         PYTHONUNBUFFERED: '1',
       },
       port: e2eBackendPort,

@@ -1,15 +1,18 @@
 import { createClient } from '@supabase/supabase-js';
+
 import {
   browserAdminAuthTestModeEnabled,
   clearBrowserAdminArtifacts,
   isJwtShapeValid,
   loadBrowserAdminTestSession,
-} from '@/lib/auth';
+} from '@/features/auth/lib/browserState';
 
 const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL || 'http://127.0.0.1:54321').trim().replace(/\/$/, '');
 const supabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || 'public-anon-key-for-local-tests').trim();
+
 export const legacySupabaseBrowserSessionStorageKey = 'financemgmtbot-admin-auth';
 export const supabaseBrowserSessionStorageKey = 'financemgmtbot-admin-auth-v2';
+
 let cachedBrowserAccessToken: string | null = null;
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
@@ -37,7 +40,9 @@ export async function clearBrowserAuthState() {
     purgeLegacyBrowserAuthStorage();
     window.localStorage.removeItem(supabaseBrowserSessionStorageKey);
   }
+
   clearBrowserAdminArtifacts();
+
   try {
     await supabase.auth.signOut();
   } catch {
