@@ -32,9 +32,9 @@ steps:
       - "-c"
       - |
         set -eu
-        IMAGE_REF="$(cat /workspace/image_ref.txt)"
+        IMAGE_REF=$$(cat /workspace/image_ref.txt)
         gcloud run deploy "${_SERVICE_NAME}" \
-          --image "${IMAGE_REF}" \
+          --image "$$IMAGE_REF" \
           --region "${_REGION}" \
           --platform managed \
           --quiet

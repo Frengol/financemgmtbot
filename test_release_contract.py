@@ -71,6 +71,9 @@ def test_backend_cloud_build_contract_uses_dockerfile_image_deploy():
     assert 'gcr.io/k8s-skaffold/pack' not in cloudbuild
     assert '--source' not in cloudbuild
     assert 'logging: "CLOUD_LOGGING_ONLY"' in cloudbuild
+    assert 'IMAGE_REF=$$(cat /workspace/image_ref.txt)' in cloudbuild
+    assert '--image "$$IMAGE_REF"' in cloudbuild
+    assert '${IMAGE_REF}' not in cloudbuild
 
 
 def test_backend_container_contract_is_runtime_only_and_protected_by_dockerignore():
