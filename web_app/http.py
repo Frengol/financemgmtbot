@@ -1,5 +1,4 @@
-import json
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from quart import Response, request
 
@@ -23,7 +22,6 @@ def _json_error(message: str, status_code: int, *, code: str = "UNKNOWN_ERROR", 
 def browser_cors_enabled():
     return (
         request.path.startswith("/api/admin")
-        or request.path.startswith("/auth")
         or (auth_test_mode_enabled() and request.path.startswith("/__test__/auth"))
     )
 
@@ -96,93 +94,11 @@ def sanitize_frontend_redirect_target(candidate: str | None):
     return default_target
 
 
-def sanitize_frontend_app_redirect_target(candidate: str | None):
-    default_target = default_frontend_public_url()
-    raw_value = (candidate or "").strip()
-    if not raw_value:
-        return default_target
-
-    parsed = urlsplit(raw_value)
-    if parsed.scheme in {"http", "https"}:
-        if normalize_frontend_origin(raw_value) == normalize_frontend_origin(default_target):
-            return raw_value
-        if not FRONTEND_PUBLIC_URL and is_loopback_request() and is_loopback_url(raw_value):
-            return raw_value
-
-    return default_target
-
-
-def build_callback_url(frontend_redirect: str, *, mode: str):
-    return frontend_redirect
-
-
-def build_frontend_callback_relay_target():
-    query_string = request.query_string.decode("utf-8", errors="ignore").strip()
-    redirect_to = default_frontend_auth_callback_url()
-    if not query_string:
-        return build_callback_url(redirect_to, mode="canonical")
-
-    parsed = urlsplit(build_callback_url(redirect_to, mode="canonical"))
-    incoming_pairs = parse_qsl(query_string, keep_blank_values=True)
-    incoming_keys = {key for key, _value in incoming_pairs}
-    preserved_pairs = [
-        (key, value)
-        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-        if key not in incoming_keys
-    ]
-    merged_query = urlencode([*preserved_pairs, *incoming_pairs])
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, merged_query, parsed.fragment))
-
-
-def build_login_redirect_target(redirect_to: str, *, reason: str | None = None, request_id: str | None = None):
-    login_url = f"{redirect_to.rstrip('/')}/login"
-    params = {}
-    if reason:
-        params["reason"] = reason
-    if request_id:
-        params["requestId"] = request_id
-    if not params:
-        return login_url
-    return f"{login_url}?{urlencode(params)}"
-
-
 def test_support_request_allowed():
     if not auth_test_mode_enabled():
         return False
     remote_addr = (request.remote_addr or "").strip()
     return remote_addr in {"127.0.0.1", "::1", "localhost"} or remote_addr.startswith("127.") or remote_addr.startswith("::ffff:127.")
-
-
-def build_fragment_bridge_html(redirect_to: str):
-    serialized_redirect = json.dumps(redirect_to)
-    return f"""<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta http-equiv="Cache-Control" content="no-store">
-    <meta name="referrer" content="no-referrer">
-    <title>Finance Copilot Auth</title>
-  </head>
-  <body>
-    <p>Finalizing secure sign-in...</p>
-    <script>
-      (async function () {{
-        const redirectTo = new URL({serialized_redirect});
-        if (window.location.search) {{
-          const sourceSearch = new URLSearchParams(window.location.search);
-          sourceSearch.forEach((value, key) => {{
-            redirectTo.searchParams.set(key, value);
-          }});
-        }}
-        if (window.location.hash) {{
-          redirectTo.hash = window.location.hash;
-        }}
-        history.replaceState(null, '', window.location.pathname + window.location.search);
-        window.location.replace(redirectTo.toString());
-      }})();
-    </script>
-  </body>
-</html>"""
 
 
 def rate_limited(

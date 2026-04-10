@@ -26,7 +26,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - **Speech-to-Text:** Groq (`whisper-large-v3`) — Transcrição de áudio `.ogg`.
 * **Integração Telegram:** `httpx` — Cliente HTTP assíncrono para Telegram Bot API.
 * **Entrega Contínua:** `GitHub Actions` — CI para coverage do backend, coverage unitário do frontend, smoke E2E determinístico com Playwright, E2E integrado de autenticação com backend local, auditoria de dependências (`pip-audit`, `npm audit`), secret scanning com `gitleaks`, build/frontend build e deploy automatizado do frontend no GitHub Pages.
-* **Fundação de Testes:** `pytest`, `pytest-asyncio`, `pytest-cov`, `coverage.py`, `Vitest`, `@vitest/coverage-v8`, `Playwright` e `unittest.mock` — Cobertura regressiva local do backend e das rotas administrativas, métricas estruturais reais com gate mínimo de `90%`, smoke E2E local com mocks de `/auth/*` e `/api/admin/*` e uma suíte integrada local que percorre `magic-link -> callback -> sessão -> leitura de dados`.
+* **Fundação de Testes:** `pytest`, `pytest-asyncio`, `pytest-cov`, `coverage.py`, `Vitest`, `@vitest/coverage-v8`, `Playwright` e `unittest.mock` — Cobertura regressiva local do backend e das rotas administrativas, métricas estruturais reais com gate mínimo de `90%`, smoke E2E local com mocks de `/api/admin/*` e suporte de teste `__test__/auth/*` e uma suíte integrada local que percorre `magic-link -> callback -> sessão -> leitura de dados`.
 
 ---
 
@@ -59,7 +59,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 13. `MainLayout` e as telas administrativas só iniciam fetches privilegiados depois que a autenticação fica estável; o antigo health check não roda mais durante `loading`, estado desautenticado ou `/auth/callback`, evitando sequências inconsistentes como `204` seguido de `401 bearer_malformed`.
 14. O backend valida o bearer token no lado servidor com Supabase, revalida allowlists administrativas e executa a operação privilegiada com auditoria.
 15. O operador continua podendo criar, editar, excluir, aprovar e rejeitar registros a partir do painel sem expor `service_role` ao navegador; o token web oficial passa a ser o token público do Supabase, compatível com o domínio separado do GitHub Pages.
-16. O callback legado do backend (`GET /auth/callback`) passa a atuar apenas como relay de compatibilidade: ele preserva `hash` ou `query string` vindos do Supabase e redireciona o navegador para o callback do frontend, sem mais criar sessão cookie para o fluxo oficial do Pages. O backend produtivo não emite mais Magic Link nem mantém `/auth/session` ou `/auth/logout` como parte do contrato do painel.
+16. O backend produtivo não emite mais Magic Link nem mantém `/auth/callback`, `/auth/session` ou `/auth/logout` como parte do contrato do painel; toda a autenticação pública do painel termina no próprio frontend.
 17. Falhas operacionais do painel usam envelope sanitizado com `code`, `requestId`, `retryable` e, quando aplicável, `retryAfterSeconds`; erros de sessão agora também podem incluir um `detail` curto e controlado para suporte, sem ecoar detalhes crus de provedores ou do banco.
 
 ### 2.3 Separação de Superfícies
@@ -71,7 +71,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 
 ## 3. Pipeline V3 (Separação de Preocupações & Determinismo)
 
-1. **Portão Mínimo de Transporte:** `main.py` mantém-se responsável por aceitar requests, validar origem do Telegram, aplicar CORS apenas às rotas de browser (`/auth/*`, `/api/admin/*`), endurecer headers de resposta e expor rotas administrativas explícitas.
+1. **Portão Mínimo de Transporte:** `main.py` mantém-se responsável por aceitar requests, validar origem do Telegram, aplicar CORS apenas às rotas de browser realmente públicas (`/api/admin/*`) e ao suporte local de autenticação (`__test__/auth/*` quando `AUTH_TEST_MODE=true`), endurecer headers de resposta e expor rotas administrativas explícitas.
 2. **Controlador de Domínio:** `handlers.py` continua orquestrando o fluxo conversacional, sem delegar matemática, datas ou filtros ao modelo.
 3. **Muralha Anti-Alucinação:** `ai_service.py` força o DeepSeek a devolver apenas JSON estruturado, com categorias restritas e sem autonomia de execução.
 4. **Motor Determinístico Local:** `core_logic.py`, `utils.py` e `db_repository.py` concentram regras financeiras, cronologia, parcelamento e Map/Reduce de cupons.
@@ -108,7 +108,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `public.admin_users`
   - função `public.is_admin()`
   - políticas de RLS para `gastos`, `cache_aprovacao` e `auditoria_admin`
-* A tabela histórica `public.admin_web_sessions` permanece apenas como resíduo de schema fora da linha crítica e está marcada para remoção por migration própria depois da janela de compatibilidade do relay.
+* A tabela histórica `public.admin_web_sessions` foi removida por migration própria depois da eliminação final do fluxo cookie/session do painel.
 
 ### 4.3 Operações Sensíveis
 * O frontend não executa mais `delete()` crítico diretamente em `gastos` ou `cache_aprovacao`.
@@ -127,7 +127,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 * O fluxo administrativo de autenticação oficial passa pelo Supabase e pelo frontend:
   - emissão do Magic Link diretamente no browser com `supabase.auth.signInWithOtp(...)`
   - callback oficial no frontend `/auth/callback`
-  - `GET /auth/callback` no backend apenas como relay seguro de compatibilidade para links antigos ou configuração desalinhada
+  - nenhum endpoint `/auth/*` no backend produtivo
 
 ### 4.4 CORS e Fronteira Web
 * O backend restringe chamadas do navegador a `FRONTEND_ALLOWED_ORIGINS`.
@@ -138,7 +138,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `http://127.0.0.1:5173`
 * A origem publicada do frontend deve vir do ambiente do Cloud Run via `FRONTEND_ALLOWED_ORIGINS`, e não hardcoded no repositório.
 * O bypass local do backend só é aceito sem bearer quando a flag de desenvolvimento está ligada e a chamada vem do loopback/origem permitida.
-* Respostas de `/auth/*` e `/api/admin/*` agora incluem `Cache-Control: no-store, private`, `Pragma: no-cache`, `X-Content-Type-Options: nosniff` e `Referrer-Policy: no-referrer`.
+* Respostas de `/api/admin/*` e do suporte local `__test__/auth/*` agora incluem `Cache-Control: no-store, private`, `Pragma: no-cache`, `X-Content-Type-Options: nosniff` e `Referrer-Policy: no-referrer`.
 * Como o frontend ainda está em GitHub Pages sem edge dedicado, CSP/anti-clickjacking completos continuam dependentes da próxima etapa obrigatória: domínio próprio + borda reversa controlada.
 
 ### 4.5 Observabilidade Blindada
@@ -165,6 +165,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `Artifact Registry Writer`
   - `Cloud Run Admin`
   - `Service Account User` sobre a identidade de runtime do Cloud Run
+  - `Logs Writer`
 * O trigger legado de Cloud Run source deploy com buildpacks deve ser desativado depois da migração, para evitar regressão para um caminho de build não versionado.
 * O serviço recebe:
   - `SUPABASE_URL`
@@ -193,7 +194,6 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - login oficial via `supabase.auth.signInWithOtp(...)` diretamente no navegador
   - o callback público oficial é a rota `/auth/callback` do próprio GitHub Pages
   - o build oficial gera `dist/404.html` como cópia funcional de `dist/index.html`, permitindo que o GitHub Pages entregue o shell da SPA para deep links como `/financemgmtbot/auth/callback`
-  - `GET /auth/callback` do backend preserva `hash`/`query string` e redireciona para o callback do frontend quando um link antigo ainda cair no `run.app`
   - a SPA manipula apenas o token público de sessão do Supabase no navegador e envia `Authorization: Bearer` para o backend administrativo
   - o frontend exige `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` no build oficial
 * A SPA usa `code splitting` por rota e por dependência pesada de frontend, carregando `Dashboard`, `Histórico`, `Aprovações`, `Login` e o modal transacional sob demanda, com `manualChunks` dedicados para gráficos, tabela e vendor base.
@@ -220,7 +220,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - o scanner do bundle permite apenas os valores públicos esperados do frontend (`VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY`) e continua bloqueando segredos backend, e-mails inesperados e JWTs não reconhecidos
   - executa `npm run test:e2e` com Playwright em Chromium e Firefox
   - a suíte E2E combina:
-    - smoke mockada para regressão rápida de UI
+    - smoke mockada para regressão rápida de UI com mocks de `/api/admin/*` e do suporte local `__test__/auth/*`
     - integração local com backend Quart em `AUTH_TEST_MODE`, validando magic link, callback no frontend, sessão Supabase no browser e carregamento de `/api/admin/gastos` por bearer
   - executa `gitleaks` com histórico completo no clone da CI
   - publica artefatos de coverage e do relatório Playwright

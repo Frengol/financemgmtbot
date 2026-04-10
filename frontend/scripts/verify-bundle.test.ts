@@ -100,7 +100,7 @@ describe('verifyBundleDirectory', () => {
     ).toThrow(/Supabase auth state listener/i);
   });
 
-  it('does not fail only because legacy compatibility strings still exist in the bundle', () => {
+  it('allows the official frontend callback route without tolerating backend relay requests', () => {
     const dir = createBundleDir(`
       const supabaseUrl = '${PUBLIC_SUPABASE_URL}';
       const supabaseAnonKey = '${PUBLIC_SUPABASE_ANON_KEY}';
@@ -110,7 +110,7 @@ describe('verifyBundleDirectory', () => {
       supabase.auth.onAuthStateChange(() => {});
       fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc' } });
       fetch('/api/admin/gastos', { headers: { Authorization: 'Bearer abc' } });
-      const legacyBridge = '/auth/callback';
+      const callbackRoute = '/auth/callback';
     `);
 
     expect(
@@ -119,6 +119,27 @@ describe('verifyBundleDirectory', () => {
         supabaseAnonKey: PUBLIC_SUPABASE_ANON_KEY,
       }),
     ).toBe(2);
+  });
+
+  it('rejects a bundle that still issues a backend auth request', () => {
+    const dir = createBundleDir(`
+      const supabaseUrl = '${PUBLIC_SUPABASE_URL}';
+      const supabaseAnonKey = '${PUBLIC_SUPABASE_ANON_KEY}';
+      const storageKey = 'financemgmtbot-admin-auth-v2';
+      const authEmail = 'admin' + '@' + 'example.com';
+      supabase.auth.signInWithOtp({ email: authEmail, options: { shouldCreateUser: false } });
+      supabase.auth.onAuthStateChange(() => {});
+      fetch('/auth/callback');
+      fetch('/api/admin/me', { headers: { Authorization: 'Bearer abc' } });
+    `);
+
+    expect(
+      () =>
+        verifyBundleDirectory(dir, {
+          supabaseUrl: PUBLIC_SUPABASE_URL,
+          supabaseAnonKey: PUBLIC_SUPABASE_ANON_KEY,
+        }),
+    ).toThrow(/legacy backend auth request/i);
   });
 
   it('does not flag the loopback-only auth test endpoint as a published legacy auth path', () => {

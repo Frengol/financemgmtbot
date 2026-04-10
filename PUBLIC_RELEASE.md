@@ -53,3 +53,4 @@ Only publish when all of the following are true:
 - docs and examples contain placeholders only
 - the release is being made from a healthy Git clone
 - backend deploys from the checked-in `cloudbuild.yaml` and `Dockerfile`, not from an implicit Cloud Run source-build path
+- the productive backend contract does not publish legacy `/auth/*` routes

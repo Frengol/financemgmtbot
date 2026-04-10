@@ -1,42 +1,19 @@
 from urllib.parse import urlencode
 
-from quart import Response, redirect, request
+from quart import redirect, request
 
 from admin_runtime.common import _json_error, _json_success
-from security import sanitize_plain_text
-from test_support import auth_test_mode_enabled, capture_magic_link, consume_magic_link, peek_magic_link, reset_auth_test_state, seed_transactions
+from test_support import capture_magic_link, consume_magic_link, peek_magic_link, reset_auth_test_state, seed_transactions
 
 from .http import (
     auth_redirect_config_error,
-    build_callback_url,
-    build_fragment_bridge_html,
-    build_frontend_callback_relay_target,
     default_frontend_auth_callback_url,
-    rate_limited,
     sanitize_frontend_redirect_target,
     test_support_request_allowed,
 )
 
 
-def register_auth_compat_routes(app):
-    @app.route("/auth/callback", methods=["GET", "OPTIONS"])
-    async def auth_callback():
-        if request.method == "OPTIONS":
-            return "", 204
-
-        limited = rate_limited("auth_callback", request.remote_addr or "unknown", limit=12, window_seconds=300)
-        if limited:
-            return limited
-
-        try:
-            redirect_to = build_frontend_callback_relay_target()
-        except RuntimeError as exc:
-            return auth_redirect_config_error(exc)
-
-        if request.query_string:
-            return redirect(redirect_to)
-        return Response(build_fragment_bridge_html(redirect_to), mimetype="text/html")
-
+def register_test_support_routes(app):
     @app.route("/__test__/auth/reset", methods=["POST", "OPTIONS"])
     async def auth_test_reset():
         if request.method == "OPTIONS":
@@ -70,18 +47,22 @@ def register_auth_compat_routes(app):
             return _json_error("Not found.", 404)
 
         if request.method == "GET":
-            email = sanitize_plain_text(request.args.get("email"), 160).lower()
+            email = (request.args.get("email") or "").strip().lower()
             payload = peek_magic_link(email)
             if not payload:
                 return _json_error("Magic link not found.", 404)
             return _json_success({"magicLink": payload}, 200)
 
         payload = await request.get_json(silent=True) or {}
-        email = sanitize_plain_text(payload.get("email"), 160).lower()
-        user_id = sanitize_plain_text(payload.get("userId"), 120) or None
+        email = (payload.get("email") or "").strip().lower() if isinstance(payload, dict) else ""
+        user_id = None
+        if isinstance(payload, dict):
+            user_id = (payload.get("userId") or "").strip() or None
+        if not email:
+            return _json_error("Email is required.", 400)
+
         try:
-            redirect_to = sanitize_frontend_redirect_target(payload.get("redirectTo"))
-            callback_url = build_callback_url(redirect_to, mode="local_override")
+            callback_url = sanitize_frontend_redirect_target(payload.get("redirectTo") if isinstance(payload, dict) else None)
         except RuntimeError as exc:
             return auth_redirect_config_error(exc)
 

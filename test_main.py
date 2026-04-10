@@ -86,7 +86,6 @@ config.deepseek_client = _mock_deepseek
 ai_service.groq_client = _mock_groq
 ai_service.deepseek_client = _mock_deepseek
 config.SECRET_TOKEN = ENV_VARS["TELEGRAM_SECRET_TOKEN"]
-main.SECRET_TOKEN = ENV_VARS["TELEGRAM_SECRET_TOKEN"]
 
 
 # ============================================================

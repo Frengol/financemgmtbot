@@ -4,6 +4,7 @@ from urllib.parse import parse_qs, urlsplit
 from unittest.mock import MagicMock, patch
 
 import pytest
+from quart import Quart
 
 import config
 import main
@@ -12,7 +13,7 @@ import test_support
 from admin_runtime import approvals as admin_approvals
 from admin_runtime import auth as admin_auth
 from admin_runtime import transactions as admin_transactions
-from web_app import auth_compat, http as web_http
+from web_app import auth_test_support_routes, http as web_http
 
 
 class TestAdminRoutes:
@@ -31,13 +32,6 @@ class TestAdminRoutes:
             yield {"Authorization": f"Bearer {bearer_token}"}
 
     @pytest.mark.asyncio
-    async def test_removed_backend_magic_link_route_returns_not_found(self):
-        async with main.app.test_client() as client:
-            resp = await client.post("/auth/magic-link", json={"email": "admin@example.com"})
-
-        assert resp.status_code == 404
-
-    @pytest.mark.asyncio
     async def test_auth_test_verify_redirects_to_frontend_callback_with_tokens_and_bearer_data_loads(self):
         seeded_transactions = [
             {
@@ -54,10 +48,12 @@ class TestAdminRoutes:
 
         with patch.dict(os.environ, {"AUTH_TEST_MODE": "true"}, clear=False):
             test_support.seed_transactions(seeded_transactions)
+            temp_app = Quart(__name__)
+            auth_test_support_routes.register_test_support_routes(temp_app)
 
-            async with main.app.test_client() as client:
+            async with temp_app.test_client() as client:
                 with patch.object(web_http, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), \
-                     patch.object(auth_compat, "test_support_request_allowed", return_value=True), \
+                     patch.object(auth_test_support_routes, "test_support_request_allowed", return_value=True), \
                      patch.object(admin_auth, "auth_test_mode_enabled", return_value=True), \
                      patch.object(admin_transactions, "auth_test_mode_enabled", return_value=True):
                     magic_link_resp = await client.post(
@@ -76,6 +72,9 @@ class TestAdminRoutes:
                     assert fragment["access_token"][0].count(".") == 2
 
                     bearer_token = fragment["access_token"][0]
+            async with main.app.test_client() as client:
+                with patch.object(admin_auth, "auth_test_mode_enabled", return_value=True), \
+                     patch.object(admin_transactions, "auth_test_mode_enabled", return_value=True):
                     transactions_resp = await client.get(
                         "/api/admin/gastos?date_from=2026-04-01&date_to=2026-04-30",
                         headers={"Authorization": f"Bearer {bearer_token}"},
@@ -86,47 +85,14 @@ class TestAdminRoutes:
         assert transactions_payload["transactions"] == seeded_transactions
 
     @pytest.mark.asyncio
-    async def test_auth_callback_get_without_query_returns_bridge_html_that_relays_to_frontend_callback(self):
+    async def test_productive_auth_routes_are_removed_from_runtime(self):
         async with main.app.test_client() as client:
-            with patch.object(web_http, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"):
-                resp = await client.get("/auth/callback")
-
-        body = (await resp.get_data()).decode("utf-8")
-        assert resp.status_code == 200
-        assert resp.mimetype == "text/html"
-        assert "Finalizing secure sign-in" in body
-        assert "https://admin.example.com/app/auth/callback" in body
-        assert "window.location.hash" in body
-        assert "window.location.search" in body
-        assert "fetch(" not in body
-
-    @pytest.mark.asyncio
-    async def test_auth_callback_get_with_query_relay_redirects_to_frontend_callback_preserving_query(self):
-        async with main.app.test_client() as client:
-            with patch.object(web_http, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"):
-                resp = await client.get("/auth/callback?token_hash=fakehash&type=magiclink")
-
-        assert resp.status_code == 302
-        redirected = urlsplit(resp.headers["Location"])
-        assert redirected.path == "/app/auth/callback"
-        assert parse_qs(redirected.query) == {"token_hash": ["fakehash"], "type": ["magiclink"]}
-
-    @pytest.mark.asyncio
-    async def test_auth_callback_post_is_removed_from_runtime(self):
-        async with main.app.test_client() as client:
-            resp = await client.post("/auth/callback", json={"access_token": "token"})
-
-        assert resp.status_code == 405
-
-    @pytest.mark.asyncio
-    async def test_auth_routes_fail_explicitly_without_public_urls_outside_localhost(self):
-        async with main.app.test_client() as client:
-            with patch.object(web_http, "FRONTEND_PUBLIC_URL", ""), \
-                 patch.object(web_http, "is_loopback_request", return_value=False):
-                callback_resp = await client.get("/auth/callback")
-
-        assert callback_resp.status_code == 500
-        assert (await callback_resp.get_json())["code"] == "AUTH_CONFIGURATION_INVALID"
+            assert (await client.post("/auth/magic-link", json={"email": "admin@example.com"})).status_code == 404
+            assert (await client.get("/auth/callback")).status_code == 404
+            assert (await client.get("/auth/callback?token_hash=fakehash&type=magiclink")).status_code == 404
+            assert (await client.post("/auth/callback", json={"access_token": "token"})).status_code == 404
+            assert (await client.get("/auth/session")).status_code == 404
+            assert (await client.post("/auth/logout")).status_code == 404
 
     @pytest.mark.asyncio
     async def test_admin_delete_requires_bearer_auth(self):

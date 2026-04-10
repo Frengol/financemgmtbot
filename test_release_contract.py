@@ -29,6 +29,13 @@ def test_public_frontend_contract_files_require_supabase_env_again():
         assert "VITE_SUPABASE_URL" in content
         assert "VITE_SUPABASE_ANON_KEY" in content
 
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    architecture = (REPO_ROOT / "architecture.md").read_text(encoding="utf-8")
+    assert "Logs Writer" in readme
+    assert "Logs Writer" in architecture
+    assert "backend relay `/auth/callback`" not in readme
+    assert "GET /auth/callback" not in architecture
+
 
 def test_gitignore_allows_public_env_examples():
     gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")

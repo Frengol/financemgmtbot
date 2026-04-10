@@ -68,6 +68,12 @@ const forbiddenPublishedLegacyPathPatterns = [
     regex: /(^|[^_A-Za-z0-9/.-])\/auth\/logout\b/g,
   },
 ];
+const forbiddenLegacyNetworkPatterns = [
+  {
+    description: 'legacy backend auth request',
+    regex: /\bfetch\((['"`])\/auth\/(?:callback|session|logout|magic-link)\b/g,
+  },
+];
 
 function normalizePublicValue(value) {
   return typeof value === 'string' ? value.trim().replace(/\/$/, '') : '';
@@ -123,6 +129,12 @@ export function verifyBundleDirectory(targetDir = resolve('dist'), options = {})
   for (const legacyPath of forbiddenPublishedLegacyPathPatterns) {
     if (legacyPath.regex.test(bundle)) {
       throw new Error(`Bundle verification failed: found ${legacyPath.description}.`);
+    }
+  }
+
+  for (const legacyNetworkPattern of forbiddenLegacyNetworkPatterns) {
+    if (legacyNetworkPattern.regex.test(bundle)) {
+      throw new Error(`Bundle verification failed: found ${legacyNetworkPattern.description}.`);
     }
   }
 

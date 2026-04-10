@@ -79,36 +79,7 @@ test('requests a magic link, completes the callback and loads seeded transaction
   await page.goto('/historico');
   await expect(page.getByText('Mercado Playwright')).toBeVisible();
   expect(backendAuthCalls).not.toContain('/auth/session');
-});
-
-test('completes login when the email link still targets the legacy backend callback relay', async ({ page, request, browserName }) => {
-  const email = `admin+${browserName}@example.com`;
-  await seedTransactions(request);
-
-  const response = await request.post(`${backendBaseUrl}/__test__/auth/magic-link`, {
-    data: {
-      email,
-      redirectTo: `${backendBaseUrl}/auth/callback`,
-    },
-  });
-
-  expect(response.ok()).toBeTruthy();
-  const payload = await response.json();
-  const magicLink = payload.magicLink.link as string;
-
-  await page.goto(magicLink);
-
-  await expect.poll(async () => {
-    try {
-      return await page.evaluate(() => window.localStorage.getItem('financemgmtbot-admin-auth-test-session-v2'));
-    } catch {
-      return null;
-    }
-  }).not.toBeNull();
-  await expect(page).toHaveURL(appRootPattern());
-  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
-  await page.goto('/historico');
-  await expect(page.getByText('Mercado Playwright')).toBeVisible();
+  expect(backendAuthCalls).not.toContain('/auth/callback');
 });
 
 test('shows an explicit error for an expired or invalid callback link', async ({ page }) => {
