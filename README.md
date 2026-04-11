@@ -10,6 +10,7 @@ Backend local:
 - in production, the published frontend talks directly to Supabase Auth for Magic Link issuance and callback completion; Cloud Run only validates Bearer tokens and serves `/api/admin/*`
 - the backend does not expose `/auth/magic-link`, `/auth/callback`, `/auth/session` or `/auth/logout` as part of the productive panel flow
 - Cloud Run production must keep `AUTH_TEST_MODE=false` and `ALLOW_LOCAL_DEV_AUTH=false`
+- during `/auth/callback`, the shared auth provider stays silent and does not call `/api/admin/me`; the callback route alone concludes the Supabase browser session before the app authorizes the panel
 
 Frontend local:
 - create `frontend/.env.development` based on `frontend/.env.development.example`

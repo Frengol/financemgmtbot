@@ -68,6 +68,18 @@ const LOCAL_BYPASS_STATE: AuthState = {
   localBypass: true,
 };
 
+function normalizeBasePath(baseUrl: string) {
+  if (!baseUrl || baseUrl === '/') {
+    return '';
+  }
+  return baseUrl.replace(/\/$/, '');
+}
+
+function isAuthCallbackRoute() {
+  const basePath = normalizeBasePath(import.meta.env.BASE_URL || '/');
+  return globalThis.location?.pathname === `${basePath}/auth/callback`;
+}
+
 function isJwtShapeValid(token?: string | null) {
   return typeof token === 'string' && token.split('.').length === 3;
 }
@@ -184,6 +196,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    if (isAuthCallbackRoute()) {
+      return;
+    }
+
     const authTestMode = browserAdminAuthTestModeEnabled();
 
     if (mountedRef.current) {
@@ -259,6 +275,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (!mountedRef.current || localDevBypassEnabled) {
+        return;
+      }
+
+      if (isAuthCallbackRoute()) {
         return;
       }
 

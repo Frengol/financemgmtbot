@@ -167,4 +167,103 @@ export function registerUseAuthEventCases({
 
     expect(mockGetAdminMe).not.toHaveBeenCalledWith(accessToken);
   });
+
+  it('stays silent during /auth/callback so the callback owns session completion alone', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-callback', 'signature');
+    let authStateHandler:
+      | ((event: string, session: { access_token?: string; user?: { id?: string; email?: string | null } | null } | null) => void)
+      | undefined;
+
+    window.history.pushState({}, '', '/auth/callback');
+    mockOnAuthStateChange.mockImplementation((handler: typeof authStateHandler) => {
+      authStateHandler = handler;
+      return {
+        data: {
+          subscription: {
+            unsubscribe: vi.fn(),
+          },
+        },
+      };
+    });
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: { id: 'user-1', email: 'admin@example.com' },
+        },
+      },
+    });
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(mockOnAuthStateChange).toHaveBeenCalledTimes(1);
+    });
+
+    expect(mockGetSession).not.toHaveBeenCalled();
+    expect(mockGetAdminMe).not.toHaveBeenCalled();
+
+    authStateHandler?.('SIGNED_IN', {
+      access_token: accessToken,
+      user: { id: 'user-1', email: 'admin@example.com' },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    });
+    expect(mockGetAdminMe).not.toHaveBeenCalled();
+  });
+
+  it('stays silent during the published callback route when BASE_URL is not root', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-callback-base', 'signature');
+    let authStateHandler:
+      | ((event: string, session: { access_token?: string; user?: { id?: string; email?: string | null } | null } | null) => void)
+      | undefined;
+
+    vi.stubEnv('BASE_URL', '/financemgmtbot/');
+    window.history.pushState({}, '', '/financemgmtbot/auth/callback');
+    mockOnAuthStateChange.mockImplementation((handler: typeof authStateHandler) => {
+      authStateHandler = handler;
+      return {
+        data: {
+          subscription: {
+            unsubscribe: vi.fn(),
+          },
+        },
+      };
+    });
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: { id: 'user-1', email: 'admin@example.com' },
+        },
+      },
+    });
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(mockOnAuthStateChange).toHaveBeenCalledTimes(1);
+    });
+
+    expect(mockGetSession).not.toHaveBeenCalled();
+    authStateHandler?.('TOKEN_REFRESHED', {
+      access_token: accessToken,
+      user: { id: 'user-1', email: 'admin@example.com' },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('no');
+    });
+    expect(mockGetAdminMe).not.toHaveBeenCalled();
+  });
 }
