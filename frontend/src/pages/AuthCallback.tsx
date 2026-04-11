@@ -13,7 +13,20 @@ import {
 } from '@/features/auth/lib/browserState';
 import { ApiError, getAdminMe } from '@/features/admin/api';
 import { clearBrowserAuthState, setCachedBrowserAccessToken, supabase } from '@/features/auth/lib/supabaseBrowserSession';
-import { emitClientTelemetry, ensureSupportCodeInMessage } from '@/features/observability/clientTelemetry';
+import {
+  buildPublicApiUrl,
+  clearAuthCallbackDiagnosticSnapshot,
+  emitClientTelemetry,
+  ensureSupportCodeInMessage,
+  saveAuthCallbackDiagnosticSnapshot,
+} from '@/features/observability/clientTelemetry';
+
+const CALLBACK_VALIDATION_RETRY_DELAY_MS = 300;
+
+type RuntimeProbeResult = {
+  reachable: boolean;
+  requestId?: string;
+};
 
 function decodeAuthValue(value: string | null) {
   if (!value) {
@@ -74,6 +87,41 @@ function buildHomeUrl() {
 
 function buildLoginUrl() {
   return new URL('login', new URL(import.meta.env.BASE_URL, window.location.origin)).toString();
+}
+
+function isCrossOriginApiRequest() {
+  const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '');
+  if (!configuredApiBaseUrl) {
+    return false;
+  }
+
+  try {
+    return new URL(configuredApiBaseUrl).origin !== window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
+function delay(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+async function probeRuntimeMeta(): Promise<RuntimeProbeResult> {
+  try {
+    const response = await fetch(buildPublicApiUrl('/api/meta/runtime'), {
+      method: 'GET',
+      mode: 'cors',
+      cache: 'no-store',
+    });
+    return {
+      reachable: true,
+      requestId: response.headers.get('X-Request-ID') || undefined,
+    };
+  } catch {
+    return { reachable: false };
+  }
 }
 
 function clearTokenFragment() {
@@ -164,6 +212,8 @@ export default function AuthCallback() {
       const upstreamError = decodeAuthValue(hashParams.get('error_description') || queryParams.get('error_description'));
       const upstreamCode = hashParams.get('error_code') || queryParams.get('error_code');
 
+      clearAuthCallbackDiagnosticSnapshot();
+
       if (hashParams.get('error') || queryParams.get('error')) {
         clearBrowserAdminProfile();
         clearBrowserAdminTestSession();
@@ -220,7 +270,80 @@ export default function AuthCallback() {
           });
         }
       } catch (authError) {
-        const typedError = authError instanceof ApiError ? authError : null;
+        let typedError = authError instanceof ApiError ? authError : null;
+
+        if (typedError?.code === 'NETWORK_ERROR') {
+          await delay(CALLBACK_VALIDATION_RETRY_DELAY_MS);
+          if (cancelled) {
+            return;
+          }
+
+          try {
+            const retriedIdentity = await getAdminMe(browserSession.access_token);
+            if (!retriedIdentity.authenticated || !retriedIdentity.authorized) {
+              throw new ApiError('Seu usuario nao esta autorizado a acessar o painel.', {
+                code: 'AUTH_ACCESS_DENIED',
+                status: 403,
+              });
+            }
+            clearAuthCallbackDiagnosticSnapshot();
+            clearBrowserAdminLoginNotice();
+            clearBrowserAdminTestSession();
+            saveBrowserAdminProfile(resolvedProfile);
+            if (!cancelled) {
+              window.location.replace(buildHomeUrl());
+            }
+            return;
+          } catch (retryError) {
+            const retryTypedError = retryError instanceof ApiError ? retryError : null;
+            if (retryTypedError?.code === 'NETWORK_ERROR') {
+              const runtimeProbe = await probeRuntimeMeta();
+              const diagnostic = runtimeProbe.reachable
+                ? 'auth_callback_admin_validation_failed'
+                : isCrossOriginApiRequest()
+                  ? 'frontend_cors_blocked_confirmed'
+                  : 'frontend_transport_failed';
+              const clientEventId = retryTypedError.clientEventId || typedError.clientEventId;
+
+              saveAuthCallbackDiagnosticSnapshot({
+                clientEventId,
+                phase: 'callback_admin_validation',
+                diagnostic,
+                retryOutcome: 'retry_failed',
+                runtimeProbeOutcome: runtimeProbe.reachable ? 'reachable' : 'transport_failed',
+                runtimeRequestId: runtimeProbe.requestId,
+              });
+              emitClientTelemetry({
+                event: 'auth_callback_failed',
+                phase: 'callback_admin_validation',
+                clientEventId,
+                httpStatus: retryTypedError.status,
+                errorCode: retryTypedError.code,
+                diagnostic,
+                corsSuspected: diagnostic === 'frontend_cors_blocked_confirmed',
+              });
+              if (!cancelled) {
+                setError(
+                  ensureSupportCodeInMessage(
+                    withDiagnostic(
+                      'Nao foi possivel validar sua sessao agora. Tente novamente em instantes.',
+                      diagnostic,
+                    ),
+                    clientEventId,
+                  ),
+                );
+              }
+              return;
+            }
+            typedError = retryTypedError;
+            authError = retryError;
+          }
+
+          if (!(authError instanceof ApiError)) {
+            typedError = null;
+          }
+        }
+
         const fallbackRequestId = authError instanceof Error
           ? extractSupportRequestId(authError.message)
           : undefined;
@@ -249,6 +372,7 @@ export default function AuthCallback() {
         return;
       }
 
+      clearAuthCallbackDiagnosticSnapshot();
       clearBrowserAdminLoginNotice();
       clearBrowserAdminTestSession();
       saveBrowserAdminProfile(resolvedProfile);
@@ -277,12 +401,18 @@ export default function AuthCallback() {
             <div className="bg-rose-50 text-rose-600 p-4 rounded-lg text-sm border border-rose-100">
               {error}
             </div>
-            <a
-              href={buildLoginUrl()}
+            <button
+              type="button"
+              onClick={() => {
+                void clearBrowserAuthState().finally(() => {
+                  clearAuthCallbackDiagnosticSnapshot();
+                  window.location.replace(buildLoginUrl());
+                });
+              }}
               className="block w-full text-center rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700"
             >
               Voltar para o login
-            </a>
+            </button>
           </div>
         ) : (
           <div className="bg-blue-50 text-blue-700 p-4 rounded-lg flex flex-col items-center gap-3 text-center border border-blue-100">

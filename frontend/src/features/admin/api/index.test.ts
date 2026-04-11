@@ -33,6 +33,7 @@ vi.mock('@/features/observability/clientTelemetry', () => ({
 
 describe('adminApi', () => {
   beforeEach(() => {
+    vi.unstubAllEnvs();
     fetchMock.mockReset();
     mockGetAccessToken.mockReset();
     mockClearBrowserAuthState.mockReset();
@@ -256,6 +257,31 @@ describe('adminApi', () => {
       phase: 'api_request',
       errorCode: 'NETWORK_ERROR',
       diagnostic: 'frontend_transport_failed',
+    }));
+  });
+
+  it('classifies cross-origin transport failures without treating them as confirmed CORS by default', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.com');
+    mockGetAccessToken.mockResolvedValue('token-cross-origin');
+    mockEmitClientTelemetry.mockReturnValue('cli_cross_origin_1');
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+
+    const { getTransactions: getTransactionsWithCrossOriginBase } = await import('@/features/admin/api');
+
+    await expect(getTransactionsWithCrossOriginBase()).rejects.toMatchObject({
+      name: 'ApiError',
+      code: 'NETWORK_ERROR',
+      status: 0,
+      diagnostic: 'frontend_cross_origin_transport_failed',
+      clientEventId: 'cli_cross_origin_1',
+    });
+    expect(mockEmitClientTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'admin_api_transport_failed',
+      phase: 'api_request',
+      errorCode: 'NETWORK_ERROR',
+      diagnostic: 'frontend_cross_origin_transport_failed',
+      corsSuspected: true,
     }));
   });
 });

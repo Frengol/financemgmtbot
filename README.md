@@ -100,7 +100,7 @@ Playwright:
 - the smoke suite keeps mocking `/api/admin/*` and the local-only `__test__/auth/*` support routes for deterministic UI regression coverage
 - the integration suite starts the local Quart backend in `AUTH_TEST_MODE`, requests a real magic link through the login form, follows the hosted-style verify link into the frontend callback and validates that authenticated data loading works end to end
 - the live database smoke stays opt-in via `LIVE_DB_SMOKE=true` and only exercises read-only access to `/api/admin/gastos`
-- browser-only auth and transport failures that do not surface in the admin API logs can now be observed through `browser_client_telemetry` entries in Cloud Logging, keyed by `clientEventId`, `requestId` and `VITE_APP_RELEASE`
+- browser-only auth and transport failures that do not surface in the admin API logs can now be observed through `browser_client_telemetry` entries in Cloud Logging, keyed by `clientEventId`, `requestId` and `VITE_APP_RELEASE`; when callback transport still fails before a log lands, the frontend now keeps the user on `/auth/callback` and persists a local diagnostic snapshot in `sessionStorage`
 
 Before push:
 - install `gitleaks` locally and confirm `make audit-repo-security` passes
@@ -134,3 +134,4 @@ Before push:
   - `ALLOW_LOCAL_DEV_AUTH=false`
 - Use `GET /api/meta/runtime` after the rollout to confirm that the published Cloud Run revision is serving the commit you just deployed.
 - Use `POST /api/client-telemetry` only as a first-party diagnostics sink for the GitHub Pages frontend; it must stay schema-limited, rate-limited and free of tokens, e-mails and callback query/hash data.
+- In the callback flow, transport diagnostics now prefer `fetch(..., { keepalive: true })` while the page is active and only fall back to `navigator.sendBeacon()` when needed, so browser-side failures have a better chance of reaching Cloud Logging before any navigation happens.

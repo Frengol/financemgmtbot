@@ -5,13 +5,16 @@ describe('clientTelemetry', () => {
     vi.resetModules();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
+    window.sessionStorage.clear();
     window.history.pushState({}, '', '/financemgmtbot/auth/callback?token=secret#access_token=secret');
   });
 
-  it('sends a sanitized browser telemetry event with sendBeacon when available', async () => {
+  it('uses fetch keepalive before sendBeacon when the page is still active', async () => {
     vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.com');
     vi.stubEnv('VITE_APP_RELEASE', '20260411abcd');
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
     const sendBeacon = vi.fn().mockReturnValue(true);
+    vi.stubGlobal('fetch', fetchMock);
     vi.stubGlobal('navigator', {
       ...navigator,
       onLine: true,
@@ -22,14 +25,16 @@ describe('clientTelemetry', () => {
     const clientEventId = emitClientTelemetry({
       event: 'auth_callback_failed',
       phase: 'callback_admin_validation',
-      diagnostic: 'frontend_transport_failed',
+      diagnostic: 'frontend_cross_origin_transport_failed',
     });
 
     expect(clientEventId).toMatch(/^cli_[a-z0-9]+$/i);
-    expect(sendBeacon).toHaveBeenCalledTimes(1);
-    const [targetUrl, payload] = sendBeacon.mock.calls[0];
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sendBeacon).not.toHaveBeenCalled();
+    const [targetUrl, requestInit] = fetchMock.mock.calls[0];
     expect(targetUrl).toBe('https://api.example.com/api/client-telemetry');
-    const parsedPayload = JSON.parse(payload as string);
+    const parsedPayload = JSON.parse(requestInit.body as string);
     expect(parsedPayload).toMatchObject({
       event: 'auth_callback_failed',
       phase: 'callback_admin_validation',
@@ -37,20 +42,22 @@ describe('clientTelemetry', () => {
       pagePath: '/financemgmtbot/auth/callback',
       apiOrigin: 'https://api.example.com',
       online: true,
-      diagnostic: 'frontend_transport_failed',
+      diagnostic: 'frontend_cross_origin_transport_failed',
     });
     expect(parsedPayload.pagePath).not.toContain('?');
     expect(parsedPayload.pagePath).not.toContain('#');
   });
 
-  it('falls back to fetch keepalive when sendBeacon is unavailable', async () => {
+  it('falls back to sendBeacon when the keepalive fetch rejects', async () => {
     vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.com');
     vi.stubEnv('VITE_APP_RELEASE', '20260411abcd');
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+    const sendBeacon = vi.fn().mockReturnValue(true);
     vi.stubGlobal('fetch', fetchMock);
     vi.stubGlobal('navigator', {
       ...navigator,
-      onLine: false,
+      onLine: true,
+      sendBeacon,
     });
 
     const { emitClientTelemetry } = await import('./clientTelemetry');
@@ -58,30 +65,47 @@ describe('clientTelemetry', () => {
       event: 'admin_api_transport_failed',
       phase: 'api_request',
       diagnostic: 'frontend_transport_failed',
-      corsSuspected: false,
     });
 
     expect(clientEventId).toMatch(/^cli_[a-z0-9]+$/i);
     await Promise.resolve();
-    expect(fetchMock).toHaveBeenCalledWith(
-      'https://api.example.com/api/client-telemetry',
-      expect.objectContaining({
-        method: 'POST',
-        keepalive: true,
-      }),
-    );
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sendBeacon).toHaveBeenCalledTimes(1);
+    expect(sendBeacon.mock.calls[0][0]).toBe('https://api.example.com/api/client-telemetry');
+  });
+
+  it('uses sendBeacon directly when fetch is unavailable', async () => {
+    vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.com');
+    const sendBeacon = vi.fn().mockReturnValue(true);
+    vi.stubGlobal('fetch', undefined);
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      onLine: true,
+      sendBeacon,
+    });
+
+    const { emitClientTelemetry } = await import('./clientTelemetry');
+    emitClientTelemetry({
+      event: 'auth_callback_failed',
+      phase: 'callback_admin_validation',
+      diagnostic: 'frontend_transport_failed',
+    });
+
+    expect(sendBeacon).toHaveBeenCalledTimes(1);
+    expect(sendBeacon.mock.calls[0][0]).toBe('https://api.example.com/api/client-telemetry');
   });
 
   it('uses safe fallback values when telemetry input or release metadata are invalid', async () => {
     vi.stubEnv('VITE_API_BASE_URL', 'not-a-valid-url');
     vi.stubEnv('VITE_APP_RELEASE', '');
     vi.spyOn(Math, 'random').mockReturnValue(0.123456789);
-    const sendBeacon = vi.fn().mockReturnValue(false);
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
     vi.stubGlobal('crypto', undefined);
     vi.stubGlobal('fetch', fetchMock);
     vi.stubGlobal('navigator', {
-      sendBeacon,
+      ...navigator,
+      onLine: true,
     });
 
     const { emitClientTelemetry, ensureSupportCodeInMessage } = await import('./clientTelemetry');
@@ -114,29 +138,104 @@ describe('clientTelemetry', () => {
     expect(ensureSupportCodeInMessage('Falha sem codigo.', undefined)).toBe('Falha sem codigo.');
   });
 
-  it('falls back to window origin and keeps valid http status values', async () => {
-    vi.stubEnv('VITE_API_BASE_URL', '');
+  it('falls back to the current origin when the configured API base URL is invalid', async () => {
+    vi.stubEnv('VITE_API_BASE_URL', '://broken-url');
+
+    const { resolveApiOrigin } = await import('./clientTelemetry');
+
+    expect(resolveApiOrigin()).toBe(window.location.origin);
+  });
+
+  it('persists a sanitized auth callback snapshot in sessionStorage', async () => {
+    vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.com');
     vi.stubEnv('VITE_APP_RELEASE', '20260411abcd');
-    const sendBeacon = vi.fn().mockReturnValue(true);
-    vi.stubGlobal('navigator', {
-      ...navigator,
-      onLine: true,
-      sendBeacon,
-    });
 
-    const { emitClientTelemetry } = await import('./clientTelemetry');
-    emitClientTelemetry({
-      event: 'auth_callback_failed',
+    const {
+      clearAuthCallbackDiagnosticSnapshot,
+      loadAuthCallbackDiagnosticSnapshot,
+      saveAuthCallbackDiagnosticSnapshot,
+    } = await import('./clientTelemetry');
+
+    saveAuthCallbackDiagnosticSnapshot({
+      clientEventId: 'cli_callback_1',
       phase: 'callback_admin_validation',
-      httpStatus: 204.9,
+      diagnostic: 'frontend_cors_blocked_confirmed',
+      retryOutcome: 'retry_failed',
+      runtimeProbeOutcome: 'transport_failed',
+      runtimeRequestId: 'req_runtime_1',
     });
 
-    const [targetUrl, payload] = sendBeacon.mock.calls[0];
-    expect(targetUrl).toBe(`${window.location.origin}/api/client-telemetry`);
-    expect(JSON.parse(payload as string)).toMatchObject({
-      apiOrigin: window.location.origin,
-      httpStatus: 204,
+    expect(loadAuthCallbackDiagnosticSnapshot()).toMatchObject({
+      clientEventId: 'cli_callback_1',
+      releaseId: '20260411abcd',
+      phase: 'callback_admin_validation',
+      diagnostic: 'frontend_cors_blocked_confirmed',
+      retryOutcome: 'retry_failed',
+      runtimeProbeOutcome: 'transport_failed',
+      runtimeRequestId: 'req_runtime_1',
+      apiOrigin: 'https://api.example.com',
     });
+
+    clearAuthCallbackDiagnosticSnapshot();
+    expect(loadAuthCallbackDiagnosticSnapshot()).toBeNull();
+  });
+
+  it('tolerates blocked sessionStorage when saving or loading callback snapshots', async () => {
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('blocked');
+    });
+    const getItemSpy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('blocked');
+    });
+
+    const {
+      loadAuthCallbackDiagnosticSnapshot,
+      saveAuthCallbackDiagnosticSnapshot,
+    } = await import('./clientTelemetry');
+
+    expect(saveAuthCallbackDiagnosticSnapshot({
+      phase: 'callback_admin_validation',
+      diagnostic: 'frontend_transport_failed',
+    })).toBeNull();
+    expect(loadAuthCallbackDiagnosticSnapshot()).toBeNull();
+
+    setItemSpy.mockRestore();
+    getItemSpy.mockRestore();
+  });
+
+  it('tolerates malformed stored snapshots and cleanup failures', async () => {
+    const getItemSpy = vi.spyOn(Storage.prototype, 'getItem').mockReturnValue('{');
+    const removeItemSpy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+      throw new Error('blocked');
+    });
+
+    const {
+      clearAuthCallbackDiagnosticSnapshot,
+      loadAuthCallbackDiagnosticSnapshot,
+    } = await import('./clientTelemetry');
+
+    expect(loadAuthCallbackDiagnosticSnapshot()).toBeNull();
+    expect(() => clearAuthCallbackDiagnosticSnapshot()).not.toThrow();
+
+    getItemSpy.mockRestore();
+    removeItemSpy.mockRestore();
+  });
+
+  it('returns safe values when window is unavailable', async () => {
+    vi.stubGlobal('window', undefined);
+
+    const {
+      clearAuthCallbackDiagnosticSnapshot,
+      loadAuthCallbackDiagnosticSnapshot,
+      saveAuthCallbackDiagnosticSnapshot,
+    } = await import('./clientTelemetry');
+
+    expect(saveAuthCallbackDiagnosticSnapshot({
+      phase: 'callback_admin_validation',
+      diagnostic: 'frontend_transport_failed',
+    })).toBeNull();
+    expect(loadAuthCallbackDiagnosticSnapshot()).toBeNull();
+    expect(() => clearAuthCallbackDiagnosticSnapshot()).not.toThrow();
   });
 
   it('adds the client support code only once when formatting user-facing messages', async () => {

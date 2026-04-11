@@ -48,6 +48,23 @@ function isCrossOriginApiRequest() {
   }
 }
 
+function resolveTransportDiagnostic() {
+  const crossOriginRequest = isCrossOriginApiRequest();
+  const browserOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+
+  if (crossOriginRequest && browserOnline) {
+    return {
+      diagnostic: 'frontend_cross_origin_transport_failed',
+      corsSuspected: true,
+    };
+  }
+
+  return {
+    diagnostic: 'frontend_transport_failed',
+    corsSuspected: false,
+  };
+}
+
 function buildSupportMessage({
   message,
   requestId,
@@ -175,10 +192,7 @@ export async function apiRequest<T>(
 
     response = await fetch(buildApiUrl(path), requestInit);
   } catch {
-    const corsSuspected = isCrossOriginApiRequest() && (typeof navigator === 'undefined' || navigator.onLine !== false);
-    const diagnostic = corsSuspected
-      ? 'frontend_cors_blocked_suspected'
-      : 'frontend_transport_failed';
+    const { diagnostic, corsSuspected } = resolveTransportDiagnostic();
     const clientEventId = emitClientTelemetry({
       event: 'admin_api_transport_failed',
       phase: 'api_request',

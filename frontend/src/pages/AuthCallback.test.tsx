@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 function buildJwtLikeToken(...segments: string[]) {
@@ -19,6 +19,10 @@ const mockClearBrowserAdminTestSession = vi.fn();
 const mockDecodeAccessTokenIdentity = vi.fn();
 const mockBrowserAdminAuthTestModeEnabled = vi.fn();
 const mockEmitClientTelemetry = vi.fn();
+const mockBuildPublicApiUrl = vi.fn();
+const mockSaveAuthCallbackDiagnosticSnapshot = vi.fn();
+const mockClearAuthCallbackDiagnosticSnapshot = vi.fn();
+const runtimeFetchMock = vi.fn();
 
 vi.mock('@/features/auth/lib/supabaseBrowserSession', () => ({
   clearBrowserAuthState: (...args: unknown[]) => mockClearBrowserAuthState(...args),
@@ -55,11 +59,14 @@ vi.mock('@/features/auth/lib/browserState', async () => {
 });
 
 vi.mock('@/features/observability/clientTelemetry', () => ({
+  buildPublicApiUrl: (...args: unknown[]) => mockBuildPublicApiUrl(...args),
+  clearAuthCallbackDiagnosticSnapshot: (...args: unknown[]) => mockClearAuthCallbackDiagnosticSnapshot(...args),
   emitClientTelemetry: (...args: unknown[]) => mockEmitClientTelemetry(...args),
   ensureSupportCodeInMessage: (message: string, clientEventId?: string) =>
     clientEventId && !/codigo de suporte:/i.test(message)
       ? `${message} Codigo de suporte: ${clientEventId}`
       : message,
+  saveAuthCallbackDiagnosticSnapshot: (...args: unknown[]) => mockSaveAuthCallbackDiagnosticSnapshot(...args),
 }));
 
 describe('AuthCallback', () => {
@@ -79,8 +86,14 @@ describe('AuthCallback', () => {
     mockDecodeAccessTokenIdentity.mockReset();
     mockBrowserAdminAuthTestModeEnabled.mockReset();
     mockEmitClientTelemetry.mockReset();
+    mockBuildPublicApiUrl.mockReset();
+    mockSaveAuthCallbackDiagnosticSnapshot.mockReset();
+    mockClearAuthCallbackDiagnosticSnapshot.mockReset();
+    runtimeFetchMock.mockReset();
 
     mockBrowserAdminAuthTestModeEnabled.mockReturnValue(false);
+    mockClearBrowserAuthState.mockResolvedValue(undefined);
+    mockBuildPublicApiUrl.mockImplementation((path: string) => path);
     mockGetSession.mockResolvedValue({ data: { session: null } });
     mockOnAuthStateChange.mockReturnValue({
       data: {
@@ -95,11 +108,17 @@ describe('AuthCallback', () => {
       user: { id: 'user-1', email: 'admin@example.com' },
     });
     mockDecodeAccessTokenIdentity.mockReturnValue({ id: 'user-1', email: 'admin@example.com' });
+    runtimeFetchMock.mockResolvedValue(new Response('{}', {
+      status: 200,
+      headers: { 'X-Request-ID': 'req_runtime_default' },
+    }));
+    vi.stubGlobal('fetch', runtimeFetchMock);
     window.history.pushState({}, '', '/auth/callback');
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
     vi.unstubAllGlobals();
   });
 
@@ -190,6 +209,47 @@ describe('AuthCallback', () => {
       email: 'admin2@example.com',
     });
     expect(replaceSpy).toHaveBeenCalledWith(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
+  });
+
+  it('retries the admin validation once and completes the login when the second attempt succeeds', async () => {
+    vi.useFakeTimers();
+    const { ApiError } = await import('@/features/admin/api');
+    const accessToken = buildJwtLikeToken('header', 'payload-retry', 'signature');
+    const replaceSpy = vi.fn();
+    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: { id: 'user-1', email: 'admin@example.com' },
+        },
+      },
+    });
+    mockGetAdminMe
+      .mockRejectedValueOnce(new ApiError('transport failed', {
+        code: 'NETWORK_ERROR',
+        diagnostic: 'frontend_cross_origin_transport_failed',
+        status: 0,
+        clientEventId: 'cli_retry_1',
+      }))
+      .mockResolvedValueOnce({
+        authenticated: true,
+        authorized: true,
+        user: { id: 'user-1', email: 'admin@example.com' },
+      });
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+    render(<AuthCallback />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockGetAdminMe).toHaveBeenCalledTimes(2);
+    expect(replaceSpy).toHaveBeenCalledWith(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
+    expect(mockSaveBrowserAdminLoginNotice).not.toHaveBeenCalled();
+    expect(mockSaveAuthCallbackDiagnosticSnapshot).not.toHaveBeenCalled();
   });
 
   it('keeps the loopback auth test callback path isolated from the production runtime', async () => {
@@ -291,6 +351,259 @@ describe('AuthCallback', () => {
       phase: 'callback_admin_validation',
       requestId: 'req_authz_1',
     }));
+  });
+
+  it('keeps the user on the callback page and saves a local snapshot when transport fails twice but runtime stays reachable', async () => {
+    vi.useFakeTimers();
+    const { ApiError } = await import('@/features/admin/api');
+    const accessToken = buildJwtLikeToken('header', 'payload-runtime-ok', 'signature');
+    const replaceSpy = vi.fn();
+    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: { id: 'user-1', email: 'admin@example.com' },
+        },
+      },
+    });
+    mockGetAdminMe
+      .mockRejectedValueOnce(new ApiError('transport failed', {
+        code: 'NETWORK_ERROR',
+        diagnostic: 'frontend_cross_origin_transport_failed',
+        status: 0,
+        clientEventId: 'cli_runtime_ok',
+      }))
+      .mockRejectedValueOnce(new ApiError('transport failed again', {
+        code: 'NETWORK_ERROR',
+        diagnostic: 'frontend_cross_origin_transport_failed',
+        status: 0,
+        clientEventId: 'cli_runtime_ok',
+      }));
+    runtimeFetchMock.mockResolvedValue(new Response('{}', {
+      status: 200,
+      headers: { 'X-Request-ID': 'req_runtime_ok' },
+    }));
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+    render(<AuthCallback />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockSaveAuthCallbackDiagnosticSnapshot).toHaveBeenCalled();
+    expect(screen.getByText(/diagnostico: auth_callback_admin_validation_failed/i)).toBeInTheDocument();
+    expect(screen.getByText(/codigo de suporte: cli_runtime_ok/i)).toBeInTheDocument();
+    expect(replaceSpy).not.toHaveBeenCalledWith(new URL('login', new URL(import.meta.env.BASE_URL, window.location.origin)).toString());
+    expect(mockSaveBrowserAdminLoginNotice).not.toHaveBeenCalled();
+    expect(mockClearBrowserAuthState).not.toHaveBeenCalled();
+    expect(runtimeFetchMock).toHaveBeenCalledWith('/api/meta/runtime', expect.objectContaining({
+      method: 'GET',
+      mode: 'cors',
+      cache: 'no-store',
+    }));
+    expect(mockSaveAuthCallbackDiagnosticSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      clientEventId: 'cli_runtime_ok',
+      diagnostic: 'auth_callback_admin_validation_failed',
+      retryOutcome: 'retry_failed',
+      runtimeProbeOutcome: 'reachable',
+      runtimeRequestId: 'req_runtime_ok',
+    }));
+    expect(mockEmitClientTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+      clientEventId: 'cli_runtime_ok',
+      diagnostic: 'auth_callback_admin_validation_failed',
+    }));
+  });
+
+  it('keeps the user on the callback page and confirms a browser transport problem when runtime probing also fails', async () => {
+    vi.useFakeTimers();
+    const { ApiError } = await import('@/features/admin/api');
+    vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.com');
+    const accessToken = buildJwtLikeToken('header', 'payload-runtime-down', 'signature');
+    const replaceSpy = vi.fn();
+    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: { id: 'user-1', email: 'admin@example.com' },
+        },
+      },
+    });
+    mockGetAdminMe
+      .mockRejectedValueOnce(new ApiError('transport failed', {
+        code: 'NETWORK_ERROR',
+        diagnostic: 'frontend_cross_origin_transport_failed',
+        status: 0,
+        clientEventId: 'cli_runtime_down',
+      }))
+      .mockRejectedValueOnce(new ApiError('transport failed again', {
+        code: 'NETWORK_ERROR',
+        diagnostic: 'frontend_cross_origin_transport_failed',
+        status: 0,
+        clientEventId: 'cli_runtime_down',
+      }));
+    runtimeFetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+    render(<AuthCallback />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockSaveAuthCallbackDiagnosticSnapshot).toHaveBeenCalled();
+    expect(screen.getByText(/diagnostico: frontend_cors_blocked_confirmed/i)).toBeInTheDocument();
+    expect(screen.getByText(/codigo de suporte: cli_runtime_down/i)).toBeInTheDocument();
+    expect(replaceSpy).not.toHaveBeenCalled();
+    expect(mockSaveBrowserAdminLoginNotice).not.toHaveBeenCalled();
+    expect(mockSaveAuthCallbackDiagnosticSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      clientEventId: 'cli_runtime_down',
+      diagnostic: 'frontend_cors_blocked_confirmed',
+      retryOutcome: 'retry_failed',
+      runtimeProbeOutcome: 'transport_failed',
+    }));
+    expect(mockEmitClientTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+      clientEventId: 'cli_runtime_down',
+      diagnostic: 'frontend_cors_blocked_confirmed',
+      corsSuspected: true,
+    }));
+  });
+
+  it('falls back to the regular login redirect when the retry turns into an explicit auth denial', async () => {
+    vi.useFakeTimers();
+    const { ApiError } = await import('@/features/admin/api');
+    const accessToken = buildJwtLikeToken('header', 'payload-retry-authz', 'signature');
+    const replaceSpy = vi.fn();
+    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: { id: 'user-1', email: 'admin@example.com' },
+        },
+      },
+    });
+    mockGetAdminMe
+      .mockRejectedValueOnce(new ApiError('transport failed', {
+        code: 'NETWORK_ERROR',
+        diagnostic: 'frontend_cross_origin_transport_failed',
+        status: 0,
+        clientEventId: 'cli_retry_authz',
+      }))
+      .mockRejectedValueOnce(new ApiError('Seu usuario nao esta autorizado a acessar o painel.', {
+        code: 'AUTH_ACCESS_DENIED',
+        status: 403,
+        requestId: 'req_retry_authz',
+      }));
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+    render(<AuthCallback />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mockSaveBrowserAdminLoginNotice).toHaveBeenCalledWith({
+      message: 'Seu usuario nao esta autorizado a acessar o painel.',
+    });
+    expect(mockClearBrowserAuthState).toHaveBeenCalled();
+    expect(replaceSpy).toHaveBeenCalledWith(new URL('login', new URL(import.meta.env.BASE_URL, window.location.origin)).toString());
+  });
+
+  it('uses the generic transport diagnostic when the runtime probe also fails on the same origin', async () => {
+    vi.useFakeTimers();
+    const { ApiError } = await import('@/features/admin/api');
+    const accessToken = buildJwtLikeToken('header', 'payload-same-origin', 'signature');
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: { id: 'user-1', email: 'admin@example.com' },
+        },
+      },
+    });
+    mockGetAdminMe
+      .mockRejectedValueOnce(new ApiError('transport failed', {
+        code: 'NETWORK_ERROR',
+        diagnostic: 'frontend_transport_failed',
+        status: 0,
+        clientEventId: 'cli_same_origin',
+      }))
+      .mockRejectedValueOnce(new ApiError('transport failed again', {
+        code: 'NETWORK_ERROR',
+        diagnostic: 'frontend_transport_failed',
+        status: 0,
+        clientEventId: 'cli_same_origin',
+      }));
+    runtimeFetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+    render(<AuthCallback />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText(/diagnostico: frontend_transport_failed/i)).toBeInTheDocument();
+    expect(mockSaveAuthCallbackDiagnosticSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      diagnostic: 'frontend_transport_failed',
+      runtimeProbeOutcome: 'transport_failed',
+    }));
+  });
+
+  it('clears auth state and local diagnostics when the user returns to login from an inline callback error', async () => {
+    vi.useFakeTimers();
+    const { ApiError } = await import('@/features/admin/api');
+    const accessToken = buildJwtLikeToken('header', 'payload-button', 'signature');
+    const replaceSpy = vi.fn();
+    vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: { id: 'user-1', email: 'admin@example.com' },
+        },
+      },
+    });
+    mockGetAdminMe
+      .mockRejectedValueOnce(new ApiError('transport failed', {
+        code: 'NETWORK_ERROR',
+        diagnostic: 'frontend_cross_origin_transport_failed',
+        status: 0,
+        clientEventId: 'cli_button_retry',
+      }))
+      .mockRejectedValueOnce(new ApiError('transport failed again', {
+        code: 'NETWORK_ERROR',
+        diagnostic: 'frontend_cross_origin_transport_failed',
+        status: 0,
+        clientEventId: 'cli_button_retry',
+      }));
+    runtimeFetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+
+    const { default: AuthCallback } = await import('./AuthCallback');
+    render(<AuthCallback />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /voltar para o login/i }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockClearBrowserAuthState).toHaveBeenCalled();
+    expect(mockClearAuthCallbackDiagnosticSnapshot).toHaveBeenCalled();
+    expect(replaceSpy).toHaveBeenCalledWith(new URL('login', new URL(import.meta.env.BASE_URL, window.location.origin)).toString());
   });
 
   it('treats a resolved but unauthorized admin identity as a login failure', async () => {

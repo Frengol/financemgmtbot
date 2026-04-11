@@ -149,6 +149,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 * Logs seguem em JSON com masking de segredos.
 * Erros administrativos e de autenticação devem compartilhar um `requestId` entre resposta HTTP e logs estruturados, permitindo correlação de suporte sem expor stack trace, query SQL, mensagens cruas de provider ou tokens.
 * GitHub Pages não oferece logs de runtime do JavaScript em produção; para falhas de browser, a trilha oficial agora é `browser_client_telemetry` no Cloud Logging, correlacionada por `clientEventId`, `requestId` e `VITE_APP_RELEASE`.
+* Quando a validação do callback falha por transporte no browser, o frontend permanece em `/auth/callback`, tenta uma nova validação curta, faz probe em `GET /api/meta/runtime` e persiste um snapshot local sanitizado para não perder o contexto do incidente.
 * Logs operacionais não devem registrar payloads brutos de IA, transcrições, conteúdo textual de transações, itens detalhados de cupons, dumps completos de inserts falhos, `access_token`, `refresh_token` ou payloads integrais de `cache_aprovacao`; devem registrar apenas metadados mínimos como evento, contagem, ids e nomes de campos.
 * A trilha `auditoria_admin` deve registrar contexto mínimo da operação administrativa, sem duplicar descrições completas de transações ou payloads integrais de aprovação.
 * Falhas de auditoria não devem expor credenciais ou corromper o fluxo principal sem log explícito.
@@ -208,7 +209,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - a SPA manipula apenas o token público de sessão do Supabase no navegador e envia `Authorization: Bearer` para o backend administrativo
   - o frontend exige `VITE_API_BASE_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `VITE_APP_RELEASE` no build oficial
   - o workflow do GitHub Pages injeta `VITE_APP_RELEASE=${GITHUB_SHA::12}` para correlacionar bundle publicado com `browser_client_telemetry`
-  - o frontend publicado envia falhas de auth/transporte para `POST /api/client-telemetry` via `navigator.sendBeacon()` com fallback `fetch(..., { keepalive: true })`, sem token, e-mail, query/hash ou stack trace crua
+  - o frontend publicado envia falhas de auth/transporte para `POST /api/client-telemetry` via `fetch(..., { keepalive: true })` enquanto a página está ativa, com fallback `navigator.sendBeacon()`, sem token, e-mail, query/hash ou stack trace crua
 * A SPA usa `code splitting` por rota e por dependência pesada de frontend, carregando `Dashboard`, `Histórico`, `Aprovações`, `Login` e o modal transacional sob demanda, com `manualChunks` dedicados para gráficos, tabela e vendor base.
 * Em telas mobile, o layout principal expõe um acionador discreto no canto superior esquerdo que abre um drawer lateral esquerdo com a navegação entre Dashboard, Aprovações e Histórico, preservando o menu fixo em desktop.
 * O Dashboard usa widgets com seletor de mês compacto por card, evitando um filtro global único e permitindo leitura contextual do período.
