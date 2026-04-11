@@ -53,6 +53,8 @@ def test_public_frontend_contract_files_require_supabase_env_again():
     assert "GitHub Pages" in architecture and "logs de runtime" in architecture
     assert "backend relay `/auth/callback`" not in readme
     assert "GET /auth/callback" not in architecture
+    assert "set `Site URL` to the published frontend root" in readme
+    assert "exact callback URL" in readme
 
 
 def test_gitignore_allows_public_env_examples():
@@ -118,3 +120,15 @@ def test_backend_container_contract_is_runtime_only_and_protected_by_dockerignor
     assert ".env" in dockerignore
     assert ".env.*" in dockerignore
     assert "downloaded-logs-*" in dockerignore
+
+
+def test_supabase_browser_auth_client_uses_pkce_and_callback_does_not_authorize_admin():
+    supabase_browser_session = (
+        REPO_ROOT / "frontend" / "src" / "features" / "auth" / "lib" / "supabaseBrowserSession.ts"
+    ).read_text(encoding="utf-8")
+    auth_callback = (REPO_ROOT / "frontend" / "src" / "pages" / "AuthCallback.tsx").read_text(encoding="utf-8")
+
+    assert "flowType: 'pkce'" in supabase_browser_session
+    assert "detectSessionInUrl: true" in supabase_browser_session
+    assert "getAdminMe" not in auth_callback
+    assert "/api/admin/me" not in auth_callback

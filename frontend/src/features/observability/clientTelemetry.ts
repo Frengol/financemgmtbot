@@ -1,7 +1,6 @@
 const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '');
 const configuredReleaseId = (import.meta.env.VITE_APP_RELEASE || '').trim();
 const SAFE_TOKEN_PATTERN = /^[A-Za-z0-9_:-]{1,64}$/;
-const AUTH_CALLBACK_DIAGNOSTIC_SNAPSHOT_STORAGE_KEY = 'financemgmtbot-auth-callback-diagnostic';
 
 type ClientTelemetryEvent = {
   event: string;
@@ -16,18 +15,6 @@ type ClientTelemetryEvent = {
   diagnostic?: string;
   requestId?: string;
   corsSuspected?: boolean;
-};
-
-type AuthCallbackDiagnosticSnapshot = {
-  clientEventId?: string;
-  releaseId?: string;
-  phase: string;
-  diagnostic: string;
-  online?: boolean;
-  apiOrigin?: string;
-  retryOutcome?: string;
-  runtimeProbeOutcome?: string;
-  runtimeRequestId?: string;
 };
 
 function generateClientEventId() {
@@ -54,7 +41,7 @@ export function resolveApiOrigin() {
   }
 }
 
-export function buildPublicApiUrl(path: string) {
+function buildPublicApiUrl(path: string) {
   return `${configuredApiBaseUrl || window.location.origin}${path}`;
 }
 
@@ -111,75 +98,6 @@ export function ensureSupportCodeInMessage(message: string, clientEventId?: stri
     return message;
   }
   return `${message} Codigo de suporte: ${clientEventId}`;
-}
-
-function sanitizeSnapshot(input: AuthCallbackDiagnosticSnapshot) {
-  return {
-    clientEventId: sanitizeToken(input.clientEventId),
-    releaseId: sanitizeToken(input.releaseId) || sanitizeToken(configuredReleaseId) || 'dev-local',
-    phase: sanitizeToken(input.phase) || 'callback_admin_validation',
-    diagnostic: sanitizeToken(input.diagnostic) || 'auth_callback_admin_validation_failed',
-    online: typeof input.online === 'boolean'
-      ? input.online
-      : typeof navigator !== 'undefined' && typeof navigator.onLine === 'boolean'
-        ? navigator.onLine
-        : undefined,
-    apiOrigin: input.apiOrigin || resolveApiOrigin(),
-    retryOutcome: sanitizeToken(input.retryOutcome),
-    runtimeProbeOutcome: sanitizeToken(input.runtimeProbeOutcome),
-    runtimeRequestId: sanitizeToken(input.runtimeRequestId),
-  };
-}
-
-export function saveAuthCallbackDiagnosticSnapshot(input: AuthCallbackDiagnosticSnapshot) {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  const snapshot = sanitizeSnapshot(input);
-  try {
-    window.sessionStorage.setItem(
-      AUTH_CALLBACK_DIAGNOSTIC_SNAPSHOT_STORAGE_KEY,
-      JSON.stringify(snapshot),
-    );
-  } catch {
-    return null;
-  }
-  return snapshot;
-}
-
-export function loadAuthCallbackDiagnosticSnapshot() {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  let rawValue: string | null = null;
-  try {
-    rawValue = window.sessionStorage.getItem(AUTH_CALLBACK_DIAGNOSTIC_SNAPSHOT_STORAGE_KEY);
-  } catch {
-    return null;
-  }
-  if (!rawValue) {
-    return null;
-  }
-
-  try {
-    const parsedValue = JSON.parse(rawValue) as AuthCallbackDiagnosticSnapshot;
-    return sanitizeSnapshot(parsedValue);
-  } catch {
-    return null;
-  }
-}
-
-export function clearAuthCallbackDiagnosticSnapshot() {
-  if (typeof window === 'undefined') {
-    return;
-  }
-  try {
-    window.sessionStorage.removeItem(AUTH_CALLBACK_DIAGNOSTIC_SNAPSHOT_STORAGE_KEY);
-  } catch {
-    return;
-  }
 }
 
 export function emitClientTelemetry(input: ClientTelemetryEvent) {

@@ -60,6 +60,7 @@ describe('supabase helpers', () => {
         auth: {
           autoRefreshToken: true,
           detectSessionInUrl: true,
+          flowType: 'pkce',
           persistSession: true,
           storageKey: 'financemgmtbot-admin-auth-v2',
         },

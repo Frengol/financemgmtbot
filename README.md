@@ -26,8 +26,8 @@ GitHub Pages:
 - GitHub Pages does not expose logs de runtime da SPA; browser-side diagnostics now flow through `POST /api/client-telemetry` to Cloud Logging, correlated with `VITE_APP_RELEASE`
 
 Supabase Auth:
-- in `Authentication -> URL Configuration`, set `Site URL` to your published frontend callback, for example `https://admin.example.com/auth/callback`
-- add both the frontend callback URL and the published frontend root URL to `Redirect URLs`
+- in `Authentication -> URL Configuration`, set `Site URL` to the published frontend root, for example `https://admin.example.com/`
+- add the exact callback URL `https://admin.example.com/auth/callback` to `Redirect URLs`
 - do not leave `localhost` as the production Site URL, or Supabase can generate expired/invalid links pointing at a local address
 
 Local auth integration test mode:
@@ -100,7 +100,7 @@ Playwright:
 - the smoke suite keeps mocking `/api/admin/*` and the local-only `__test__/auth/*` support routes for deterministic UI regression coverage
 - the integration suite starts the local Quart backend in `AUTH_TEST_MODE`, requests a real magic link through the login form, follows the hosted-style verify link into the frontend callback and validates that authenticated data loading works end to end
 - the live database smoke stays opt-in via `LIVE_DB_SMOKE=true` and only exercises read-only access to `/api/admin/gastos`
-- browser-only auth and transport failures that do not surface in the admin API logs can now be observed through `browser_client_telemetry` entries in Cloud Logging, keyed by `clientEventId`, `requestId` and `VITE_APP_RELEASE`; when callback transport still fails before a log lands, the frontend now keeps the user on `/auth/callback` and persists a local diagnostic snapshot in `sessionStorage`
+- browser-only auth and transport failures that do not surface in the admin API logs can now be observed through `browser_client_telemetry` entries in Cloud Logging, keyed by `clientEventId`, `requestId` and `VITE_APP_RELEASE`; the callback now stays focused on concluding the Supabase browser session and leaves `/api/admin/me` to the shared auth context
 
 Before push:
 - install `gitleaks` locally and confirm `make audit-repo-security` passes
