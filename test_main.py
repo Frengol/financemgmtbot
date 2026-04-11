@@ -269,6 +269,13 @@ class TestFrontendOrigins:
         assert "https://admin.example.com" in configured
         assert "http://localhost:5173" in configured
 
+    def test_resolve_frontend_allowed_origins_derives_public_origin_from_public_url(self):
+        configured = config.resolve_frontend_allowed_origins(
+            None,
+            "https://frengol.github.io/financemgmtbot/",
+        )
+        assert configured == frozenset({"https://frengol.github.io"})
+
 
 # ============================================================
 # 2. BUSINESS LOGIC — MAP-REDUCE

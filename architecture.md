@@ -136,7 +136,8 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 * As origens padrão do código continuam explícitas e fechadas apenas para desenvolvimento local:
   - `http://localhost:5173`
   - `http://127.0.0.1:5173`
-* A origem publicada do frontend deve vir do ambiente do Cloud Run via `FRONTEND_ALLOWED_ORIGINS`, e não hardcoded no repositório.
+* A origem publicada do frontend deve vir do ambiente do Cloud Run via `FRONTEND_ALLOWED_ORIGINS`; quando essa env não vier preenchida, o backend deriva a origem pública a partir de `FRONTEND_PUBLIC_URL`.
+* Em runtime gerenciado, ausência de `FRONTEND_PUBLIC_URL` ou falta de uma origem pública válida resolvida passa a ser erro fatal de configuração, evitando fallback silencioso para `localhost`.
 * O bypass local do backend só é aceito sem bearer quando a flag de desenvolvimento está ligada e a chamada vem do loopback/origem permitida.
 * Respostas de `/api/admin/*` e do suporte local `__test__/auth/*` agora incluem `Cache-Control: no-store, private`, `Pragma: no-cache`, `X-Content-Type-Options: nosniff` e `Referrer-Policy: no-referrer`.
 * Como o frontend ainda está em GitHub Pages sem edge dedicado, CSP/anti-clickjacking completos continuam dependentes da próxima etapa obrigatória: domínio próprio + borda reversa controlada.
@@ -179,6 +180,11 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `FRONTEND_PUBLIC_URL`
   - opcionalmente `DATA_ENCRYPTION_KEY`
   - opcionalmente `ALLOW_LOCAL_DEV_AUTH` apenas fora de produção
+* Em Cloud Run produção:
+  - `FRONTEND_PUBLIC_URL` deve apontar para `https://frengol.github.io/financemgmtbot/`
+  - `FRONTEND_ALLOWED_ORIGINS` deve incluir `https://frengol.github.io`
+  - `AUTH_TEST_MODE` deve permanecer `false`
+  - `ALLOW_LOCAL_DEV_AUTH` deve permanecer `false`
 * O `Dockerfile` do backend não instala mais toolchain de build ou `libpq-dev` no runtime final; a imagem roda apenas com dependências Python e usuário não-root.
 
 ### 5.2 Frontend

@@ -68,6 +68,53 @@ def parse_frontend_allowed_origins(raw_origins: str | None):
     )
 
 
+def is_loopback_origin(origin: str):
+    normalized = normalize_frontend_origin(origin)
+    parsed = urlsplit(normalized)
+    hostname = (parsed.hostname or "").lower()
+    return hostname in {"localhost", "127.0.0.1", "::1"} or hostname.startswith("127.")
+
+
+def resolve_frontend_allowed_origins(raw_origins: str | None, frontend_public_url: str | None):
+    if raw_origins and raw_origins.strip():
+        return parse_frontend_allowed_origins(raw_origins)
+
+    derived_public_origin = normalize_frontend_origin(frontend_public_url or "")
+    if derived_public_origin:
+        if is_loopback_origin(derived_public_origin):
+            return frozenset({*DEFAULT_FRONTEND_ALLOWED_ORIGINS, derived_public_origin})
+        return frozenset({derived_public_origin})
+
+    return parse_frontend_allowed_origins(None)
+
+
+def managed_runtime_enabled():
+    return any(
+        (os.environ.get(name) or "").strip()
+        for name in ("K_SERVICE", "K_REVISION", "K_CONFIGURATION")
+    )
+
+
+def validate_frontend_runtime_config(frontend_public_url: str, frontend_allowed_origins: frozenset[str]):
+    if not managed_runtime_enabled():
+        return
+
+    if not frontend_public_url:
+        logger.critical({
+            "event": "frontend_cors_configuration_invalid",
+            "reason": "missing_frontend_public_url",
+        })
+        raise RuntimeError("AppSec Fatal Error: FRONTEND_PUBLIC_URL não configurada para runtime gerenciado.")
+
+    public_origins = [origin for origin in frontend_allowed_origins if not is_loopback_origin(origin)]
+    if not public_origins:
+        logger.critical({
+            "event": "frontend_cors_configuration_invalid",
+            "reason": "missing_public_frontend_origin",
+        })
+        raise RuntimeError("AppSec Fatal Error: FRONTEND_ALLOWED_ORIGINS não resolve uma origem pública válida para runtime gerenciado.")
+
+
 def normalize_public_url(raw_url: str | None, *, trailing_slash: bool = False):
     normalized = (raw_url or "").strip()
     if not normalized:
@@ -100,10 +147,20 @@ ADMIN_USER_IDS = frozenset(
     for user_id in (os.environ.get("SUPABASE_ADMIN_USER_IDS") or "").split(",")
     if user_id.strip()
 )
-FRONTEND_ALLOWED_ORIGINS = parse_frontend_allowed_origins(os.environ.get("FRONTEND_ALLOWED_ORIGINS"))
 FRONTEND_PUBLIC_URL = normalize_public_url(os.environ.get("FRONTEND_PUBLIC_URL"), trailing_slash=True)
+FRONTEND_ALLOWED_ORIGINS = resolve_frontend_allowed_origins(
+    os.environ.get("FRONTEND_ALLOWED_ORIGINS"),
+    FRONTEND_PUBLIC_URL,
+)
 ALLOW_LOCAL_DEV_AUTH = (os.environ.get("ALLOW_LOCAL_DEV_AUTH") or "").strip().lower() == "true"
 AUTH_TEST_MODE = (os.environ.get("AUTH_TEST_MODE") or "").strip().lower() == "true"
+
+validate_frontend_runtime_config(FRONTEND_PUBLIC_URL, FRONTEND_ALLOWED_ORIGINS)
+logger.info({
+    "event": "frontend_cors_configured",
+    "frontend_public_url": FRONTEND_PUBLIC_URL or None,
+    "resolved_origins": sorted(FRONTEND_ALLOWED_ORIGINS),
+})
 
 def mascarar_segredos(texto):
     if not isinstance(texto, str): return texto

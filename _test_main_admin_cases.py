@@ -234,6 +234,38 @@ class TestAdminRoutes:
         assert resp.headers["Access-Control-Allow-Headers"] == "Authorization, Content-Type"
 
     @pytest.mark.asyncio
+    async def test_admin_me_reads_success_response_with_allowed_origin(self):
+        async with main.app.test_client() as client:
+            with self._authorized_admin() as headers, \
+                 patch.object(web_http, "FRONTEND_ALLOWED_ORIGINS", frozenset({"https://frengol.github.io"})):
+                resp = await client.get(
+                    "/api/admin/me",
+                    headers={
+                        **headers,
+                        "Origin": "https://frengol.github.io",
+                    },
+                )
+
+        assert resp.status_code == 200
+        assert resp.headers["Access-Control-Allow-Origin"] == "https://frengol.github.io"
+
+    @pytest.mark.asyncio
+    async def test_admin_me_omits_cors_header_for_disallowed_origin(self):
+        async with main.app.test_client() as client:
+            with self._authorized_admin() as headers, \
+                 patch.object(web_http, "FRONTEND_ALLOWED_ORIGINS", frozenset({"https://frengol.github.io"})):
+                resp = await client.get(
+                    "/api/admin/me",
+                    headers={
+                        **headers,
+                        "Origin": "https://evil.example.com",
+                    },
+                )
+
+        assert resp.status_code == 200
+        assert "Access-Control-Allow-Origin" not in resp.headers
+
+    @pytest.mark.asyncio
     async def test_admin_write_and_pending_routes_stay_bearer_only(self):
         mock_gastos = MagicMock()
         mock_gastos.insert.return_value.execute.return_value = MagicMock(data=[{

@@ -108,6 +108,16 @@ class TestConfigCoverage:
         assert module.parse_frontend_allowed_origins("https://admin.example.com/app/,http://localhost:5173") == frozenset(
             {"https://admin.example.com", "http://localhost:5173"}
         )
+        assert module.resolve_frontend_allowed_origins(
+            "",
+            "https://frengol.github.io/financemgmtbot/",
+        ) == frozenset({"https://frengol.github.io"})
+        assert module.resolve_frontend_allowed_origins(
+            "",
+            "http://localhost:5173/",
+        ) == frozenset({"http://localhost:5173", "http://127.0.0.1:5173"})
+        assert module.is_loopback_origin("http://localhost:5173") is True
+        assert module.is_loopback_origin("https://frengol.github.io") is False
         assert module.normalize_public_url("https://admin.example.com/app", trailing_slash=True) == "https://admin.example.com/app/"
         assert module.normalize_public_url("nota-url") == ""
         assert module.mascarar_segredos(REQUIRED_ENV["SUPABASE_KEY"]) == "[MASKED_SUPABASE_KEY]"
@@ -130,6 +140,67 @@ class TestConfigCoverage:
         mock_create_client.assert_not_called()
         assert module.FRONTEND_PUBLIC_URL == "https://admin.example.com/app/"
         assert module.FRONTEND_ALLOWED_ORIGINS == frozenset({"https://admin.example.com", "https://other.example.com"})
+
+    def test_managed_runtime_requires_public_frontend_origin_and_logs_resolution(self, monkeypatch: pytest.MonkeyPatch):
+        _set_required_env(
+            monkeypatch,
+            K_SERVICE="financemgmtbot-git",
+            K_REVISION="rev-1",
+            FRONTEND_PUBLIC_URL="https://frengol.github.io/financemgmtbot/",
+            FRONTEND_ALLOWED_ORIGINS="",
+        )
+
+        with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
+             patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
+             patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
+             patch("google.generativeai.configure"), \
+             patch("logging.Logger.info") as info_mock:
+            module = _import_fresh_config("config_cov_managed_runtime")
+
+        assert module.FRONTEND_ALLOWED_ORIGINS == frozenset({"https://frengol.github.io"})
+        assert module.managed_runtime_enabled() is True
+        assert any(
+            isinstance(call.args[0], dict) and call.args[0].get("event") == "frontend_cors_configured"
+            for call in info_mock.call_args_list
+        )
+
+    def test_managed_runtime_fails_fast_without_public_frontend_origin(self, monkeypatch: pytest.MonkeyPatch):
+        _set_required_env(
+            monkeypatch,
+            K_SERVICE="financemgmtbot-git",
+            K_REVISION="rev-1",
+            FRONTEND_PUBLIC_URL="",
+            FRONTEND_ALLOWED_ORIGINS="",
+        )
+
+        with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
+             patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
+             patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
+             patch("google.generativeai.configure"), \
+             patch("logging.Logger.critical") as critical_mock, \
+             pytest.raises(RuntimeError, match="FRONTEND_PUBLIC_URL"):
+            _import_fresh_config("config_cov_missing_public_origin")
+
+        assert any(
+            isinstance(call.args[0], dict) and call.args[0].get("event") == "frontend_cors_configuration_invalid"
+            for call in critical_mock.call_args_list
+        )
+
+    def test_managed_runtime_fails_fast_with_loopback_only_origin(self, monkeypatch: pytest.MonkeyPatch):
+        _set_required_env(
+            monkeypatch,
+            K_SERVICE="financemgmtbot-git",
+            K_REVISION="rev-1",
+            FRONTEND_PUBLIC_URL="http://localhost:5173/",
+            FRONTEND_ALLOWED_ORIGINS="http://localhost:5173",
+        )
+
+        with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
+             patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
+             patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
+             patch("google.generativeai.configure"), \
+             pytest.raises(RuntimeError, match="FRONTEND_ALLOWED_ORIGINS"):
+            _import_fresh_config("config_cov_loopback_only_origin")
 
     def test_missing_required_environment_variable_fails_fast(self, monkeypatch: pytest.MonkeyPatch):
         _set_required_env(monkeypatch)

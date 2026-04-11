@@ -6,8 +6,10 @@ Backend local:
 - create `.env` based on `.env.example`
 - fill the required secrets before starting `main.py`
 - set `FRONTEND_PUBLIC_URL` to the published frontend URL in production
+- set `FRONTEND_ALLOWED_ORIGINS` to the published frontend origin in production, for example `https://frengol.github.io`
 - in production, the published frontend talks directly to Supabase Auth for Magic Link issuance and callback completion; Cloud Run only validates Bearer tokens and serves `/api/admin/*`
 - the backend does not expose `/auth/magic-link`, `/auth/callback`, `/auth/session` or `/auth/logout` as part of the productive panel flow
+- Cloud Run production must keep `AUTH_TEST_MODE=false` and `ALLOW_LOCAL_DEV_AUTH=false`
 
 Frontend local:
 - create `frontend/.env.development` based on `frontend/.env.development.example`
@@ -35,6 +37,7 @@ Local auth integration test mode:
 - GitHub Pages publishes only the frontend SPA.
 - Cloud Run continues to host the Python backend and admin API.
 - Set the published frontend to talk only to your intended public backend origin, for example `https://api.example.com`.
+- In Cloud Run production, keep both `FRONTEND_PUBLIC_URL` and `FRONTEND_ALLOWED_ORIGINS` configured; the backend now fails fast when it cannot resolve a public browser origin safely.
 - The backend deployment source of truth is now [`cloudbuild.yaml`](cloudbuild.yaml), which builds the checked-in `Dockerfile`, pushes the image to Artifact Registry and deploys Cloud Run by image digest.
 - The productive backend deployment path no longer supports Cloud Run source deploy with buildpacks; disable the old source-build trigger after moving the service to the versioned Cloud Build trigger.
 - Run the backend Cloud Build trigger with a dedicated service account scoped to minimum roles only:
@@ -119,3 +122,8 @@ Before push:
   - service `financemgmtbot-git`
   - region `southamerica-east1`
 - If your service names differ, override the substitutions in the trigger instead of editing the deploy logic in the Google Cloud console.
+- Preserve these runtime envs on the Cloud Run service during every deploy:
+  - `FRONTEND_PUBLIC_URL=https://frengol.github.io/financemgmtbot/`
+  - `FRONTEND_ALLOWED_ORIGINS=https://frengol.github.io`
+  - `AUTH_TEST_MODE=false`
+  - `ALLOW_LOCAL_DEV_AUTH=false`

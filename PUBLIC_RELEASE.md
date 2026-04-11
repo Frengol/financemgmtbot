@@ -53,4 +53,6 @@ Only publish when all of the following are true:
 - docs and examples contain placeholders only
 - the release is being made from a healthy Git clone
 - backend deploys from the checked-in `cloudbuild.yaml` and `Dockerfile`, not from an implicit Cloud Run source-build path
+- Cloud Run production keeps `FRONTEND_PUBLIC_URL` and `FRONTEND_ALLOWED_ORIGINS` set to the published GitHub Pages values
+- Cloud Run production keeps `AUTH_TEST_MODE=false` and `ALLOW_LOCAL_DEV_AUTH=false`
 - the productive backend contract does not publish legacy `/auth/*` routes

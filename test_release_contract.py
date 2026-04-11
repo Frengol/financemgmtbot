@@ -31,8 +31,15 @@ def test_public_frontend_contract_files_require_supabase_env_again():
 
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     architecture = (REPO_ROOT / "architecture.md").read_text(encoding="utf-8")
+    env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
     assert "Logs Writer" in readme
     assert "Logs Writer" in architecture
+    assert "FRONTEND_ALLOWED_ORIGINS" in readme
+    assert "FRONTEND_PUBLIC_URL" in readme
+    assert "FRONTEND_ALLOWED_ORIGINS" in architecture
+    assert "FRONTEND_PUBLIC_URL" in architecture
+    assert "FRONTEND_ALLOWED_ORIGINS" in env_example
+    assert "FRONTEND_PUBLIC_URL" in env_example
     assert "backend relay `/auth/callback`" not in readme
     assert "GET /auth/callback" not in architecture
 
