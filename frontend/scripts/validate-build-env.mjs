@@ -24,20 +24,25 @@ function validatePublicUrl(rawValue, variableName) {
 
 export function validateBuildEnv(env) {
   const supabaseAnonKey = typeof env.VITE_SUPABASE_ANON_KEY === 'string' ? env.VITE_SUPABASE_ANON_KEY.trim() : '';
+  const appRelease = typeof env.VITE_APP_RELEASE === 'string' ? env.VITE_APP_RELEASE.trim() : '';
   if (!supabaseAnonKey) {
     throw new Error('Missing VITE_SUPABASE_ANON_KEY. Configure a GitHub Actions Repository Variable or Secret named VITE_SUPABASE_ANON_KEY before building the production frontend.');
+  }
+  if (!appRelease) {
+    throw new Error('Missing VITE_APP_RELEASE. Configure the Pages workflow to inject a public frontend release identifier before building the production frontend.');
   }
 
   return {
     apiBaseUrl: validatePublicUrl(env.VITE_API_BASE_URL, 'VITE_API_BASE_URL'),
     supabaseUrl: validatePublicUrl(env.VITE_SUPABASE_URL, 'VITE_SUPABASE_URL'),
     supabaseAnonKey,
+    appRelease,
   };
 }
 
 function runCli() {
   const result = validateBuildEnv(process.env);
-  console.log(`Build environment verification passed for ${result.apiBaseUrl} with Supabase ${result.supabaseUrl}`);
+  console.log(`Build environment verification passed for ${result.apiBaseUrl} with Supabase ${result.supabaseUrl} and release ${result.appRelease}`);
 }
 
 const isCli =

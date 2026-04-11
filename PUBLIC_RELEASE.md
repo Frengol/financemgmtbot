@@ -24,6 +24,7 @@ Use this checklist before publishing the repository to a public remote.
   - `make audit-backend-deps`
   - `npm run verify:build-env --prefix frontend`
   - `npm run verify:bundle --prefix frontend`
+- Confirm that docs/examples mention the public frontend release id (`VITE_APP_RELEASE`) and the first-party browser diagnostics endpoints (`/api/meta/runtime`, `/api/client-telemetry`) only as public operational metadata, never as secret-bearing flows.
 
 ## 3. Audit the Git history
 
@@ -55,4 +56,5 @@ Only publish when all of the following are true:
 - backend deploys from the checked-in `cloudbuild.yaml` and `Dockerfile`, not from an implicit Cloud Run source-build path
 - Cloud Run production keeps `FRONTEND_PUBLIC_URL` and `FRONTEND_ALLOWED_ORIGINS` set to the published GitHub Pages values
 - Cloud Run production keeps `AUTH_TEST_MODE=false` and `ALLOW_LOCAL_DEV_AUTH=false`
+- Cloud Run production publishes runtime metadata (`APP_COMMIT_SHA`, `APP_RELEASE_SHA`) and can be checked with `GET /api/meta/runtime`
 - the productive backend contract does not publish legacy `/auth/*` routes

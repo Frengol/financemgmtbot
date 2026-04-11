@@ -24,6 +24,7 @@ function ensureBuiltDist() {
       VITE_API_BASE_URL: 'https://api.example.com',
       VITE_SUPABASE_URL: publicSupabaseUrl,
       VITE_SUPABASE_ANON_KEY: publicSupabaseAnonKey,
+      VITE_APP_RELEASE: 'pages-fallback-test',
     },
   });
 }

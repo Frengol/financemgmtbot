@@ -6,6 +6,7 @@ import type {
 import {
   ApiError,
 } from '@/features/admin/api/contracts';
+import { emitClientTelemetry } from '@/features/observability/clientTelemetry';
 
 const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 
@@ -35,20 +36,36 @@ function isAdminApiPath(path: string) {
   return path.startsWith('/api/admin/');
 }
 
+function isCrossOriginApiRequest() {
+  if (!configuredApiBaseUrl) {
+    return false;
+  }
+
+  try {
+    return new URL(configuredApiBaseUrl).origin !== window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 function buildSupportMessage({
   message,
   requestId,
+  clientEventId,
   detail,
   diagnostic,
 }: {
   message: string;
   requestId?: string;
+  clientEventId?: string;
   detail?: string;
   diagnostic?: string;
 }) {
   const supportMessageParts = [message];
   if (requestId) {
     supportMessageParts.push(`Codigo de suporte: ${requestId}`);
+  } else if (clientEventId) {
+    supportMessageParts.push(`Codigo de suporte: ${clientEventId}`);
   }
   if (detail) {
     supportMessageParts.push(`Detalhe: ${detail}`);
@@ -64,20 +81,23 @@ function createClientApiError({
   status,
   message,
   diagnostic,
+  clientEventId,
   retryable = false,
 }: {
   code: string;
   status: number;
   message: string;
   diagnostic?: string;
+  clientEventId?: string;
   retryable?: boolean;
 }) {
   return new ApiError(
-    buildSupportMessage({ message, diagnostic }),
+    buildSupportMessage({ message, clientEventId, diagnostic }),
     {
       code,
       diagnostic,
       status,
+      clientEventId,
       retryable,
     },
   );
@@ -155,9 +175,27 @@ export async function apiRequest<T>(
 
     response = await fetch(buildApiUrl(path), requestInit);
   } catch {
-    throw new ApiError(ERROR_MESSAGES.NETWORK_ERROR, {
+    const corsSuspected = isCrossOriginApiRequest() && (typeof navigator === 'undefined' || navigator.onLine !== false);
+    const diagnostic = corsSuspected
+      ? 'frontend_cors_blocked_suspected'
+      : 'frontend_transport_failed';
+    const clientEventId = emitClientTelemetry({
+      event: 'admin_api_transport_failed',
+      phase: 'api_request',
+      httpStatus: 0,
+      errorCode: 'NETWORK_ERROR',
+      diagnostic,
+      corsSuspected,
+    });
+    throw new ApiError(buildSupportMessage({
+      message: ERROR_MESSAGES.NETWORK_ERROR,
+      clientEventId,
+      diagnostic,
+    }), {
       code: 'NETWORK_ERROR',
+      diagnostic,
       status: 0,
+      clientEventId,
       retryable: true,
     });
   }

@@ -37,6 +37,8 @@ steps:
           --image "$$IMAGE_REF" \
           --region "${_REGION}" \
           --platform managed \
+          --update-env-vars "APP_COMMIT_SHA=${COMMIT_SHA},APP_RELEASE_SHA=${SHORT_SHA}" \
+          --update-labels "commit-sha=${SHORT_SHA}" \
           --quiet
 
 images:

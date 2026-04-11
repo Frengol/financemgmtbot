@@ -75,6 +75,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Set public frontend release id
+        run: echo "VITE_APP_RELEASE=${GITHUB_SHA::12}" >> "$GITHUB_ENV"
+
       - name: Audit frontend runtime dependencies
         run: npm audit --omit=dev
 
@@ -89,6 +92,7 @@ jobs:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || secrets.VITE_API_BASE_URL }}
           VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_RELEASE: ${{ env.VITE_APP_RELEASE }}
         run: npm run verify:build-env
 
       - name: Build frontend
@@ -96,6 +100,7 @@ jobs:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || secrets.VITE_API_BASE_URL }}
           VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_RELEASE: ${{ env.VITE_APP_RELEASE }}
         run: npm run build
 
       - name: Verify GitHub Pages SPA fallback
@@ -103,6 +108,7 @@ jobs:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || secrets.VITE_API_BASE_URL }}
           VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_RELEASE: ${{ env.VITE_APP_RELEASE }}
         run: npm run verify:pages-fallback
 
       - name: Verify built frontend contract and scan
@@ -110,6 +116,7 @@ jobs:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || secrets.VITE_API_BASE_URL }}
           VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_RELEASE: ${{ env.VITE_APP_RELEASE }}
         run: npm run verify:bundle
 
       - name: Upload frontend coverage artifacts
@@ -144,12 +151,16 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Set public frontend release id
+        run: echo "VITE_APP_RELEASE=${GITHUB_SHA::12}" >> "$GITHUB_ENV"
+
       - name: Build frontend for Pages fallback runtime validation
         working-directory: frontend
         env:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || secrets.VITE_API_BASE_URL }}
           VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_APP_RELEASE: ${{ env.VITE_APP_RELEASE }}
         run: npm run build
 
       - name: Install Playwright browsers

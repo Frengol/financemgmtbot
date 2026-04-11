@@ -18,6 +18,7 @@ const mockClearBrowserAdminProfile = vi.fn();
 const mockClearBrowserAdminTestSession = vi.fn();
 const mockDecodeAccessTokenIdentity = vi.fn();
 const mockBrowserAdminAuthTestModeEnabled = vi.fn();
+const mockEmitClientTelemetry = vi.fn();
 
 vi.mock('@/features/auth/lib/supabaseBrowserSession', () => ({
   clearBrowserAuthState: (...args: unknown[]) => mockClearBrowserAuthState(...args),
@@ -53,6 +54,14 @@ vi.mock('@/features/auth/lib/browserState', async () => {
   };
 });
 
+vi.mock('@/features/observability/clientTelemetry', () => ({
+  emitClientTelemetry: (...args: unknown[]) => mockEmitClientTelemetry(...args),
+  ensureSupportCodeInMessage: (message: string, clientEventId?: string) =>
+    clientEventId && !/codigo de suporte:/i.test(message)
+      ? `${message} Codigo de suporte: ${clientEventId}`
+      : message,
+}));
+
 describe('AuthCallback', () => {
   beforeEach(() => {
     vi.resetModules();
@@ -69,6 +78,7 @@ describe('AuthCallback', () => {
     mockClearBrowserAdminTestSession.mockReset();
     mockDecodeAccessTokenIdentity.mockReset();
     mockBrowserAdminAuthTestModeEnabled.mockReset();
+    mockEmitClientTelemetry.mockReset();
 
     mockBrowserAdminAuthTestModeEnabled.mockReturnValue(false);
     mockGetSession.mockResolvedValue({ data: { session: null } });
@@ -219,12 +229,19 @@ describe('AuthCallback', () => {
         },
       },
     });
+    mockEmitClientTelemetry.mockReturnValue('cli_invalid_session_1');
 
     const { default: AuthCallback } = await import('./AuthCallback');
     render(<AuthCallback />);
 
     expect(await screen.findByText(/diagnostico: session_store_invalid/i)).toBeInTheDocument();
+    expect(screen.getByText(/codigo de suporte: cli_invalid_session_1/i)).toBeInTheDocument();
     expect(mockClearBrowserAuthState).toHaveBeenCalled();
+    expect(mockEmitClientTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'auth_callback_failed',
+      phase: 'callback_session_resolution',
+      diagnostic: 'session_store_invalid',
+    }));
   });
 
   it('shows a short diagnostic when the browser session never appears after the callback', async () => {
@@ -248,6 +265,7 @@ describe('AuthCallback', () => {
     const accessToken = buildJwtLikeToken('header', 'payload-denied', 'signature');
     const replaceSpy = vi.fn();
     vi.stubGlobal('location', { ...window.location, replace: replaceSpy });
+    mockEmitClientTelemetry.mockReturnValue('cli_auth_callback_1');
     mockGetSession.mockResolvedValue({
       data: {
         session: {
@@ -268,6 +286,11 @@ describe('AuthCallback', () => {
     });
     expect(mockClearBrowserAuthState).toHaveBeenCalled();
     expect(replaceSpy).toHaveBeenCalledWith(new URL('login', new URL(import.meta.env.BASE_URL, window.location.origin)).toString());
+    expect(mockEmitClientTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'auth_callback_failed',
+      phase: 'callback_admin_validation',
+      requestId: 'req_authz_1',
+    }));
   });
 
   it('treats a resolved but unauthorized admin identity as a login failure', async () => {

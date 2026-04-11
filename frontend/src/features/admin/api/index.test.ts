@@ -16,10 +16,19 @@ import {
 const fetchMock = vi.fn();
 const mockGetAccessToken = vi.fn();
 const mockClearBrowserAuthState = vi.fn();
+const mockEmitClientTelemetry = vi.fn();
 
 vi.mock('@/features/auth/lib/supabaseBrowserSession', () => ({
   clearBrowserAuthState: (...args: unknown[]) => mockClearBrowserAuthState(...args),
   getAccessToken: (...args: unknown[]) => mockGetAccessToken(...args),
+}));
+
+vi.mock('@/features/observability/clientTelemetry', () => ({
+  emitClientTelemetry: (...args: unknown[]) => mockEmitClientTelemetry(...args),
+  ensureSupportCodeInMessage: (message: string, clientEventId?: string) =>
+    clientEventId && !/codigo de suporte:/i.test(message)
+      ? `${message} Codigo de suporte: ${clientEventId}`
+      : message,
 }));
 
 describe('adminApi', () => {
@@ -27,6 +36,7 @@ describe('adminApi', () => {
     fetchMock.mockReset();
     mockGetAccessToken.mockReset();
     mockClearBrowserAuthState.mockReset();
+    mockEmitClientTelemetry.mockReset();
     vi.stubGlobal('fetch', fetchMock);
   });
 
@@ -224,5 +234,28 @@ describe('adminApi', () => {
     });
     expect(mockClearBrowserAuthState).toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('emits client telemetry and surfaces a client support code when the browser cannot reach the backend', async () => {
+    mockGetAccessToken.mockResolvedValue('token-transport');
+    mockEmitClientTelemetry.mockReturnValue('cli_transport_1');
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+
+    await expect(getTransactions()).rejects.toMatchObject({
+      name: 'ApiError',
+      code: 'NETWORK_ERROR',
+      status: 0,
+      diagnostic: 'frontend_transport_failed',
+      clientEventId: 'cli_transport_1',
+    });
+    await expect(getTransactions()).rejects.toThrow(
+      'Nao foi possivel conectar ao servidor agora. Verifique sua conexao e tente novamente. Codigo de suporte: cli_transport_1 Diagnostico: frontend_transport_failed',
+    );
+    expect(mockEmitClientTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'admin_api_transport_failed',
+      phase: 'api_request',
+      errorCode: 'NETWORK_ERROR',
+      diagnostic: 'frontend_transport_failed',
+    }));
   });
 });

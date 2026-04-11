@@ -28,6 +28,7 @@ def test_public_frontend_contract_files_require_supabase_env_again():
         content = file_path.read_text(encoding="utf-8")
         assert "VITE_SUPABASE_URL" in content
         assert "VITE_SUPABASE_ANON_KEY" in content
+        assert "VITE_APP_RELEASE" in content
 
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     architecture = (REPO_ROOT / "architecture.md").read_text(encoding="utf-8")
@@ -40,6 +41,16 @@ def test_public_frontend_contract_files_require_supabase_env_again():
     assert "FRONTEND_PUBLIC_URL" in architecture
     assert "FRONTEND_ALLOWED_ORIGINS" in env_example
     assert "FRONTEND_PUBLIC_URL" in env_example
+    assert "/api/client-telemetry" in readme
+    assert "/api/client-telemetry" in architecture
+    assert "/api/meta/runtime" in readme
+    assert "/api/meta/runtime" in architecture
+    assert "VITE_APP_RELEASE" in readme
+    assert "VITE_APP_RELEASE" in architecture
+    assert "browser_client_telemetry" in readme
+    assert "browser_client_telemetry" in architecture
+    assert "GitHub Pages" in readme and "logs de runtime" in readme
+    assert "GitHub Pages" in architecture and "logs de runtime" in architecture
     assert "backend relay `/auth/callback`" not in readme
     assert "GET /auth/callback" not in architecture
 
@@ -69,6 +80,10 @@ def test_ci_and_pages_deploy_workflows_require_api_and_supabase_public_env():
     assert "vars.VITE_SUPABASE_URL || secrets.VITE_SUPABASE_URL" in deploy_workflow
     assert "vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY" in ci_workflow
     assert "vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY" in deploy_workflow
+    assert "VITE_APP_RELEASE" in ci_workflow
+    assert "VITE_APP_RELEASE" in deploy_workflow
+    assert "GITHUB_SHA::12" in ci_workflow
+    assert "GITHUB_SHA::12" in deploy_workflow
     assert "npm run verify:build-env" in ci_workflow
     assert "npm run verify:build-env" in deploy_workflow
     assert "npm run verify:bundle" in ci_workflow
@@ -88,6 +103,9 @@ def test_backend_cloud_build_contract_uses_dockerfile_image_deploy():
     assert 'IMAGE_REF=$$(cat /workspace/image_ref.txt)' in cloudbuild
     assert '--image "$$IMAGE_REF"' in cloudbuild
     assert '${IMAGE_REF}' not in cloudbuild
+    assert 'APP_COMMIT_SHA=${COMMIT_SHA}' in cloudbuild
+    assert 'APP_RELEASE_SHA=${SHORT_SHA}' in cloudbuild
+    assert '--update-labels "commit-sha=${SHORT_SHA}"' in cloudbuild
 
 
 def test_backend_container_contract_is_runtime_only_and_protected_by_dockerignore():

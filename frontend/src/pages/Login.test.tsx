@@ -8,6 +8,7 @@ const mockRequestTestMagicLink = vi.fn();
 const mockLoadBrowserAdminLoginNotice = vi.fn();
 const mockClearBrowserAdminLoginNotice = vi.fn();
 const mockUseAuth = vi.fn();
+const mockEmitClientTelemetry = vi.fn();
 
 vi.mock('@/features/auth/lib/supabaseBrowserSession', () => ({
   supabase: {
@@ -24,6 +25,14 @@ vi.mock('@/features/admin/api', () => ({
 
 vi.mock('@/hooks/useAuth', () => ({
   useAuth: () => mockUseAuth(),
+}));
+
+vi.mock('@/features/observability/clientTelemetry', () => ({
+  emitClientTelemetry: (...args: unknown[]) => mockEmitClientTelemetry(...args),
+  ensureSupportCodeInMessage: (message: string, clientEventId?: string) =>
+    clientEventId && !/codigo de suporte:/i.test(message)
+      ? `${message} Codigo de suporte: ${clientEventId}`
+      : message,
 }));
 
 vi.mock('@/features/auth/lib/browserState', async () => {
@@ -43,6 +52,7 @@ describe('Login', () => {
     mockLoadBrowserAdminLoginNotice.mockReset();
     mockClearBrowserAdminLoginNotice.mockReset();
     mockUseAuth.mockReset();
+    mockEmitClientTelemetry.mockReset();
     mockLoadBrowserAdminLoginNotice.mockReturnValue(null);
     mockUseAuth.mockReturnValue({
       authenticated: false,
@@ -135,6 +145,7 @@ describe('Login', () => {
 
   it('surfaces a generic request failure when the Supabase browser client errors unexpectedly', async () => {
     mockSignInWithOtp.mockResolvedValue({ data: {}, error: { message: 'unexpected upstream failure' } });
+    mockEmitClientTelemetry.mockReturnValue('cli_123456789abc');
 
     render(<Login />);
 
@@ -142,6 +153,11 @@ describe('Login', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Enviar Magic Link' }));
 
     expect(await screen.findByText(/nao foi possivel enviar o link de acesso agora/i)).toBeInTheDocument();
+    expect(screen.getByText(/codigo de suporte: cli_123456789abc/i)).toBeInTheDocument();
+    expect(mockEmitClientTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'magic_link_request_failed',
+      phase: 'login_submit',
+    }));
   });
 
   it('redirects to the app root when auth is already established', async () => {

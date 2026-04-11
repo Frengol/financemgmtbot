@@ -1,5 +1,5 @@
 # 📜 Manifesto de Arquitetura: Finance Mgmt Bot
-**Versão:** V3.3.4 — *GitHub Pages com Sessão Supabase no Browser, Runtime Admin Bearer-Only e Deploy do Cloud Run por Imagem*
+**Versão:** V3.3.5 — *GitHub Pages com Sessão Supabase no Browser, Runtime Admin Bearer-Only, Metadados Públicos de Runtime e Telemetria First-Party do Frontend*
 
 ## Visão Geral do Produto
 O sistema é um Assistente Pessoal (Copilot) Financeiro multimodal orientado a eventos. O núcleo operacional continua centrado no Telegram, onde textos, cupons fiscais e áudios são recebidos e processados via Webhook assíncrono. A evolução V3 introduziu uma segunda superfície oficial: um **Painel Administrativo Web** publicado estaticamente no GitHub Pages, delegando autenticação e operações sensíveis a um backend Python hospedado no Google Cloud Run. A versão atual V3.3 mantém o frontend estático e o backend sem custo extra, mas corrige o problema estrutural de cookie cross-site retornando o painel oficial para **sessão Supabase no browser** e **Bearer token validado server-side** nas rotas `/api/admin/*`, preservando o hardening que não depende de cookie de terceira parte: logs sanitizados, envelope de erro com `requestId`, `cache_aprovacao` cifrada com TTL, headers anti-cache e allowlists administrativas no backend.
@@ -61,6 +61,8 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 15. O operador continua podendo criar, editar, excluir, aprovar e rejeitar registros a partir do painel sem expor `service_role` ao navegador; o token web oficial passa a ser o token público do Supabase, compatível com o domínio separado do GitHub Pages.
 16. O backend produtivo não emite mais Magic Link nem mantém `/auth/callback`, `/auth/session` ou `/auth/logout` como parte do contrato do painel; toda a autenticação pública do painel termina no próprio frontend.
 17. Falhas operacionais do painel usam envelope sanitizado com `code`, `requestId`, `retryable` e, quando aplicável, `retryAfterSeconds`; erros de sessão agora também podem incluir um `detail` curto e controlado para suporte, sem ecoar detalhes crus de provedores ou do banco.
+18. GitHub Pages continua sem logs de runtime da SPA; a observabilidade do browser passa a depender de telemetria first-party enviada para `POST /api/client-telemetry`, com `clientEventId`, `VITE_APP_RELEASE` e payload sanitizado.
+19. O backend expõe `GET /api/meta/runtime` com `commitSha`, `releaseSha`, `service`, `revision` e `requestId`, permitindo validar drift de deploy sem expor segredos.
 
 ### 2.3 Separação de Superfícies
 * **GitHub Pages** hospeda apenas arquivos estáticos.
@@ -138,6 +140,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - `http://127.0.0.1:5173`
 * A origem publicada do frontend deve vir do ambiente do Cloud Run via `FRONTEND_ALLOWED_ORIGINS`; quando essa env não vier preenchida, o backend deriva a origem pública a partir de `FRONTEND_PUBLIC_URL`.
 * Em runtime gerenciado, ausência de `FRONTEND_PUBLIC_URL` ou falta de uma origem pública válida resolvida passa a ser erro fatal de configuração, evitando fallback silencioso para `localhost`.
+* O endpoint `POST /api/client-telemetry` aceita apenas origens públicas permitidas, payload curto com schema estrito e rate limit por origem/IP; ele grava somente structured logs, sem banco e sem autenticação/cookie.
 * O bypass local do backend só é aceito sem bearer quando a flag de desenvolvimento está ligada e a chamada vem do loopback/origem permitida.
 * Respostas de `/api/admin/*` e do suporte local `__test__/auth/*` agora incluem `Cache-Control: no-store, private`, `Pragma: no-cache`, `X-Content-Type-Options: nosniff` e `Referrer-Policy: no-referrer`.
 * Como o frontend ainda está em GitHub Pages sem edge dedicado, CSP/anti-clickjacking completos continuam dependentes da próxima etapa obrigatória: domínio próprio + borda reversa controlada.
@@ -145,6 +148,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 ### 4.5 Observabilidade Blindada
 * Logs seguem em JSON com masking de segredos.
 * Erros administrativos e de autenticação devem compartilhar um `requestId` entre resposta HTTP e logs estruturados, permitindo correlação de suporte sem expor stack trace, query SQL, mensagens cruas de provider ou tokens.
+* GitHub Pages não oferece logs de runtime do JavaScript em produção; para falhas de browser, a trilha oficial agora é `browser_client_telemetry` no Cloud Logging, correlacionada por `clientEventId`, `requestId` e `VITE_APP_RELEASE`.
 * Logs operacionais não devem registrar payloads brutos de IA, transcrições, conteúdo textual de transações, itens detalhados de cupons, dumps completos de inserts falhos, `access_token`, `refresh_token` ou payloads integrais de `cache_aprovacao`; devem registrar apenas metadados mínimos como evento, contagem, ids e nomes de campos.
 * A trilha `auditoria_admin` deve registrar contexto mínimo da operação administrativa, sem duplicar descrições completas de transações ou payloads integrais de aprovação.
 * Falhas de auditoria não devem expor credenciais ou corromper o fluxo principal sem log explícito.
@@ -162,6 +166,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - publica a imagem em Artifact Registry com tag baseada em `SHORT_SHA`
   - resolve o digest publicado
   - executa `gcloud run deploy --image IMAGE@DIGEST`
+  - carimba o serviço com `APP_COMMIT_SHA=${COMMIT_SHA}`, `APP_RELEASE_SHA=${SHORT_SHA}` e label pública `commit-sha=${SHORT_SHA}`
 * O trigger de Cloud Build do backend deve rodar com uma service account dedicada e mínima:
   - `Artifact Registry Writer`
   - `Cloud Run Admin`
@@ -201,7 +206,9 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - o callback público oficial é a rota `/auth/callback` do próprio GitHub Pages
   - o build oficial gera `dist/404.html` como cópia funcional de `dist/index.html`, permitindo que o GitHub Pages entregue o shell da SPA para deep links como `/financemgmtbot/auth/callback`
   - a SPA manipula apenas o token público de sessão do Supabase no navegador e envia `Authorization: Bearer` para o backend administrativo
-  - o frontend exige `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` no build oficial
+  - o frontend exige `VITE_API_BASE_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `VITE_APP_RELEASE` no build oficial
+  - o workflow do GitHub Pages injeta `VITE_APP_RELEASE=${GITHUB_SHA::12}` para correlacionar bundle publicado com `browser_client_telemetry`
+  - o frontend publicado envia falhas de auth/transporte para `POST /api/client-telemetry` via `navigator.sendBeacon()` com fallback `fetch(..., { keepalive: true })`, sem token, e-mail, query/hash ou stack trace crua
 * A SPA usa `code splitting` por rota e por dependência pesada de frontend, carregando `Dashboard`, `Histórico`, `Aprovações`, `Login` e o modal transacional sob demanda, com `manualChunks` dedicados para gráficos, tabela e vendor base.
 * Em telas mobile, o layout principal expõe um acionador discreto no canto superior esquerdo que abre um drawer lateral esquerdo com a navegação entre Dashboard, Aprovações e Histórico, preservando o menu fixo em desktop.
 * O Dashboard usa widgets com seletor de mês compacto por card, evitando um filtro global único e permitindo leitura contextual do período.
@@ -219,10 +226,11 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - executa `npm audit --omit=dev`
   - executa `npm run test:coverage`
   - falha se a cobertura unitária do frontend ficar abaixo de `90%` em `Statements`, `Branches`, `Functions` ou `Lines`
-  - valida `npm run verify:build-env`, exigindo `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` vindos de GitHub Actions `Variables` ou `Secrets`
+  - valida `npm run verify:build-env`, exigindo `VITE_API_BASE_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `VITE_APP_RELEASE` vindos de GitHub Actions `Variables` ou `Secrets`
+  - injeta `VITE_APP_RELEASE=${GITHUB_SHA::12}` nos jobs que buildam o frontend
   - valida `npm run build`
   - valida `npm run verify:pages-fallback`, garantindo que `404.html` foi gerado e continua idêntico ao shell da SPA para o GitHub Pages
-  - valida `npm run verify:bundle` para garantir que o artefato publicado continua no contrato `Supabase browser session + Authorization Bearer`
+  - valida `npm run verify:bundle` para garantir que o artefato publicado continua no contrato `Supabase browser session + Authorization Bearer + /api/client-telemetry`
   - o scanner do bundle permite apenas os valores públicos esperados do frontend (`VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY`) e continua bloqueando segredos backend, e-mails inesperados e JWTs não reconhecidos
   - executa `npm run test:e2e` com Playwright em Chromium e Firefox
   - a suíte E2E combina:
@@ -236,14 +244,14 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - fixtures de teste não devem conter literais completos que casem com scanners de segredos; tokens/JWTs simulados devem ser montados por fragmentos em tempo de execução
   - `make pre-push` é o gate local padrão antes de qualquer push e agrega secret scanning, coverage do backend, coverage do frontend, build de produção e `verify:bundle`
   - o gate local também valida `npm run verify:pages-fallback` para impedir publicação de um build sem fallback de SPA no GitHub Pages
-  - `make pre-push` e `make pre-push-full` injetam placeholders públicos seguros para `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` durante a validação local do build
-  - quando necessário validar o gate com valores públicos específicos do ambiente, os overrides locais devem usar `FRONTEND_BUILD_API_BASE_URL`, `FRONTEND_BUILD_SUPABASE_URL` e `FRONTEND_BUILD_SUPABASE_ANON_KEY`
+  - `make pre-push` e `make pre-push-full` injetam placeholders públicos seguros para `VITE_API_BASE_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `VITE_APP_RELEASE` durante a validação local do build
+  - quando necessário validar o gate com valores públicos específicos do ambiente, os overrides locais devem usar `FRONTEND_BUILD_API_BASE_URL`, `FRONTEND_BUILD_SUPABASE_URL`, `FRONTEND_BUILD_SUPABASE_ANON_KEY` e `FRONTEND_BUILD_APP_RELEASE`
   - `make pre-push-full` estende o gate padrão com `npm run test:e2e --prefix frontend` e deve ser usado para mudanças de auth, frontend, CI, build, deploy, contrato público ou segurança
   - o hook local é opt-in e pode ser instalado com `make install-git-hooks`; ele roda apenas `make pre-push`
 * `deploy-pages.yml`
   - instala dependências com `npm ci`
-  - valida `npm run verify:build-env` antes do build, aceitando `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` vindos de Repository Variables ou Secrets
-  - builda o frontend com `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` vindos de Repository Variables ou Secrets
+  - valida `npm run verify:build-env` antes do build, aceitando `VITE_API_BASE_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `VITE_APP_RELEASE` vindos de Repository Variables ou Secrets
+  - builda o frontend com `VITE_API_BASE_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` e `VITE_APP_RELEASE` vindos de Repository Variables ou Secrets
   - valida `npm run verify:pages-fallback` antes de publicar, garantindo que o GitHub Pages consegue servir o shell da SPA em deep links
   - valida o bundle com `npm run verify:bundle` antes de publicar o artefato no GitHub Pages, reutilizando exatamente a mesma política de scan da CI
   - publica automaticamente o SPA no GitHub Pages
@@ -279,6 +287,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 * **Segurança reproduzível:** RLS e estruturas administrativas deixam de existir só “no painel” e passam a ser versionadas.
 * **Menor acoplamento operacional:** frontend e backend evoluem e escalam em ritmos distintos.
 * **Observabilidade e auditoria superiores:** ações administrativas ganham trilha persistente.
+* **Visibilidade do frontend publicado:** falhas que acontecem apenas no browser do GitHub Pages passam a gerar `browser_client_telemetry` no Cloud Logging sem introduzir dependência de terceiro.
 * **Operação administrativa completa:** o painel deixa de ser apenas de leitura e passa a suportar manutenção manual segura de lançamentos.
 * **Experiência local mais fluida:** desenvolvimento não depende de rate limit do Magic Link, sem comprometer o modelo de segurança de produção.
 * **Cobertura real do fluxo crítico:** o login administrativo e a leitura de dados deixam de depender apenas de mocks e passam a ter regressão automatizada de ponta a ponta em ambiente local controlado.

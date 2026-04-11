@@ -23,6 +23,10 @@ const requiredPatterns = [
     description: 'bearer authorization transport',
     regex: /Authorization/,
   },
+  {
+    description: 'frontend browser telemetry endpoint',
+    regex: /\/api\/client-telemetry/,
+  },
 ];
 
 const forbiddenLiteralPatterns = [

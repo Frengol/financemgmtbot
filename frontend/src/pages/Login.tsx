@@ -8,6 +8,7 @@ import {
 import { localDevBypassEnabled, requestTestMagicLink } from '@/features/admin/api';
 import { useAuth } from '@/hooks/useAuth';
 import { supabase } from '@/features/auth/lib/supabaseBrowserSession';
+import { emitClientTelemetry, ensureSupportCodeInMessage } from '@/features/observability/clientTelemetry';
 
 function buildCallbackUrl() {
   return new URL('auth/callback', new URL(import.meta.env.BASE_URL, window.location.origin)).toString();
@@ -91,7 +92,16 @@ export default function Login() {
 
       setSuccess(true);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'Nao foi possivel solicitar o magic link agora.');
+      const clientEventId = emitClientTelemetry({
+        event: 'magic_link_request_failed',
+        phase: 'login_submit',
+        errorCode: 'MAGIC_LINK_REQUEST_FAILED',
+        diagnostic: 'magic_link_request_failed',
+      });
+      const baseMessage = requestError instanceof Error
+        ? requestError.message
+        : 'Nao foi possivel solicitar o magic link agora.';
+      setError(ensureSupportCodeInMessage(baseMessage, clientEventId));
     } finally {
       setSubmitting(false);
     }

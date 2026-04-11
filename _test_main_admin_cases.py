@@ -1,4 +1,5 @@
 import os
+import json
 from contextlib import ExitStack, contextmanager
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import MagicMock, patch
@@ -13,7 +14,7 @@ import test_support
 from admin_runtime import approvals as admin_approvals
 from admin_runtime import auth as admin_auth
 from admin_runtime import transactions as admin_transactions
-from web_app import auth_test_support_routes, http as web_http
+from web_app import auth_test_support_routes, http as web_http, observability_routes
 
 
 class TestAdminRoutes:
@@ -266,6 +267,103 @@ class TestAdminRoutes:
         assert "Access-Control-Allow-Origin" not in resp.headers
 
     @pytest.mark.asyncio
+    async def test_runtime_meta_reports_public_runtime_version_metadata(self):
+        async with main.app.test_client() as client:
+            with patch.object(observability_routes, "APP_COMMIT_SHA", "557a1d4fedcba9876543210"), \
+                 patch.object(observability_routes, "APP_RELEASE_SHA", "557a1d4fedcb"), \
+                 patch.object(observability_routes, "K_SERVICE", "financemgmtbot-git"), \
+                 patch.object(observability_routes, "K_REVISION", "financemgmtbot-git-00042-abc"), \
+                 patch.object(web_http, "FRONTEND_ALLOWED_ORIGINS", frozenset({"https://frengol.github.io"})):
+                resp = await client.get(
+                    "/api/meta/runtime",
+                    headers={"Origin": "https://frengol.github.io"},
+                )
+
+        assert resp.status_code == 200
+        payload = await resp.get_json()
+        assert payload["status"] == "ok"
+        assert payload["commitSha"] == "557a1d4fedcba9876543210"
+        assert payload["releaseSha"] == "557a1d4fedcb"
+        assert payload["service"] == "financemgmtbot-git"
+        assert payload["revision"] == "financemgmtbot-git-00042-abc"
+        assert payload["requestId"].startswith("req_")
+        assert resp.headers["Access-Control-Allow-Origin"] == "https://frengol.github.io"
+
+    @pytest.mark.asyncio
+    async def test_client_telemetry_accepts_valid_payload_and_logs_structured_event(self):
+        logged_events = []
+
+        async with main.app.test_client() as client:
+            with patch.object(web_http, "FRONTEND_ALLOWED_ORIGINS", frozenset({"https://frengol.github.io"})), \
+                 patch.object(observability_routes.logger, "info", side_effect=lambda payload: logged_events.append(payload)):
+                resp = await client.post(
+                    "/api/client-telemetry",
+                    headers={
+                        "Origin": "https://frengol.github.io",
+                        "Content-Type": "text/plain;charset=UTF-8",
+                    },
+                    data=json.dumps({
+                        "event": "auth_callback_failed",
+                        "phase": "callback_admin_validation",
+                        "clientEventId": "cli_123456789abc",
+                        "releaseId": "557a1d4fedcb",
+                        "pagePath": "/financemgmtbot/auth/callback",
+                        "apiOrigin": "https://financemgmtbot-git-606617355477.southamerica-east1.run.app",
+                        "online": True,
+                        "httpStatus": 200,
+                        "errorCode": "NETWORK_ERROR",
+                        "diagnostic": "frontend_transport_failed",
+                        "requestId": "req_backend_1",
+                        "corsSuspected": True,
+                    }),
+                )
+
+        assert resp.status_code == 202
+        assert resp.headers["Access-Control-Allow-Origin"] == "https://frengol.github.io"
+        payload = await resp.get_json()
+        assert payload["status"] == "ok"
+        assert logged_events[-1]["event"] == "browser_client_telemetry"
+        assert logged_events[-1]["client_event_id"] == "cli_123456789abc"
+        assert logged_events[-1]["release_id"] == "557a1d4fedcb"
+        assert logged_events[-1]["request_id"].startswith("req_")
+
+    @pytest.mark.asyncio
+    async def test_client_telemetry_rejects_unexpected_fields_and_disallowed_origins(self):
+        async with main.app.test_client() as client:
+            with patch.object(web_http, "FRONTEND_ALLOWED_ORIGINS", frozenset({"https://frengol.github.io"})):
+                invalid_resp = await client.post(
+                    "/api/client-telemetry",
+                    headers={
+                        "Origin": "https://frengol.github.io",
+                        "Content-Type": "text/plain;charset=UTF-8",
+                    },
+                    data=json.dumps({
+                        "event": "auth_callback_failed",
+                        "phase": "callback_admin_validation",
+                        "clientEventId": "cli_123456789abc",
+                        "unexpected": "field",
+                    }),
+                )
+                blocked_origin_resp = await client.post(
+                    "/api/client-telemetry",
+                    headers={
+                        "Origin": "https://evil.example.com",
+                        "Content-Type": "text/plain;charset=UTF-8",
+                    },
+                    data=json.dumps({
+                        "event": "auth_callback_failed",
+                        "phase": "callback_admin_validation",
+                        "clientEventId": "cli_123456789abc",
+                    }),
+                )
+
+        assert invalid_resp.status_code == 400
+        invalid_payload = await invalid_resp.get_json()
+        assert invalid_payload["code"] == "CLIENT_TELEMETRY_INVALID"
+        assert blocked_origin_resp.status_code == 403
+        assert "Access-Control-Allow-Origin" not in blocked_origin_resp.headers
+
+    @pytest.mark.asyncio
     async def test_admin_write_and_pending_routes_stay_bearer_only(self):
         mock_gastos = MagicMock()
         mock_gastos.insert.return_value.execute.return_value = MagicMock(data=[{
@@ -442,3 +540,103 @@ class TestAdminValidationCoverage:
         payload = await response.get_json()
         assert payload["items"][0]["kind"] == "delete_confirmation"
         assert payload["items"][0]["preview"]["records_count"] == 2
+
+
+class TestObservabilityCoverage:
+    def test_observability_validation_helpers_cover_optional_and_invalid_inputs(self):
+        assert observability_routes._validate_safe_token(None, field_name="event") is None
+        with pytest.raises(ValueError, match="missing_event"):
+            observability_routes._validate_safe_token(None, field_name="event", required=True)
+        with pytest.raises(ValueError, match="invalid_event"):
+            observability_routes._validate_safe_token("bad value with spaces", field_name="event", required=True)
+
+        assert observability_routes._validate_page_path(None) is None
+        with pytest.raises(ValueError, match="invalid_page_path"):
+            observability_routes._validate_page_path("/financemgmtbot/auth/callback?token=secret")
+
+        assert observability_routes._validate_api_origin(None) is None
+        with pytest.raises(ValueError, match="invalid_api_origin"):
+            observability_routes._validate_api_origin("nota-url")
+
+        assert observability_routes._validate_http_status(None) is None
+        with pytest.raises(ValueError, match="invalid_http_status"):
+            observability_routes._validate_http_status(True)
+        with pytest.raises(ValueError, match="invalid_http_status"):
+            observability_routes._validate_http_status("oops")
+        with pytest.raises(ValueError, match="invalid_http_status"):
+            observability_routes._validate_http_status(700)
+
+        assert observability_routes._validate_boolean(None, field_name="online") is None
+        assert observability_routes._validate_boolean(True, field_name="online") is True
+        with pytest.raises(ValueError, match="invalid_online"):
+            observability_routes._validate_boolean("yes", field_name="online")
+
+    def test_normalize_client_telemetry_payload_rejects_unexpected_fields(self):
+        with pytest.raises(ValueError, match="unexpected_fields"):
+            observability_routes._normalize_client_telemetry_payload({
+                "event": "auth_callback_failed",
+                "phase": "callback_admin_validation",
+                "clientEventId": "cli_123456789abc",
+                "extra": "field",
+            })
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "data, expected_detail",
+        [
+            ("", "missing_payload"),
+            ("{", "invalid_json"),
+            ("[]", "invalid_payload"),
+            ("x" * 5000, "payload_too_large"),
+        ],
+    )
+    async def test_client_telemetry_invalid_payload_branches_return_short_details(self, data, expected_detail):
+        async with main.app.test_client() as client:
+            with patch.object(web_http, "FRONTEND_ALLOWED_ORIGINS", frozenset({"https://frengol.github.io"})):
+                resp = await client.post(
+                    "/api/client-telemetry",
+                    headers={
+                        "Origin": "https://frengol.github.io",
+                        "Content-Type": "text/plain;charset=UTF-8",
+                    },
+                    data=data,
+                )
+
+        assert resp.status_code == 400
+        payload = await resp.get_json()
+        assert payload["detail"] == expected_detail
+
+    @pytest.mark.asyncio
+    async def test_observability_options_and_rate_limit_branches(self):
+        async with main.app.test_client() as client:
+            with patch.object(web_http, "FRONTEND_ALLOWED_ORIGINS", frozenset({"https://frengol.github.io"})), \
+                 patch.object(
+                     observability_routes,
+                     "rate_limited",
+                     side_effect=lambda *args, **kwargs: ("rate_limited", 429),
+                 ):
+                runtime_options = await client.options(
+                    "/api/meta/runtime",
+                    headers={"Origin": "https://frengol.github.io"},
+                )
+                telemetry_options = await client.options(
+                    "/api/client-telemetry",
+                    headers={"Origin": "https://frengol.github.io"},
+                )
+                rate_limited_resp = await client.post(
+                    "/api/client-telemetry",
+                    headers={
+                        "Origin": "https://frengol.github.io",
+                        "Content-Type": "text/plain;charset=UTF-8",
+                    },
+                    data=json.dumps({
+                        "event": "auth_callback_failed",
+                        "phase": "callback_admin_validation",
+                        "clientEventId": "cli_123456789abc",
+                    }),
+                )
+
+        assert runtime_options.status_code == 204
+        assert telemetry_options.status_code == 204
+        assert rate_limited_resp.status_code == 429
+        assert await rate_limited_resp.get_data(as_text=True) == "rate_limited"

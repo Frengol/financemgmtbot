@@ -146,6 +146,8 @@ class TestConfigCoverage:
             monkeypatch,
             K_SERVICE="financemgmtbot-git",
             K_REVISION="rev-1",
+            APP_COMMIT_SHA="557a1d4fedcba9876543210",
+            APP_RELEASE_SHA="557a1d4fedcb",
             FRONTEND_PUBLIC_URL="https://frengol.github.io/financemgmtbot/",
             FRONTEND_ALLOWED_ORIGINS="",
         )
@@ -159,8 +161,14 @@ class TestConfigCoverage:
 
         assert module.FRONTEND_ALLOWED_ORIGINS == frozenset({"https://frengol.github.io"})
         assert module.managed_runtime_enabled() is True
+        assert module.APP_COMMIT_SHA == "557a1d4fedcba9876543210"
+        assert module.APP_RELEASE_SHA == "557a1d4fedcb"
         assert any(
             isinstance(call.args[0], dict) and call.args[0].get("event") == "frontend_cors_configured"
+            for call in info_mock.call_args_list
+        )
+        assert any(
+            isinstance(call.args[0], dict) and call.args[0].get("event") == "runtime_metadata_configured"
             for call in info_mock.call_args_list
         )
 

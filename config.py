@@ -89,10 +89,7 @@ def resolve_frontend_allowed_origins(raw_origins: str | None, frontend_public_ur
 
 
 def managed_runtime_enabled():
-    return any(
-        (os.environ.get(name) or "").strip()
-        for name in ("K_SERVICE", "K_REVISION", "K_CONFIGURATION")
-    )
+    return any(value for value in (K_SERVICE, K_REVISION, K_CONFIGURATION))
 
 
 def validate_frontend_runtime_config(frontend_public_url: str, frontend_allowed_origins: frozenset[str]):
@@ -152,6 +149,11 @@ FRONTEND_ALLOWED_ORIGINS = resolve_frontend_allowed_origins(
     os.environ.get("FRONTEND_ALLOWED_ORIGINS"),
     FRONTEND_PUBLIC_URL,
 )
+K_SERVICE = (os.environ.get("K_SERVICE") or "").strip()
+K_REVISION = (os.environ.get("K_REVISION") or "").strip()
+K_CONFIGURATION = (os.environ.get("K_CONFIGURATION") or "").strip()
+APP_COMMIT_SHA = (os.environ.get("APP_COMMIT_SHA") or "").strip()
+APP_RELEASE_SHA = (os.environ.get("APP_RELEASE_SHA") or APP_COMMIT_SHA[:12]).strip()
 ALLOW_LOCAL_DEV_AUTH = (os.environ.get("ALLOW_LOCAL_DEV_AUTH") or "").strip().lower() == "true"
 AUTH_TEST_MODE = (os.environ.get("AUTH_TEST_MODE") or "").strip().lower() == "true"
 
@@ -160,6 +162,13 @@ logger.info({
     "event": "frontend_cors_configured",
     "frontend_public_url": FRONTEND_PUBLIC_URL or None,
     "resolved_origins": sorted(FRONTEND_ALLOWED_ORIGINS),
+})
+logger.info({
+    "event": "runtime_metadata_configured",
+    "commit_sha": APP_COMMIT_SHA or None,
+    "release_sha": APP_RELEASE_SHA or None,
+    "service": K_SERVICE or None,
+    "revision": K_REVISION or None,
 })
 
 def mascarar_segredos(texto):

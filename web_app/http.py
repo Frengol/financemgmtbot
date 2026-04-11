@@ -22,6 +22,8 @@ def _json_error(message: str, status_code: int, *, code: str = "UNKNOWN_ERROR", 
 def browser_cors_enabled():
     return (
         request.path.startswith("/api/admin")
+        or request.path.startswith("/api/meta/")
+        or request.path.startswith("/api/client-telemetry")
         or (auth_test_mode_enabled() and request.path.startswith("/__test__/auth"))
     )
 

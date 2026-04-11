@@ -24,6 +24,7 @@ export class ApiError extends Error {
   diagnostic?: string;
   status: number;
   requestId?: string;
+  clientEventId?: string;
   retryable: boolean;
   retryAfterSeconds?: number;
 
@@ -35,6 +36,7 @@ export class ApiError extends Error {
       diagnostic,
       status,
       requestId,
+      clientEventId,
       retryable = false,
       retryAfterSeconds,
     }: {
@@ -43,6 +45,7 @@ export class ApiError extends Error {
       diagnostic?: string;
       status: number;
       requestId?: string;
+      clientEventId?: string;
       retryable?: boolean;
       retryAfterSeconds?: number;
     },
@@ -54,6 +57,7 @@ export class ApiError extends Error {
     this.diagnostic = diagnostic;
     this.status = status;
     this.requestId = requestId;
+    this.clientEventId = clientEventId;
     this.retryable = retryable;
     this.retryAfterSeconds = retryAfterSeconds;
   }

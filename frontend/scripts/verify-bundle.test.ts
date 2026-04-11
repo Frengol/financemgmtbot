@@ -31,7 +31,15 @@ function createBundleDir(bundleSource: string) {
   const dir = mkdtempSync(join(tmpdir(), 'fm-bundle-'));
   createdDirs.push(dir);
   writeFileSync(join(dir, 'index.html'), '<!doctype html><html><body><script src="/assets/index.js"></script></body></html>', 'utf-8');
-  writeFileSync(join(dir, 'index.js'), bundleSource, 'utf-8');
+  writeFileSync(
+    join(dir, 'index.js'),
+    `
+      const releaseId = '20260411abcd';
+      const telemetryUrl = '/api/client-telemetry';
+      ${bundleSource}
+    `,
+    'utf-8',
+  );
   return dir;
 }
 

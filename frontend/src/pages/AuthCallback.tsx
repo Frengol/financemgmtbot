@@ -13,6 +13,7 @@ import {
 } from '@/features/auth/lib/browserState';
 import { ApiError, getAdminMe } from '@/features/admin/api';
 import { clearBrowserAuthState, setCachedBrowserAccessToken, supabase } from '@/features/auth/lib/supabaseBrowserSession';
+import { emitClientTelemetry, ensureSupportCodeInMessage } from '@/features/observability/clientTelemetry';
 
 function decodeAuthValue(value: string | null) {
   if (!value) {
@@ -60,6 +61,11 @@ function mapUpstreamAuthError(upstreamError: string, upstreamCode: string | null
 
 function withDiagnostic(message: string, diagnostic?: string) {
   return diagnostic ? `${message} Diagnostico: ${diagnostic}` : message;
+}
+
+function extractSupportRequestId(message: string) {
+  const matchedRequestId = message.match(/codigo de suporte:\s*(req_[a-z0-9_-]+)/i);
+  return matchedRequestId?.[1];
 }
 
 function buildHomeUrl() {
@@ -138,8 +144,19 @@ export default function AuthCallback() {
 
     const completeLogin = async () => {
       const failLogin = async (diagnostic?: string) => {
+        const clientEventId = emitClientTelemetry({
+          event: 'auth_callback_failed',
+          phase: 'callback_session_resolution',
+          errorCode: 'AUTH_CALLBACK_SESSION_INVALID',
+          diagnostic,
+        });
         await clearBrowserAuthState();
-        setError(withDiagnostic('Nao foi possivel concluir o login com este link. Solicite um novo magic link.', diagnostic));
+        setError(
+          ensureSupportCodeInMessage(
+            withDiagnostic('Nao foi possivel concluir o login com este link. Solicite um novo magic link.', diagnostic),
+            clientEventId,
+          ),
+        );
       };
 
       const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
@@ -203,11 +220,29 @@ export default function AuthCallback() {
           });
         }
       } catch (authError) {
+        const typedError = authError instanceof ApiError ? authError : null;
+        const fallbackRequestId = authError instanceof Error
+          ? extractSupportRequestId(authError.message)
+          : undefined;
+        const clientEventId = typedError?.clientEventId || emitClientTelemetry({
+          event: 'auth_callback_failed',
+          phase: 'callback_admin_validation',
+          httpStatus: typedError?.status,
+          errorCode: typedError?.code || 'AUTH_CALLBACK_ADMIN_VALIDATION_FAILED',
+          diagnostic: typedError?.requestId
+            ? typedError.detail || typedError.diagnostic || 'auth_callback_admin_validation_failed'
+            : typedError?.diagnostic || 'auth_callback_admin_validation_failed',
+          requestId: typedError?.requestId || fallbackRequestId,
+          corsSuspected: typedError?.code === 'NETWORK_ERROR',
+        });
         const message = authError instanceof Error
           ? authError.message
           : 'Nao foi possivel validar sua sessao agora. Faca login novamente.';
+        const supportMessage = typedError?.requestId || fallbackRequestId
+          ? message
+          : ensureSupportCodeInMessage(message, clientEventId);
         await clearBrowserAuthState();
-        saveBrowserAdminLoginNotice({ message });
+        saveBrowserAdminLoginNotice({ message: supportMessage });
         if (!cancelled) {
           window.location.replace(buildLoginUrl());
         }

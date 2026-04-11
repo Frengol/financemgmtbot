@@ -7,6 +7,7 @@ from telegram_service import close_http_client, init_http_client
 from web_app.auth_test_support_routes import register_test_support_routes
 from web_app.admin_routes import register_admin_routes
 from web_app.http import harden_response
+from web_app.observability_routes import register_observability_routes
 from web_app.webhook_routes import register_webhook_routes
 
 app = Quart(__name__)
@@ -24,6 +25,7 @@ async def shutdown():
 
 app.after_request(harden_response)
 register_admin_routes(app)
+register_observability_routes(app)
 register_webhook_routes(app)
 if AUTH_TEST_MODE:
     register_test_support_routes(app)

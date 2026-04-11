@@ -70,7 +70,7 @@ from admin_runtime import auth as admin_auth
 import security
 import test_support
 from web_app import http as web_http, webhook_routes
-from _test_main_admin_cases import TestAdminRoutes, TestAdminValidationCoverage
+from _test_main_admin_cases import TestAdminRoutes, TestAdminValidationCoverage, TestObservabilityCoverage
 from _test_main_security_cases import TestSecurityCoverage
 
 _original_lookup_admin_user = admin_auth._lookup_admin_user
