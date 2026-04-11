@@ -160,6 +160,45 @@ export function registerUseAuthValidationCases({
     });
   });
 
+  it('keeps the user authenticated when browser profile persistence fails after a valid admin handshake', async () => {
+    const accessToken = buildJwtLikeToken('header', 'payload-storage', 'signature');
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: accessToken,
+          user: { id: 'user-1', email: 'admin@example.com' },
+        },
+      },
+    });
+    mockGetAdminMe.mockResolvedValue({
+      authenticated: true,
+      authorized: true,
+      user: {
+        id: 'user-1',
+        email: 'admin@example.com',
+      },
+    });
+    mockSaveBrowserAdminProfile.mockImplementation(() => {
+      throw new Error('storage unavailable');
+    });
+
+    render(
+      <AuthProvider>
+        <AuthHarness />
+      </AuthProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('authenticated')).toHaveTextContent('yes');
+    });
+
+    expect(screen.getByTestId('email')).toHaveTextContent('admin@example.com');
+    expect(mockSaveBrowserAdminLoginNotice).not.toHaveBeenCalledWith({
+      message: 'Nao foi possivel validar sua sessao agora. Faca login novamente. Diagnostico: auth_validation_failed',
+    });
+    expect(mockClearBrowserAuthState).not.toHaveBeenCalled();
+  });
+
   it('logs the browser out when neither backend nor token claims provide a usable identity', async () => {
     const accessToken = buildJwtLikeToken('header', 'payload-empty', 'signature');
     mockGetSession.mockResolvedValue({

@@ -58,12 +58,13 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 12. O frontend chama o backend em `/api/admin/*` apenas com `Authorization: Bearer <access_token>`; a correlação operacional permanece baseada em `requestId` e logs sanitizados, sem depender de headers públicos extras.
 13. O backend faz o parsing do header `Authorization` com um parser dedicado de Bearer, preservando o JWT inteiro e rejeitando apenas formato inválido ou tamanho anormal; o sanitizador genérico de texto não deve ser aplicado ao token bruto para não truncar credenciais válidas.
 14. `MainLayout` e as telas administrativas só iniciam fetches privilegiados depois que a autenticação fica estável; o antigo health check não roda mais durante `loading`, estado desautenticado ou `/auth/callback`, evitando sequências inconsistentes como `204` seguido de `401 bearer_malformed`.
-15. O backend valida o bearer token no lado servidor com Supabase, revalida allowlists administrativas e executa a operação privilegiada com auditoria.
-16. O operador continua podendo criar, editar, excluir, aprovar e rejeitar registros a partir do painel sem expor `service_role` ao navegador; o token web oficial passa a ser o token público do Supabase, compatível com o domínio separado do GitHub Pages.
-17. O backend produtivo não emite mais Magic Link nem mantém `/auth/callback`, `/auth/session` ou `/auth/logout` como parte do contrato do painel; toda a autenticação pública do painel termina no próprio frontend.
-18. Falhas operacionais do painel usam envelope sanitizado com `code`, `requestId`, `retryable` e, quando aplicável, `retryAfterSeconds`; erros de sessão agora também podem incluir um `detail` curto e controlado para suporte, sem ecoar detalhes crus de provedores ou do banco.
-19. GitHub Pages continua sem logs de runtime da SPA; a observabilidade do browser passa a depender de telemetria first-party enviada para `POST /api/client-telemetry`, com `clientEventId`, `VITE_APP_RELEASE` e payload sanitizado.
-20. O backend expõe `GET /api/meta/runtime` com `commitSha`, `releaseSha`, `service`, `revision` e `requestId`, permitindo validar drift de deploy sem expor segredos.
+15. Depois que `/api/admin/me` valida a sessão atual, a persistência local do perfil administrativo é apenas best-effort; falhas de `localStorage/sessionStorage` não podem derrubar a autenticação em memória da aba corrente.
+16. O backend valida o bearer token no lado servidor com Supabase, revalida allowlists administrativas e executa a operação privilegiada com auditoria.
+17. O operador continua podendo criar, editar, excluir, aprovar e rejeitar registros a partir do painel sem expor `service_role` ao navegador; o token web oficial passa a ser o token público do Supabase, compatível com o domínio separado do GitHub Pages.
+18. O backend produtivo não emite mais Magic Link nem mantém `/auth/callback`, `/auth/session` ou `/auth/logout` como parte do contrato do painel; toda a autenticação pública do painel termina no próprio frontend.
+19. Falhas operacionais do painel usam envelope sanitizado com `code`, `requestId`, `retryable` e, quando aplicável, `retryAfterSeconds`; erros de sessão agora também podem incluir um `detail` curto e controlado para suporte, sem ecoar detalhes crus de provedores ou do banco.
+20. GitHub Pages continua sem logs de runtime da SPA; a observabilidade do browser passa a depender de telemetria first-party enviada para `POST /api/client-telemetry`, com `clientEventId`, `VITE_APP_RELEASE` e payload sanitizado.
+21. O backend expõe `GET /api/meta/runtime` com `commitSha`, `releaseSha`, `service`, `revision` e `requestId`, permitindo validar drift de deploy sem expor segredos.
 
 ### 2.3 Separação de Superfícies
 * **GitHub Pages** hospeda apenas arquivos estáticos.

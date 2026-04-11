@@ -128,6 +128,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setLoggedOutState(false);
   }, [setLoggedOutState]);
 
+  const persistAuthorizedProfile = useCallback((authorizedUser: AuthUser) => {
+    try {
+      clearBrowserAdminLoginNotice();
+      saveBrowserAdminProfile(authorizedUser);
+    } catch {
+      // Browser profile persistence is best-effort; a valid session must keep working in-memory.
+    }
+  }, []);
+
   const authorizeAccessToken = useCallback(async (
     accessToken: string,
     browserUser?: { id?: string | null; email?: string | null } | null,
@@ -168,8 +177,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         );
       }
 
-      clearBrowserAdminLoginNotice();
-      saveBrowserAdminProfile(authorizedUser);
+      persistAuthorizedProfile(authorizedUser);
       setSafeState({
         authenticated: true,
         user: authorizedUser,
@@ -186,7 +194,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         'Nao foi possivel validar sua sessao agora. Faca login novamente. Diagnostico: auth_validation_failed',
       );
     }
-  }, [persistAuthFailure, setSafeState]);
+  }, [persistAuthFailure, persistAuthorizedProfile, setSafeState]);
 
   const refreshSession = useCallback(async () => {
     if (localDevBypassEnabled) {
@@ -214,8 +222,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const authTestSession = loadBrowserAdminTestSession();
       if (authTestSession?.accessToken && authTestSession.user?.id) {
         setCachedBrowserAccessToken(authTestSession.accessToken);
-        saveBrowserAdminProfile(authTestSession.user);
-        clearBrowserAdminLoginNotice();
+        persistAuthorizedProfile(authTestSession.user);
         setSafeState({
           authenticated: true,
           user: authTestSession.user,
@@ -244,7 +251,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await clearBrowserAuthState();
       setLoggedOutState(false);
     }
-  }, [authorizeAccessToken, setLoggedOutState, setSafeState]);
+  }, [authorizeAccessToken, persistAuthorizedProfile, setLoggedOutState, setSafeState]);
 
   const signOut = useCallback(async () => {
     if (localDevBypassEnabled) {
