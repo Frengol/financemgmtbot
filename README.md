@@ -5,12 +5,14 @@
 Backend local:
 - create `.env` based on `.env.example`
 - fill the required secrets before starting `main.py`
+- local non-managed runtime now defaults the transactions table to `gastos_qa`; set `SUPABASE_GASTOS_TABLE` explicitly if you need another table name
+- when `AUTH_TEST_MODE=true`, keep `AUTH_TEST_DATA_SOURCE=seeded` for automated integration tests and switch to `AUTH_TEST_DATA_SOURCE=database` if you want the local test magic-link flow to read the real QA table
 - set `FRONTEND_PUBLIC_URL` to the published frontend URL in production
 - set `FRONTEND_ALLOWED_ORIGINS` to the published frontend origin in production, for example `https://frengol.github.io`
 - in production, the published frontend talks directly to Supabase Auth for Magic Link issuance and callback completion; Cloud Run only validates Bearer tokens and serves `/api/admin/*`
 - the backend does not expose `/auth/magic-link`, `/auth/callback`, `/auth/session` or `/auth/logout` as part of the productive panel flow
 - Cloud Run production must keep `AUTH_TEST_MODE=false` and `ALLOW_LOCAL_DEV_AUTH=false`
-- during `/auth/callback`, the shared auth provider stays silent and does not call `/api/admin/me`; the callback route alone concludes the Supabase browser session before the app authorizes the panel
+- during `/login` and `/auth/callback`, the shared auth provider stays passive and does not call `/api/admin/me`; the login route only bootstraps the browser session, and the callback route alone concludes the Supabase session before the app authorizes the panel
 - after `/api/admin/me` authorizes a valid browser session, local profile persistence is best-effort only; a storage write failure must not invalidate the in-memory login state for the current tab
 
 Frontend local:
@@ -26,6 +28,7 @@ GitHub Pages:
 - production builds now fail fast with `npm run verify:build-env` when any required `VITE_*` value is missing or invalid
 - production builds also generate `frontend/dist/404.html` as a copy of `index.html`, so GitHub Pages can serve the SPA shell for deep links such as `/financemgmtbot/auth/callback`
 - GitHub Pages does not expose logs de runtime da SPA; browser-side diagnostics now flow through `POST /api/client-telemetry` to Cloud Logging, correlated with `VITE_APP_RELEASE`
+- every privileged browser request now carries `X-Client-Request-ID`, and Cloud Run mirrors that id in CORS-enabled admin responses plus structured logs so transport failures can be correlated with the exact preflight/request pair
 
 Supabase Auth:
 - in `Authentication -> URL Configuration`, set `Site URL` to the published frontend root, for example `https://admin.example.com/`
@@ -100,8 +103,9 @@ Frontend:
 Playwright:
 - install Chromium and Firefox locally with `npm run test:e2e:install --prefix frontend`
 - the smoke suite keeps mocking `/api/admin/*` and the local-only `__test__/auth/*` support routes for deterministic UI regression coverage
-- the integration suite starts the local Quart backend in `AUTH_TEST_MODE`, requests a real magic link through the login form, follows the hosted-style verify link into the frontend callback and validates that authenticated data loading works end to end
+- the integration suite starts the local Quart backend in `AUTH_TEST_MODE` with seeded test data, requests a real magic link through the login form, follows the hosted-style verify link into the frontend callback and validates that authenticated data loading works end to end
 - the live database smoke stays opt-in via `LIVE_DB_SMOKE=true` and only exercises read-only access to `/api/admin/gastos`
+- when exercising a real local QA backend against Supabase through the test magic-link flow, start the backend with `AUTH_TEST_MODE=true AUTH_TEST_DATA_SOURCE=database`; in that mode the admin transaction flows use `gastos_qa` by default unless `SUPABASE_GASTOS_TABLE` overrides that choice
 - browser-only auth and transport failures that do not surface in the admin API logs can now be observed through `browser_client_telemetry` entries in Cloud Logging, keyed by `clientEventId`, `requestId` and `VITE_APP_RELEASE`; the callback now stays focused on concluding the Supabase browser session and leaves `/api/admin/me` to the shared auth context
 
 Before push:

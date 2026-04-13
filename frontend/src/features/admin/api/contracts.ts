@@ -25,6 +25,7 @@ export class ApiError extends Error {
   status: number;
   requestId?: string;
   clientEventId?: string;
+  clientRequestId?: string;
   retryable: boolean;
   retryAfterSeconds?: number;
 
@@ -37,6 +38,7 @@ export class ApiError extends Error {
       status,
       requestId,
       clientEventId,
+      clientRequestId,
       retryable = false,
       retryAfterSeconds,
     }: {
@@ -46,6 +48,7 @@ export class ApiError extends Error {
       status: number;
       requestId?: string;
       clientEventId?: string;
+      clientRequestId?: string;
       retryable?: boolean;
       retryAfterSeconds?: number;
     },
@@ -58,6 +61,7 @@ export class ApiError extends Error {
     this.status = status;
     this.requestId = requestId;
     this.clientEventId = clientEventId;
+    this.clientRequestId = clientRequestId;
     this.retryable = retryable;
     this.retryAfterSeconds = retryAfterSeconds;
   }

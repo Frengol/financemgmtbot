@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Login from './Login';
 
 const mockSignInWithOtp = vi.fn();
+const mockGetSession = vi.fn();
+const mockClearBrowserAuthState = vi.fn();
 const mockRequestTestMagicLink = vi.fn();
 const mockLoadBrowserAdminLoginNotice = vi.fn();
 const mockClearBrowserAdminLoginNotice = vi.fn();
@@ -11,8 +13,10 @@ const mockUseAuth = vi.fn();
 const mockEmitClientTelemetry = vi.fn();
 
 vi.mock('@/features/auth/lib/supabaseBrowserSession', () => ({
+  clearBrowserAuthState: (...args: unknown[]) => mockClearBrowserAuthState(...args),
   supabase: {
     auth: {
+      getSession: (...args: unknown[]) => mockGetSession(...args),
       signInWithOtp: (...args: unknown[]) => mockSignInWithOtp(...args),
     },
   },
@@ -48,12 +52,15 @@ vi.mock('@/features/auth/lib/browserState', async () => {
 describe('Login', () => {
   beforeEach(() => {
     mockSignInWithOtp.mockReset();
+    mockGetSession.mockReset();
+    mockClearBrowserAuthState.mockReset();
     mockRequestTestMagicLink.mockReset();
     mockLoadBrowserAdminLoginNotice.mockReset();
     mockClearBrowserAdminLoginNotice.mockReset();
     mockUseAuth.mockReset();
     mockEmitClientTelemetry.mockReset();
     mockLoadBrowserAdminLoginNotice.mockReturnValue(null);
+    mockGetSession.mockResolvedValue({ data: { session: null } });
     mockUseAuth.mockReturnValue({
       authenticated: false,
       loading: false,
@@ -188,6 +195,83 @@ describe('Login', () => {
       configurable: true,
       value: originalLocation,
     });
+  });
+
+  it('redirects to the app root when a valid Supabase browser session already exists on /login', async () => {
+    const originalLocation = window.location;
+    const replaceSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        ...originalLocation,
+        replace: replaceSpy,
+      },
+    });
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: 'header.payload.signature',
+        },
+      },
+    });
+
+    render(<Login />);
+
+    await waitFor(() => {
+      expect(replaceSpy).toHaveBeenCalledWith(
+        new URL(import.meta.env.BASE_URL, window.location.origin).toString(),
+      );
+    });
+
+    expect(mockClearBrowserAuthState).not.toHaveBeenCalled();
+    expect(mockEmitClientTelemetry).not.toHaveBeenCalledWith(expect.objectContaining({
+      phase: 'login_bootstrap',
+    }));
+
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: originalLocation,
+    });
+  });
+
+  it('clears unusable local auth state on /login without persisting a user-facing notice', async () => {
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: 'not-a-jwt',
+        },
+      },
+    });
+
+    render(<Login />);
+
+    await waitFor(() => {
+      expect(mockClearBrowserAuthState).toHaveBeenCalledTimes(1);
+    });
+
+    expect(mockEmitClientTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'login_bootstrap_cleared',
+      phase: 'login_bootstrap',
+      diagnostic: 'auth_state_unusable',
+    }));
+    expect(screen.queryByText(/nao foi possivel validar sua sessao/i)).not.toBeInTheDocument();
+  });
+
+  it('clears unusable local auth state when browser session bootstrap fails on /login', async () => {
+    mockGetSession.mockRejectedValue(new Error('storage read failed'));
+
+    render(<Login />);
+
+    await waitFor(() => {
+      expect(mockClearBrowserAuthState).toHaveBeenCalledTimes(1);
+    });
+
+    expect(mockEmitClientTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'login_bootstrap_failed',
+      phase: 'login_bootstrap',
+      diagnostic: 'login_bootstrap_session_read_failed',
+    }));
+    expect(screen.queryByText(/login esta temporariamente indisponivel/i)).not.toBeInTheDocument();
   });
 
   it('redirects immediately when local bypass is already active', async () => {

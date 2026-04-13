@@ -3,15 +3,20 @@ import { Activity, Mail, Loader2, CheckCircle2 } from 'lucide-react';
 import {
   browserAdminAuthTestModeEnabled,
   clearBrowserAdminLoginNotice,
+  isJwtShapeValid,
   loadBrowserAdminLoginNotice,
 } from '@/features/auth/lib/browserState';
 import { localDevBypassEnabled, requestTestMagicLink } from '@/features/admin/api';
 import { useAuth } from '@/hooks/useAuth';
-import { supabase } from '@/features/auth/lib/supabaseBrowserSession';
+import { clearBrowserAuthState, supabase } from '@/features/auth/lib/supabaseBrowserSession';
 import { emitClientTelemetry, ensureSupportCodeInMessage } from '@/features/observability/clientTelemetry';
 
 function buildCallbackUrl() {
   return new URL('auth/callback', new URL(import.meta.env.BASE_URL, window.location.origin)).toString();
+}
+
+function buildAppRootUrl() {
+  return new URL(import.meta.env.BASE_URL, window.location.origin).toString();
 }
 
 function isRateLimitedMessage(message: string) {
@@ -54,9 +59,62 @@ export default function Login() {
     }
 
     if (authenticated || localBypass) {
-      window.location.replace(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
+      window.location.replace(buildAppRootUrl());
     }
   }, [authenticated, loading, localBypass]);
+
+  useEffect(() => {
+    if (browserAdminAuthTestModeEnabled() || authenticated || localBypass) {
+      return;
+    }
+
+    let active = true;
+
+    const bootstrapLoginSession = async () => {
+      try {
+        const { data } = await supabase.auth.getSession();
+        const accessToken = data.session?.access_token ?? null;
+
+        if (!active) {
+          return;
+        }
+
+        if (!accessToken) {
+          return;
+        }
+
+        if (!isJwtShapeValid(accessToken)) {
+          await clearBrowserAuthState();
+          emitClientTelemetry({
+            event: 'login_bootstrap_cleared',
+            phase: 'login_bootstrap',
+            errorCode: 'AUTH_SESSION_INVALID',
+            diagnostic: 'auth_state_unusable',
+          });
+          return;
+        }
+
+        window.location.replace(buildAppRootUrl());
+      } catch {
+        await clearBrowserAuthState();
+        if (!active) {
+          return;
+        }
+        emitClientTelemetry({
+          event: 'login_bootstrap_failed',
+          phase: 'login_bootstrap',
+          errorCode: 'AUTH_SESSION_STORAGE_UNAVAILABLE',
+          diagnostic: 'login_bootstrap_session_read_failed',
+        });
+      }
+    };
+
+    void bootstrapLoginSession();
+
+    return () => {
+      active = false;
+    };
+  }, [authenticated, localBypass]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();

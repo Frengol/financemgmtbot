@@ -53,9 +53,9 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 7. O storage persistido do Supabase e dos artefatos do painel usa namespace versionado (`financemgmtbot-admin-auth-v2`, `financemgmtbot-admin-profile-v2` e `financemgmtbot-admin-auth-test-session-v2`). Chaves `v1` são purgadas explicitamente na inicialização, no logout e em qualquer erro de autenticação inválida, sem migração entre versões.
 8. Tokens Bearer do navegador passam por validação mínima de formato (`3` segmentos JWT) antes de qualquer uso. Sessões malformadas são descartadas localmente para impedir estado "UI autenticada / backend inválido".
 9. O callback `/auth/callback` cuida apenas de aguardar a sessão oficial do Supabase no navegador e redirecionar para a home; se a sessão não surgir ou vier inconsistente, o app limpa o estado local e pede um novo Magic Link no próprio callback, sem chamar `/api/admin/me` ali.
-10. Durante `/auth/callback`, o contexto global `useAuth` fica temporariamente silencioso e não executa `refreshSession()` nem `authorizeAccessToken(...)`; a autorização do painel só recomeça depois da navegação para a home.
+10. Durante `/login` e `/auth/callback`, o contexto global `useAuth` fica temporariamente silencioso e não executa `refreshSession()` nem `authorizeAccessToken(...)`; a autorização do painel só recomeça depois da navegação para a home.
 11. Erros de autenticação Bearer malformada retornam envelope sanitizado com `code=AUTH_SESSION_TOKEN_MALFORMED`, `detail=bearer_malformed` e `requestId`, permitindo que a UI troque o CTA de retry por re-login sem expor mensagem crua do parser JWT.
-12. O frontend chama o backend em `/api/admin/*` apenas com `Authorization: Bearer <access_token>`; a correlação operacional permanece baseada em `requestId` e logs sanitizados, sem depender de headers públicos extras.
+12. O frontend chama o backend em `/api/admin/*` com `Authorization: Bearer <access_token>` e um `X-Client-Request-ID` curto e sanitizado; o backend espelha esse id em respostas CORS do painel e em structured logs para correlacionar preflight, request final e telemetria do browser sem expor token, e-mail ou query/hash do callback.
 13. O backend faz o parsing do header `Authorization` com um parser dedicado de Bearer, preservando o JWT inteiro e rejeitando apenas formato inválido ou tamanho anormal; o sanitizador genérico de texto não deve ser aplicado ao token bruto para não truncar credenciais válidas.
 14. `MainLayout` e as telas administrativas só iniciam fetches privilegiados depois que a autenticação fica estável; o antigo health check não roda mais durante `loading`, estado desautenticado ou `/auth/callback`, evitando sequências inconsistentes como `204` seguido de `401 bearer_malformed`.
 15. Depois que `/api/admin/me` valida a sessão atual, a persistência local do perfil administrativo é apenas best-effort; falhas de `localStorage/sessionStorage` não podem derrubar a autenticação em memória da aba corrente.
@@ -63,7 +63,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 17. O operador continua podendo criar, editar, excluir, aprovar e rejeitar registros a partir do painel sem expor `service_role` ao navegador; o token web oficial passa a ser o token público do Supabase, compatível com o domínio separado do GitHub Pages.
 18. O backend produtivo não emite mais Magic Link nem mantém `/auth/callback`, `/auth/session` ou `/auth/logout` como parte do contrato do painel; toda a autenticação pública do painel termina no próprio frontend.
 19. Falhas operacionais do painel usam envelope sanitizado com `code`, `requestId`, `retryable` e, quando aplicável, `retryAfterSeconds`; erros de sessão agora também podem incluir um `detail` curto e controlado para suporte, sem ecoar detalhes crus de provedores ou do banco.
-20. GitHub Pages continua sem logs de runtime da SPA; a observabilidade do browser passa a depender de telemetria first-party enviada para `POST /api/client-telemetry`, com `clientEventId`, `VITE_APP_RELEASE` e payload sanitizado.
+20. GitHub Pages continua sem logs de runtime da SPA; a observabilidade do browser passa a depender de telemetria first-party enviada para `POST /api/client-telemetry`, com `clientEventId`, `clientRequestId`, `VITE_APP_RELEASE` e payload sanitizado.
 21. O backend expõe `GET /api/meta/runtime` com `commitSha`, `releaseSha`, `service`, `revision` e `requestId`, permitindo validar drift de deploy sem expor segredos.
 
 ### 2.3 Separação de Superfícies
@@ -93,6 +93,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
 * Segredos sensíveis do backend residem fora do repositório:
   - Secret Manager / Cloud Run
   - `.env` local para desenvolvimento
+* O nome da tabela de transações é centralizado no backend. Em Cloud Run e testes automatizados o runtime continua usando `gastos`; em runtime local não gerenciado o padrão de QA passa a ser `gastos_qa`, com override explícito por `SUPABASE_GASTOS_TABLE`. Quando `AUTH_TEST_MODE=true`, o backend agora distingue dois submodos: `AUTH_TEST_DATA_SOURCE=seeded` mantém a suíte integrada com dados em memória, enquanto `AUTH_TEST_DATA_SOURCE=database` preserva o magic link local de teste, mas volta a usar Supabase real e a tabela `gastos_qa`.
 * O frontend usa apenas variáveis públicas de build:
   - `VITE_API_BASE_URL`
 * O modo local de desenvolvimento é explicitamente isolado:
@@ -214,7 +215,7 @@ O resultado é uma topologia híbrida onde o frontend pode ser distribuído como
   - o frontend publicado envia falhas de auth/transporte para `POST /api/client-telemetry` via `fetch(..., { keepalive: true })` enquanto a página está ativa, com fallback `navigator.sendBeacon()`, sem token, e-mail, query/hash ou stack trace crua
 * A SPA usa `code splitting` por rota e por dependência pesada de frontend, carregando `Dashboard`, `Histórico`, `Aprovações`, `Login` e o modal transacional sob demanda, com `manualChunks` dedicados para gráficos, tabela e vendor base.
 * Em telas mobile, o layout principal expõe um acionador discreto no canto superior esquerdo que abre um drawer lateral esquerdo com a navegação entre Dashboard, Aprovações e Histórico, preservando o menu fixo em desktop.
-* O Dashboard usa widgets com seletor de mês compacto por card, evitando um filtro global único e permitindo leitura contextual do período.
+* O Dashboard compartilha um único estado de periodo entre os widgets analiticos e expoe, em cada card, um popover com abas `Mes` e `Filtro`: a aba `Mes` mantém a grade mensal com acao `Total` (todos os gastos desde o primeiro registro) e a aba `Filtro` permite escolher mes inicial e final para recalcular KPIs e graficos em toda a tela.
 * O Histórico usa tabela filtrável com edição e exclusão seguras via backend.
 * O modal de transações centraliza criação e edição manual com normalização server-side.
 * O campo monetário do modal opera em formato local (`12,50`), aceita apenas dígitos e vírgula no cliente e é convertido para valor numérico antes da chamada administrativa.

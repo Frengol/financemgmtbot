@@ -6,6 +6,7 @@ type ClientTelemetryEvent = {
   event: string;
   phase: string;
   clientEventId?: string;
+  clientRequestId?: string;
   releaseId?: string;
   pagePath?: string;
   apiOrigin?: string;
@@ -77,6 +78,7 @@ function buildTelemetryPayload(input: ClientTelemetryEvent) {
     event: sanitizeToken(input.event) || 'frontend_event',
     phase: sanitizeToken(input.phase) || 'unknown_phase',
     clientEventId,
+    clientRequestId: sanitizeToken(input.clientRequestId),
     releaseId,
     pagePath,
     apiOrigin,

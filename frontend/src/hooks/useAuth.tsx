@@ -75,9 +75,25 @@ function normalizeBasePath(baseUrl: string) {
   return baseUrl.replace(/\/$/, '');
 }
 
-function isAuthCallbackRoute() {
+function currentPathname() {
+  return globalThis.location?.pathname || '/';
+}
+
+function routeMatches(suffix: string) {
   const basePath = normalizeBasePath(import.meta.env.BASE_URL || '/');
-  return globalThis.location?.pathname === `${basePath}/auth/callback`;
+  return currentPathname() === `${basePath}${suffix}`;
+}
+
+function isLoginRoute() {
+  return routeMatches('/login');
+}
+
+function isAuthCallbackRoute() {
+  return routeMatches('/auth/callback');
+}
+
+function isPublicAuthRoute() {
+  return isLoginRoute() || isAuthCallbackRoute();
 }
 
 function isJwtShapeValid(token?: string | null) {
@@ -204,7 +220,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    if (isAuthCallbackRoute()) {
+    if (isPublicAuthRoute()) {
+      setState((currentState) => ({
+        ...currentState,
+        loading: false,
+      }));
       return;
     }
 
@@ -285,7 +305,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      if (isAuthCallbackRoute()) {
+      if (isPublicAuthRoute()) {
         return;
       }
 

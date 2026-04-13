@@ -29,7 +29,7 @@ class TestAdminRoutes:
             stack.enter_context(patch.object(admin_auth, "ADMIN_EMAILS", frozenset({email})))
             stack.enter_context(patch.object(admin_auth, "ADMIN_USER_IDS", frozenset({user_id})))
             stack.enter_context(patch.object(admin_auth, "auth_test_mode_enabled", return_value=False))
-            stack.enter_context(patch.object(admin_transactions, "auth_test_mode_enabled", return_value=False))
+            stack.enter_context(patch.object(admin_transactions, "auth_test_seeded_mode_enabled", return_value=False))
             yield {"Authorization": f"Bearer {bearer_token}"}
 
     @pytest.mark.asyncio
@@ -56,7 +56,7 @@ class TestAdminRoutes:
                 with patch.object(web_http, "FRONTEND_PUBLIC_URL", "https://admin.example.com/app/"), \
                      patch.object(auth_test_support_routes, "test_support_request_allowed", return_value=True), \
                      patch.object(admin_auth, "auth_test_mode_enabled", return_value=True), \
-                     patch.object(admin_transactions, "auth_test_mode_enabled", return_value=True):
+                     patch.object(admin_transactions, "auth_test_seeded_mode_enabled", return_value=True):
                     magic_link_resp = await client.post(
                         "/__test__/auth/magic-link",
                         json={"email": "admin@example.com", "redirectTo": "https://admin.example.com/app/auth/callback"},
@@ -75,7 +75,7 @@ class TestAdminRoutes:
                     bearer_token = fragment["access_token"][0]
             async with main.app.test_client() as client:
                 with patch.object(admin_auth, "auth_test_mode_enabled", return_value=True), \
-                     patch.object(admin_transactions, "auth_test_mode_enabled", return_value=True):
+                     patch.object(admin_transactions, "auth_test_seeded_mode_enabled", return_value=True):
                     transactions_resp = await client.get(
                         "/api/admin/gastos?date_from=2026-04-01&date_to=2026-04-30",
                         headers={"Authorization": f"Bearer {bearer_token}"},
@@ -227,12 +227,12 @@ class TestAdminRoutes:
                     headers={
                         "Origin": "https://frengol.github.io",
                         "Access-Control-Request-Method": "GET",
-                        "Access-Control-Request-Headers": "authorization",
+                        "Access-Control-Request-Headers": "authorization, x-client-request-id",
                     },
                 )
 
         assert resp.status_code == 204
-        assert resp.headers["Access-Control-Allow-Headers"] == "Authorization, Content-Type"
+        assert resp.headers["Access-Control-Allow-Headers"] == "Authorization, Content-Type, X-Client-Request-ID"
 
     @pytest.mark.asyncio
     async def test_admin_me_reads_success_response_with_allowed_origin(self):
@@ -244,11 +244,14 @@ class TestAdminRoutes:
                     headers={
                         **headers,
                         "Origin": "https://frengol.github.io",
+                        "X-Client-Request-ID": "reqc_front_1",
                     },
                 )
 
         assert resp.status_code == 200
         assert resp.headers["Access-Control-Allow-Origin"] == "https://frengol.github.io"
+        assert resp.headers["Access-Control-Expose-Headers"] == "X-Request-ID, X-Client-Request-ID"
+        assert resp.headers["X-Client-Request-ID"] == "reqc_front_1"
 
     @pytest.mark.asyncio
     async def test_admin_me_omits_cors_header_for_disallowed_origin(self):
@@ -306,6 +309,7 @@ class TestAdminRoutes:
                         "event": "auth_callback_failed",
                         "phase": "callback_admin_validation",
                         "clientEventId": "cli_123456789abc",
+                        "clientRequestId": "reqc_front_1",
                         "releaseId": "557a1d4fedcb",
                         "pagePath": "/financemgmtbot/auth/callback",
                         "apiOrigin": "https://financemgmtbot-git-606617355477.southamerica-east1.run.app",
@@ -324,6 +328,7 @@ class TestAdminRoutes:
         assert payload["status"] == "ok"
         assert logged_events[-1]["event"] == "browser_client_telemetry"
         assert logged_events[-1]["client_event_id"] == "cli_123456789abc"
+        assert logged_events[-1]["client_request_id"] == "reqc_front_1"
         assert logged_events[-1]["release_id"] == "557a1d4fedcb"
         assert logged_events[-1]["request_id"].startswith("req_")
 
@@ -494,7 +499,7 @@ class TestAdminValidationCoverage:
                  patch.object(admin_auth, "ADMIN_EMAILS", frozenset({"admin@example.com"})), \
                  patch.object(admin_auth, "ADMIN_USER_IDS", frozenset({"user-1"})), \
                  patch.object(admin_auth, "auth_test_mode_enabled", return_value=False), \
-                 patch.object(admin_transactions, "auth_test_mode_enabled", return_value=False), \
+                 patch.object(admin_transactions, "auth_test_seeded_mode_enabled", return_value=False), \
                  patch.object(admin_auth.supabase.auth, "get_user", MagicMock(return_value=auth_response)):
                 resp = await client.post(
                     "/api/admin/gastos",

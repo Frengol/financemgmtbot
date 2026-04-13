@@ -51,9 +51,11 @@ describe('adminApi', () => {
     await getTransactions({ dateFrom: '2026-04-01', dateTo: '2026-04-30' });
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = new Headers(init.headers);
     expect(url).toBe('/api/admin/gastos?date_from=2026-04-01&date_to=2026-04-30');
     expect(init.method).toBe('GET');
-    expect(new Headers(init.headers).get('Authorization')).toBe('Bearer token-123');
+    expect(headers.get('Authorization')).toBe('Bearer token-123');
+    expect(headers.get('X-Client-Request-ID')).toMatch(/^reqc_[a-f0-9]{1,24}$/i);
   });
 
   it('uses /api/admin/me as the lightweight authorization handshake', async () => {
@@ -71,9 +73,11 @@ describe('adminApi', () => {
     await getAdminMe();
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = new Headers(init.headers);
     expect(url).toBe('/api/admin/me');
     expect(init.method).toBe('GET');
-    expect(new Headers(init.headers).get('Authorization')).toBe('Bearer token-abc');
+    expect(headers.get('Authorization')).toBe('Bearer token-abc');
+    expect(headers.get('X-Client-Request-ID')).toMatch(/^reqc_[a-f0-9]{1,24}$/i);
   });
 
   it('adds JSON and bearer headers for mutating admin requests', async () => {
@@ -98,6 +102,7 @@ describe('adminApi', () => {
     expect(init.method).toBe('POST');
     expect(headers.get('Content-Type')).toBe('application/json');
     expect(headers.get('Authorization')).toBe('Bearer token-456');
+    expect(headers.get('X-Client-Request-ID')).toMatch(/^reqc_[a-f0-9]{1,24}$/i);
     expect(headers.has('X-CSRF-Token')).toBe(false);
   });
 
@@ -248,15 +253,17 @@ describe('adminApi', () => {
       status: 0,
       diagnostic: 'frontend_transport_failed',
       clientEventId: 'cli_transport_1',
+      clientRequestId: expect.stringMatching(/^reqc_[a-f0-9]{1,24}$/i),
     });
     await expect(getTransactions()).rejects.toThrow(
-      'Nao foi possivel conectar ao servidor agora. Verifique sua conexao e tente novamente. Codigo de suporte: cli_transport_1 Diagnostico: frontend_transport_failed',
+      /Nao foi possivel conectar ao servidor agora\. Verifique sua conexao e tente novamente\. Codigo de suporte: cli_transport_1 Correlacao: reqc_[a-f0-9]{1,24} Diagnostico: frontend_transport_failed/i,
     );
     expect(mockEmitClientTelemetry).toHaveBeenCalledWith(expect.objectContaining({
       event: 'admin_api_transport_failed',
       phase: 'api_request',
       errorCode: 'NETWORK_ERROR',
       diagnostic: 'frontend_transport_failed',
+      clientRequestId: expect.stringMatching(/^reqc_[a-f0-9]{1,24}$/i),
     }));
   });
 
@@ -282,6 +289,7 @@ describe('adminApi', () => {
       errorCode: 'NETWORK_ERROR',
       diagnostic: 'frontend_cross_origin_transport_failed',
       corsSuspected: true,
+      clientRequestId: expect.stringMatching(/^reqc_[a-f0-9]{1,24}$/i),
     }));
   });
 });

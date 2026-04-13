@@ -66,12 +66,25 @@ class TestMainHelperCoverage:
         init_http_client.assert_awaited_once()
         close_http_client.assert_awaited_once()
 
-        async with main.app.test_request_context("/api/admin/gastos", headers={"Origin": "https://admin.example.com"}):
-            with patch.object(web_http, "FRONTEND_ALLOWED_ORIGINS", frozenset({"https://admin.example.com"})):
+        logged_events = []
+        async with main.app.test_request_context(
+            "/api/admin/gastos",
+            headers={
+                "Origin": "https://admin.example.com",
+                "X-Client-Request-ID": "reqc_test_1",
+            },
+        ):
+            with patch.object(web_http, "FRONTEND_ALLOWED_ORIGINS", frozenset({"https://admin.example.com"})), \
+                 patch.object(web_http.logger, "info", side_effect=lambda payload: logged_events.append(payload)):
                 response = await main.harden_response(Response("ok"))
             assert response.headers["Access-Control-Allow-Origin"] == "https://admin.example.com"
-            assert response.headers["Access-Control-Allow-Headers"] == "Authorization, Content-Type"
+            assert response.headers["Access-Control-Allow-Headers"] == "Authorization, Content-Type, X-Client-Request-ID"
+            assert response.headers["Access-Control-Expose-Headers"] == "X-Request-ID, X-Client-Request-ID"
             assert response.headers["Cache-Control"] == "no-store, private"
+            assert response.headers["X-Client-Request-ID"] == "reqc_test_1"
+            assert logged_events[-1]["event"] == "browser_admin_request_cors"
+            assert logged_events[-1]["client_request_id"] == "reqc_test_1"
+            assert logged_events[-1]["access_control_allow_origin_set"] is True
 
         async with main.app.test_request_context("/plain"):
             response = await main.harden_response(Response("ok"))

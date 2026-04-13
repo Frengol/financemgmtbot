@@ -45,6 +45,8 @@ def test_public_frontend_contract_files_require_supabase_env_again():
     assert "/api/client-telemetry" in architecture
     assert "/api/meta/runtime" in readme
     assert "/api/meta/runtime" in architecture
+    assert "X-Client-Request-ID" in readme
+    assert "X-Client-Request-ID" in architecture
     assert "VITE_APP_RELEASE" in readme
     assert "VITE_APP_RELEASE" in architecture
     assert "browser_client_telemetry" in readme

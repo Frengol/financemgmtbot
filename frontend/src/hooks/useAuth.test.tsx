@@ -85,6 +85,7 @@ function AuthHarness() {
 
 describe('useAuth', () => {
   beforeEach(() => {
+    vi.unstubAllEnvs();
     mockGetAdminMe.mockReset();
     mockGetSession.mockReset();
     mockOnAuthStateChange.mockReset();
@@ -118,6 +119,7 @@ describe('useAuth', () => {
     });
     mockClearBrowserAuthState.mockResolvedValue(undefined);
     mockDecodeAccessTokenIdentity.mockReturnValue(null);
+    window.history.pushState({}, '', '/');
   });
 
   registerUseAuthBrowserSessionCases({

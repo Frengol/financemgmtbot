@@ -1,3 +1,4 @@
+import re
 from urllib.parse import urlsplit
 
 from quart import Response, request
@@ -30,6 +31,18 @@ def browser_cors_enabled():
 
 def origin_allowed(origin: str):
     return origin in FRONTEND_ALLOWED_ORIGINS or "*" in FRONTEND_ALLOWED_ORIGINS
+
+
+SAFE_CLIENT_REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_:-]{1,64}$")
+
+
+def sanitize_client_request_id(value: str | None):
+    candidate = (value or "").strip()
+    if not candidate:
+        return None
+    if not SAFE_CLIENT_REQUEST_ID_PATTERN.fullmatch(candidate):
+        return None
+    return candidate
 
 
 def is_loopback_url(url: str):
@@ -126,17 +139,42 @@ def rate_limited(
 async def harden_response(response: Response):
     attach_request_id(response)
     origin = request.headers.get("Origin")
-    if origin and browser_cors_enabled() and origin_allowed(origin):
+    cors_enabled = browser_cors_enabled()
+    origin_ok = bool(origin and origin_allowed(origin))
+    client_request_id = sanitize_client_request_id(request.headers.get("X-Client-Request-ID"))
+
+    if origin and cors_enabled and origin_ok:
         response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-Client-Request-ID"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
         response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Expose-Headers"] = "X-Request-ID, X-Client-Request-ID"
         response.headers["Vary"] = "Origin"
 
-    if browser_cors_enabled():
+    if client_request_id:
+        response.headers["X-Client-Request-ID"] = client_request_id
+
+    if cors_enabled:
         response.headers["Cache-Control"] = "no-store, private"
         response.headers["Pragma"] = "no-cache"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
+
+    if request.path.startswith("/api/admin/") or request.path == "/api/admin/me":
+        logger.info(
+            with_request_id(
+                {
+                    "event": "browser_admin_request_cors",
+                    "path": request.path,
+                    "method": request.method,
+                    "origin": origin or None,
+                    "origin_allowed": origin_ok,
+                    "browser_cors_enabled": cors_enabled,
+                    "client_request_id": client_request_id,
+                    "response_status": response.status_code,
+                    "access_control_allow_origin_set": bool(response.headers.get("Access-Control-Allow-Origin")),
+                }
+            )
+        )
 
     return response

@@ -28,6 +28,13 @@ const AUTH_RECOVERY_ERROR_CODES = new Set([
   'AUTH_SESSION_TOKEN_MALFORMED',
 ]);
 
+function generateClientRequestId() {
+  const randomUuid = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID().replace(/-/g, '')
+    : Math.random().toString(16).slice(2);
+  return `reqc_${randomUuid.slice(0, 24)}`;
+}
+
 function buildApiUrl(path: string) {
   return `${configuredApiBaseUrl}${path}`;
 }
@@ -69,12 +76,14 @@ function buildSupportMessage({
   message,
   requestId,
   clientEventId,
+  clientRequestId,
   detail,
   diagnostic,
 }: {
   message: string;
   requestId?: string;
   clientEventId?: string;
+  clientRequestId?: string;
   detail?: string;
   diagnostic?: string;
 }) {
@@ -86,6 +95,9 @@ function buildSupportMessage({
   }
   if (detail) {
     supportMessageParts.push(`Detalhe: ${detail}`);
+  }
+  if (clientRequestId) {
+    supportMessageParts.push(`Correlacao: ${clientRequestId}`);
   }
   if (diagnostic) {
     supportMessageParts.push(`Diagnostico: ${diagnostic}`);
@@ -99,6 +111,7 @@ function createClientApiError({
   message,
   diagnostic,
   clientEventId,
+  clientRequestId,
   retryable = false,
 }: {
   code: string;
@@ -106,15 +119,17 @@ function createClientApiError({
   message: string;
   diagnostic?: string;
   clientEventId?: string;
+  clientRequestId?: string;
   retryable?: boolean;
 }) {
   return new ApiError(
-    buildSupportMessage({ message, clientEventId, diagnostic }),
+    buildSupportMessage({ message, clientEventId, clientRequestId, diagnostic }),
     {
       code,
       diagnostic,
       status,
       clientEventId,
+      clientRequestId,
       retryable,
     },
   );
@@ -129,6 +144,7 @@ async function parseError(response: Response) {
   }
 
   const requestId = payload.requestId || response.headers.get('X-Request-ID') || undefined;
+  const clientRequestId = response.headers.get('X-Client-Request-ID') || undefined;
   const code = payload.code || 'UNKNOWN_ERROR';
   const detail = typeof payload.detail === 'string' && /^[a-z0-9_:-]{1,64}$/i.test(payload.detail)
     ? payload.detail
@@ -138,17 +154,19 @@ async function parseError(response: Response) {
   const supportMessage = buildSupportMessage({
     message: mappedMessage,
     requestId,
+    clientRequestId,
     detail,
   });
 
   return new ApiError(supportMessage, {
     code,
     detail,
-    status: response.status,
-    requestId,
-    retryable: payload.retryable ?? false,
-    retryAfterSeconds: payload.retryAfterSeconds,
-  });
+      status: response.status,
+      requestId,
+      clientRequestId,
+      retryable: payload.retryable ?? false,
+      retryAfterSeconds: payload.retryAfterSeconds,
+    });
 }
 
 export function isReauthenticationError(error: unknown): error is ApiError {
@@ -181,11 +199,15 @@ export async function apiRequest<T>(
   }
 
   let response: Response;
+  const clientRequestId = isAdminRoute ? generateClientRequestId() : undefined;
   try {
     const requestInit: RequestInit = {
       ...init,
       headers,
     };
+    if (clientRequestId) {
+      headers.set('X-Client-Request-ID', clientRequestId);
+    }
     if (!accessToken && !isAdminRoute) {
       requestInit.credentials = 'include';
     }
@@ -196,6 +218,7 @@ export async function apiRequest<T>(
     const clientEventId = emitClientTelemetry({
       event: 'admin_api_transport_failed',
       phase: 'api_request',
+      clientRequestId,
       httpStatus: 0,
       errorCode: 'NETWORK_ERROR',
       diagnostic,
@@ -204,12 +227,14 @@ export async function apiRequest<T>(
     throw new ApiError(buildSupportMessage({
       message: ERROR_MESSAGES.NETWORK_ERROR,
       clientEventId,
+      clientRequestId,
       diagnostic,
     }), {
       code: 'NETWORK_ERROR',
       diagnostic,
       status: 0,
       clientEventId,
+      clientRequestId,
       retryable: true,
     });
   }
