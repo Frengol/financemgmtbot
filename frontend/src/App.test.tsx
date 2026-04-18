@@ -96,4 +96,32 @@ describe('App', () => {
 
     expect(await screen.findByText('Login page')).toBeInTheDocument();
   });
+
+  it('opts into the react-router future flags that silence the v7 warnings', async () => {
+    vi.resetModules();
+    const browserRouterSpy = vi.fn();
+
+    vi.doMock('react-router-dom', async () => {
+      const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+      return {
+        ...actual,
+        BrowserRouter: (props: { children: React.ReactNode; basename?: string; future?: Record<string, boolean> }) => {
+          browserRouterSpy(props);
+          return <actual.BrowserRouter {...props} />;
+        },
+      };
+    });
+
+    window.history.pushState({}, '', '/login');
+    const { default: App } = await import('./App');
+
+    render(<App />);
+
+    expect(browserRouterSpy).toHaveBeenCalledWith(expect.objectContaining({
+      future: {
+        v7_startTransition: true,
+        v7_relativeSplatPath: true,
+      },
+    }));
+  });
 });

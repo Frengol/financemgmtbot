@@ -98,7 +98,7 @@ describe('DashboardPeriodPicker', () => {
     await userEvent.click(screen.getByRole('button', { name: /jan\/26 - mar\/26/i }));
     await userEvent.click(screen.getByRole('tab', { name: 'Filtro' }));
 
-    expect(screen.getByRole('button', { name: /^Fev$/i })).toHaveClass('bg-blue-50');
+    expect(screen.getByRole('button', { name: /^Fev$/i })).toHaveClass('bg-sky-50');
 
     await userEvent.click(screen.getByRole('button', { name: /^Inicio/i }));
     await userEvent.click(screen.getByRole('button', { name: /^Fev$/i }));
@@ -138,5 +138,21 @@ describe('DashboardPeriodPicker', () => {
     fireEvent.mouseDown(document.body);
 
     expect(screen.queryByRole('button', { name: /^Jan$/i })).not.toBeInTheDocument();
+  });
+
+  it('closes the popover when pressing escape', async () => {
+    render(
+      <DashboardPeriodPicker
+        value={{ kind: 'month', month: new Date('2026-04-01T12:00:00Z') }}
+        onChange={vi.fn()}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: /abr\/2026/i }));
+    expect(screen.getByRole('dialog', { name: 'Selecionar período analítico' })).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(screen.queryByRole('dialog', { name: 'Selecionar período analítico' })).not.toBeInTheDocument();
   });
 });

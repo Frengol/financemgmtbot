@@ -74,6 +74,7 @@ describe('MainLayout mobile navigation', () => {
     expect(within(dialog).getByRole('link', { name: 'Dashboard' })).toBeInTheDocument();
     expect(within(dialog).getByRole('link', { name: 'Aprovações' })).toBeInTheDocument();
     expect(within(dialog).getByRole('link', { name: 'Histórico' })).toBeInTheDocument();
+    expect(within(dialog).queryByText('test@example.com')).not.toBeInTheDocument();
   });
 
   it('tracks online and offline state and triggers quick-create shortcuts', async () => {
@@ -147,5 +148,6 @@ describe('MainLayout mobile navigation', () => {
     await user.click(screen.getAllByRole('button', { name: 'Sair' })[0]);
 
     expect(mockSignOut).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('test@example.com')).not.toBeInTheDocument();
   });
 });

@@ -262,7 +262,7 @@ test('loads the dashboard metrics and supports the mobile navigation drawer', as
   const mobileDrawer = page.getByRole('dialog', { name: 'Menu de navegacao' });
 
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
-  await expect(page.getByText('R$ 165,00')).toBeVisible();
+  await expect(page.getByTestId('dashboard-kpi-month-expenses').getByText('R$ 165,00')).toBeVisible();
 
   await page.getByRole('button', { name: 'Abrir menu de navegacao' }).click();
   await expect(mobileDrawer).toHaveClass(/translate-x-0/);

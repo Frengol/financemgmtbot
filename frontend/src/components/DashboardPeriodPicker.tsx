@@ -113,6 +113,21 @@ export default function DashboardPeriodPicker({ value, onChange }: DashboardPeri
       return;
     }
 
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsOpen(false);
+      }
+    };
+
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
     const initialRange = createInitialRange(value);
     setActiveTab('month');
     setRangeTarget('start');
@@ -180,14 +195,20 @@ export default function DashboardPeriodPicker({ value, onChange }: DashboardPeri
       <button
         type="button"
         onClick={() => setIsOpen((current) => !current)}
-        className="max-w-[12rem] rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm transition hover:bg-slate-50"
+        aria-haspopup="dialog"
+        aria-expanded={isOpen}
+        className="inline-flex min-h-[46px] max-w-[15rem] items-center rounded-2xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm font-semibold text-slate-700 shadow-[0_10px_26px_-20px_rgba(15,23,42,0.45)] transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 focus-visible:ring-offset-2"
       >
         <span className="block truncate">{formatTriggerLabel(value)}</span>
       </button>
 
       {isOpen && (
-        <div className="absolute right-0 top-11 z-30 w-72 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl">
-          <div role="tablist" aria-label="Filtro de periodo da dashboard" className="mb-3 grid grid-cols-2 gap-2">
+        <div
+          role="dialog"
+          aria-label="Selecionar período analítico"
+          className="absolute left-1/2 top-[3.7rem] z-30 w-[min(21rem,calc(100vw-2rem))] -translate-x-1/2 rounded-[28px] border border-slate-200/90 bg-white p-4 shadow-[0_28px_50px_-30px_rgba(15,23,42,0.4)] sm:left-auto sm:right-0 sm:translate-x-0 sm:p-5"
+        >
+          <div role="tablist" aria-label="Filtro de periodo da dashboard" className="mb-4 grid grid-cols-2 gap-2 rounded-2xl bg-slate-100 p-1">
             <button
               type="button"
               role="tab"
@@ -196,10 +217,10 @@ export default function DashboardPeriodPicker({ value, onChange }: DashboardPeri
                 setActiveTab('month');
                 setDisplayYear(resolveDisplayYear(value));
               }}
-              className={`rounded-xl px-3 py-2 text-sm font-medium transition ${
+              className={`rounded-xl px-3 py-2 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 focus-visible:ring-offset-2 ${
                 activeTab === 'month'
-                  ? 'bg-slate-900 text-white shadow-sm'
-                  : 'bg-slate-50 text-slate-600 hover:bg-slate-100'
+                  ? 'bg-white text-slate-900 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-900'
               }`}
             >
               Mes
@@ -212,10 +233,10 @@ export default function DashboardPeriodPicker({ value, onChange }: DashboardPeri
                 setActiveTab('range');
                 setDisplayYear(getYear(rangeTarget === 'start' ? startMonth : endMonth));
               }}
-              className={`rounded-xl px-3 py-2 text-sm font-medium transition ${
+              className={`rounded-xl px-3 py-2 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 focus-visible:ring-offset-2 ${
                 activeTab === 'range'
-                  ? 'bg-slate-900 text-white shadow-sm'
-                  : 'bg-slate-50 text-slate-600 hover:bg-slate-100'
+                  ? 'bg-white text-slate-900 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-900'
               }`}
             >
               Filtro
@@ -223,17 +244,17 @@ export default function DashboardPeriodPicker({ value, onChange }: DashboardPeri
           </div>
 
           {activeTab === 'range' && (
-            <div className="mb-3 grid grid-cols-2 gap-2">
+            <div className="mb-4 grid grid-cols-2 gap-2">
               <button
                 type="button"
                 onClick={() => {
                   setRangeTarget('start');
                   setDisplayYear(getYear(startMonth));
                 }}
-                className={`rounded-xl border px-3 py-2 text-left transition ${
+                className={`rounded-2xl border px-3 py-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 focus-visible:ring-offset-2 ${
                   rangeTarget === 'start'
                     ? 'border-slate-900 bg-slate-900 text-white'
-                    : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100'
+                    : 'border-slate-200 bg-slate-50 text-slate-600 hover:border-slate-300 hover:bg-slate-100'
                 }`}
               >
                 <span className="block text-[11px] uppercase tracking-wide opacity-80">Inicio</span>
@@ -245,10 +266,10 @@ export default function DashboardPeriodPicker({ value, onChange }: DashboardPeri
                   setRangeTarget('end');
                   setDisplayYear(getYear(endMonth));
                 }}
-                className={`rounded-xl border px-3 py-2 text-left transition ${
+                className={`rounded-2xl border px-3 py-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 focus-visible:ring-offset-2 ${
                   rangeTarget === 'end'
                     ? 'border-slate-900 bg-slate-900 text-white'
-                    : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100'
+                    : 'border-slate-200 bg-slate-50 text-slate-600 hover:border-slate-300 hover:bg-slate-100'
                 }`}
               >
                 <span className="block text-[11px] uppercase tracking-wide opacity-80">Fim</span>
@@ -257,19 +278,21 @@ export default function DashboardPeriodPicker({ value, onChange }: DashboardPeri
             </div>
           )}
 
-          <div className="mb-3 flex items-center justify-between">
+          <div className="mb-4 flex items-center justify-between">
             <button
               type="button"
               onClick={() => setDisplayYear((current) => current - 1)}
-              className="rounded-lg border border-slate-200 p-2 text-slate-500 transition hover:bg-slate-50"
+              aria-label="Ano anterior"
+              className="rounded-2xl border border-slate-200 p-2.5 text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 focus-visible:ring-offset-2"
             >
               <ChevronLeft className="h-4 w-4" />
             </button>
-            <span className="text-sm font-semibold text-slate-700">{displayYear}</span>
+            <span className="text-sm font-semibold tracking-[0.08em] text-slate-700">{displayYear}</span>
             <button
               type="button"
               onClick={() => setDisplayYear((current) => current + 1)}
-              className="rounded-lg border border-slate-200 p-2 text-slate-500 transition hover:bg-slate-50"
+              aria-label="Próximo ano"
+              className="rounded-2xl border border-slate-200 p-2.5 text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 focus-visible:ring-offset-2"
             >
               <ChevronRight className="h-4 w-4" />
             </button>
@@ -294,11 +317,11 @@ export default function DashboardPeriodPicker({ value, onChange }: DashboardPeri
 
                     handleRangeMonthSelection(monthIndex);
                   }}
-                  className={`rounded-xl px-3 py-2 text-sm font-medium transition ${
+                  className={`min-h-[44px] rounded-2xl px-3 py-3 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 focus-visible:ring-offset-2 ${
                     monthSelectionState === 'selected' || monthSelectionState === 'edge'
                       ? 'bg-slate-900 text-white shadow-sm'
                       : monthSelectionState === 'between'
-                        ? 'bg-blue-50 text-blue-700'
+                        ? 'bg-sky-50 text-sky-700'
                         : 'bg-slate-50 text-slate-600 hover:bg-slate-100'
                   }`}
                 >
@@ -314,7 +337,7 @@ export default function DashboardPeriodPicker({ value, onChange }: DashboardPeri
                   onChange({ kind: 'all' });
                   setIsOpen(false);
                 }}
-                className={`col-span-3 rounded-xl px-3 py-2 text-sm font-semibold transition ${
+                className={`col-span-3 min-h-[44px] rounded-2xl px-3 py-3 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 focus-visible:ring-offset-2 ${
                   value.kind === 'all'
                     ? 'bg-slate-900 text-white shadow-sm'
                     : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
