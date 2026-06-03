@@ -1,0 +1,60 @@
+name: Daily recurring expenses generation
+
+on:
+  schedule:
+    # 03:05 UTC = 00:05 BRT. Runs once a day, calls the Cloud Run cron endpoint.
+    - cron: '5 3 * * *'
+  workflow_dispatch:
+    inputs:
+      data_referencia:
+        description: 'Optional reference date (YYYY-MM-DD). Defaults to today in BRT when empty.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate required secrets
+        env:
+          CRON_SECRET: ${{ secrets.RECURRING_EXPENSES_CRON_SECRET }}
+          BASE_URL: ${{ secrets.CLOUD_RUN_BASE_URL }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::RECURRING_EXPENSES_CRON_SECRET secret is not configured."
+            exit 1
+          fi
+          if [ -z "$BASE_URL" ]; then
+            echo "::error::CLOUD_RUN_BASE_URL secret is not configured."
+            exit 1
+          fi
+
+      - name: Call recurring expenses endpoint
+        env:
+          CRON_SECRET: ${{ secrets.RECURRING_EXPENSES_CRON_SECRET }}
+          BASE_URL: ${{ secrets.CLOUD_RUN_BASE_URL }}
+          DATA_REFERENCIA: ${{ github.event.inputs.data_referencia }}
+        run: |
+          if [ -n "$DATA_REFERENCIA" ]; then
+            payload="{\"data_referencia\":\"$DATA_REFERENCIA\"}"
+          else
+            payload='{}'
+          fi
+          response_file=$(mktemp)
+          status=$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+            --max-time 60 \
+            -X POST \
+            -H "X-Cron-Secret: $CRON_SECRET" \
+            -H "Content-Type: application/json" \
+            --data "$payload" \
+            "${BASE_URL%/}/api/cron/recurring-expenses")
+          echo "HTTP $status"
+          cat "$response_file"
+          echo
+          if [ "$status" != "200" ]; then
+            exit 1
+          fi

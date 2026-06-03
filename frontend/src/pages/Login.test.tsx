@@ -1,0 +1,319 @@
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import Login from './Login';
+
+const mockSignInWithOtp = vi.fn();
+const mockGetSession = vi.fn();
+const mockClearBrowserAuthState = vi.fn();
+const mockRequestTestMagicLink = vi.fn();
+const mockLoadBrowserAdminLoginNotice = vi.fn();
+const mockClearBrowserAdminLoginNotice = vi.fn();
+const mockUseAuth = vi.fn();
+const mockEmitClientTelemetry = vi.fn();
+
+vi.mock('@/features/auth/lib/supabaseBrowserSession', () => ({
+  clearBrowserAuthState: (...args: unknown[]) => mockClearBrowserAuthState(...args),
+  supabase: {
+    auth: {
+      getSession: (...args: unknown[]) => mockGetSession(...args),
+      signInWithOtp: (...args: unknown[]) => mockSignInWithOtp(...args),
+    },
+  },
+}));
+
+vi.mock('@/features/admin/api', () => ({
+  localDevBypassEnabled: false,
+  requestTestMagicLink: (...args: unknown[]) => mockRequestTestMagicLink(...args),
+}));
+
+vi.mock('@/hooks/useAuth', () => ({
+  useAuth: () => mockUseAuth(),
+}));
+
+vi.mock('@/features/observability/clientTelemetry', () => ({
+  emitClientTelemetry: (...args: unknown[]) => mockEmitClientTelemetry(...args),
+  ensureSupportCodeInMessage: (message: string, clientEventId?: string) =>
+    clientEventId && !/c[oó]digo de suporte:/i.test(message)
+      ? `${message} Código de suporte: ${clientEventId}`
+      : message,
+}));
+
+vi.mock('@/features/auth/lib/browserState', async () => {
+  const actual = await vi.importActual<typeof import('@/features/auth/lib/browserState')>('@/features/auth/lib/browserState');
+  return {
+    ...actual,
+    browserAdminAuthTestModeEnabled: () => import.meta.env.VITE_AUTH_TEST_MODE === 'true',
+    loadBrowserAdminLoginNotice: (...args: unknown[]) => mockLoadBrowserAdminLoginNotice(...args),
+    clearBrowserAdminLoginNotice: (...args: unknown[]) => mockClearBrowserAdminLoginNotice(...args),
+  };
+});
+
+describe('Login', () => {
+  beforeEach(() => {
+    mockSignInWithOtp.mockReset();
+    mockGetSession.mockReset();
+    mockClearBrowserAuthState.mockReset();
+    mockRequestTestMagicLink.mockReset();
+    mockLoadBrowserAdminLoginNotice.mockReset();
+    mockClearBrowserAdminLoginNotice.mockReset();
+    mockUseAuth.mockReset();
+    mockEmitClientTelemetry.mockReset();
+    mockLoadBrowserAdminLoginNotice.mockReturnValue(null);
+    mockGetSession.mockResolvedValue({ data: { session: null } });
+    mockUseAuth.mockReturnValue({
+      authenticated: false,
+      loading: false,
+      localBypass: false,
+    });
+    vi.stubEnv('VITE_AUTH_TEST_MODE', 'false');
+    window.history.pushState({}, '', '/login');
+  });
+
+  it('requests a magic link directly from the Supabase browser client', async () => {
+    mockSignInWithOtp.mockResolvedValue({ data: {}, error: null });
+
+    render(<Login />);
+
+    await userEvent.type(screen.getByLabelText('E-mail de acesso'), 'admin@example.com');
+    await userEvent.click(screen.getByRole('button', { name: 'Enviar magic link' }));
+
+    await waitFor(() => {
+      expect(mockSignInWithOtp).toHaveBeenCalledWith({
+        email: 'admin@example.com',
+        options: {
+          shouldCreateUser: false,
+          emailRedirectTo: new URL('auth/callback', new URL(import.meta.env.BASE_URL, window.location.origin)).toString(),
+        },
+      });
+    });
+    expect(await screen.findByText('Link mágico enviado!')).toBeInTheDocument();
+    expect(mockRequestTestMagicLink).not.toHaveBeenCalled();
+  });
+
+  it('uses the loopback auth test endpoint only in auth test mode', async () => {
+    vi.stubEnv('VITE_AUTH_TEST_MODE', 'true');
+    mockRequestTestMagicLink.mockResolvedValue({ magicLink: { link: 'http://127.0.0.1:8080/__test__/auth/verify?token_hash=1' } });
+
+    render(<Login />);
+
+    await userEvent.type(screen.getByLabelText('E-mail de acesso'), 'admin@example.com');
+    await userEvent.click(screen.getByRole('button', { name: 'Enviar magic link' }));
+
+    await waitFor(() => {
+      expect(mockRequestTestMagicLink).toHaveBeenCalledWith(
+        'admin@example.com',
+        new URL('auth/callback', new URL(import.meta.env.BASE_URL, window.location.origin)).toString(),
+      );
+    });
+    expect(mockSignInWithOtp).not.toHaveBeenCalled();
+    expect(await screen.findByText('Link mágico enviado!')).toBeInTheDocument();
+  });
+
+  it('surfaces rate limiting and masks user enumeration failures', async () => {
+    mockSignInWithOtp
+      .mockResolvedValueOnce({ data: {}, error: { message: 'For security purposes, you can only request this after 8 seconds.' } })
+      .mockResolvedValueOnce({ data: {}, error: { message: 'User not found' } });
+
+    const { rerender } = render(<Login />);
+
+    await userEvent.type(screen.getByLabelText('E-mail de acesso'), 'admin@example.com');
+    await userEvent.click(screen.getByRole('button', { name: 'Enviar magic link' }));
+
+    expect(await screen.findByText(/muitos pedidos de login/i)).toBeInTheDocument();
+
+    rerender(<Login />);
+    await userEvent.clear(screen.getByLabelText('E-mail de acesso'));
+    await userEvent.type(screen.getByLabelText('E-mail de acesso'), 'blocked@example.com');
+    await userEvent.click(screen.getByRole('button', { name: 'Enviar magic link' }));
+
+    expect(await screen.findByText('Link mágico enviado!')).toBeInTheDocument();
+  });
+
+  it('shows login notices persisted by the auth flow', () => {
+    mockLoadBrowserAdminLoginNotice.mockReturnValue({
+      message: 'Seu usuário não está autorizado a acessar o painel.',
+    });
+
+    render(<Login />);
+
+    expect(screen.getByText(/não está autorizado/i)).toBeInTheDocument();
+    expect(mockClearBrowserAdminLoginNotice).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the operational auth banners from the query string', () => {
+    window.history.pushState({}, '', '/login?reason=auth_unavailable&requestId=req_test_1');
+
+    render(<Login />);
+
+    expect(screen.getByText(/login está temporariamente indisponível/i)).toBeInTheDocument();
+    expect(screen.getByText(/c[oó]digo de suporte: req_test_1/i)).toBeInTheDocument();
+  });
+
+  it('surfaces a generic request failure when the Supabase browser client errors unexpectedly', async () => {
+    mockSignInWithOtp.mockResolvedValue({ data: {}, error: { message: 'unexpected upstream failure' } });
+    mockEmitClientTelemetry.mockReturnValue('cli_123456789abc');
+
+    render(<Login />);
+
+    await userEvent.type(screen.getByLabelText('E-mail de acesso'), 'admin@example.com');
+    await userEvent.click(screen.getByRole('button', { name: 'Enviar magic link' }));
+
+    expect(await screen.findByText(/não foi possível enviar o link de acesso agora/i)).toBeInTheDocument();
+    expect(screen.getByText(/c[oó]digo de suporte: cli_123456789abc/i)).toBeInTheDocument();
+    expect(mockEmitClientTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'magic_link_request_failed',
+      phase: 'login_submit',
+    }));
+  });
+
+  it('redirects to the app root when auth is already established', async () => {
+    const originalLocation = window.location;
+    const replaceSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        ...originalLocation,
+        replace: replaceSpy,
+      },
+    });
+    mockUseAuth.mockReturnValue({
+      authenticated: true,
+      loading: false,
+      localBypass: false,
+    });
+
+    render(<Login />);
+
+    await waitFor(() => {
+      expect(replaceSpy).toHaveBeenCalledWith(
+        new URL(import.meta.env.BASE_URL, window.location.origin).toString(),
+      );
+    });
+
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: originalLocation,
+    });
+  });
+
+  it('redirects to the app root when a valid Supabase browser session already exists on /login', async () => {
+    const originalLocation = window.location;
+    const replaceSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        ...originalLocation,
+        replace: replaceSpy,
+      },
+    });
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: 'header.payload.signature',
+        },
+      },
+    });
+
+    render(<Login />);
+
+    await waitFor(() => {
+      expect(replaceSpy).toHaveBeenCalledWith(
+        new URL(import.meta.env.BASE_URL, window.location.origin).toString(),
+      );
+    });
+
+    expect(mockClearBrowserAuthState).not.toHaveBeenCalled();
+    expect(mockEmitClientTelemetry).not.toHaveBeenCalledWith(expect.objectContaining({
+      phase: 'login_bootstrap',
+    }));
+
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: originalLocation,
+    });
+  });
+
+  it('clears unusable local auth state on /login without persisting a user-facing notice', async () => {
+    mockGetSession.mockResolvedValue({
+      data: {
+        session: {
+          access_token: 'not-a-jwt',
+        },
+      },
+    });
+
+    render(<Login />);
+
+    await waitFor(() => {
+      expect(mockClearBrowserAuthState).toHaveBeenCalledTimes(1);
+    });
+
+    expect(mockEmitClientTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'login_bootstrap_cleared',
+      phase: 'login_bootstrap',
+      diagnostic: 'auth_state_unusable',
+    }));
+    expect(screen.queryByText(/não foi possível validar sua sessão/i)).not.toBeInTheDocument();
+  });
+
+  it('clears unusable local auth state when browser session bootstrap fails on /login', async () => {
+    mockGetSession.mockRejectedValue(new Error('storage read failed'));
+
+    render(<Login />);
+
+    await waitFor(() => {
+      expect(mockClearBrowserAuthState).toHaveBeenCalledTimes(1);
+    });
+
+    expect(mockEmitClientTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'login_bootstrap_failed',
+      phase: 'login_bootstrap',
+      diagnostic: 'login_bootstrap_session_read_failed',
+    }));
+    expect(screen.queryByText(/login está temporariamente indisponível/i)).not.toBeInTheDocument();
+  });
+
+  it('redirects immediately when local bypass is already active', async () => {
+    const originalLocation = window.location;
+    const replaceSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: {
+        ...originalLocation,
+        replace: replaceSpy,
+      },
+    });
+    mockUseAuth.mockReturnValue({
+      authenticated: false,
+      loading: false,
+      localBypass: true,
+    });
+
+    render(<Login />);
+
+    await waitFor(() => {
+      expect(replaceSpy).toHaveBeenCalledWith(
+        new URL(import.meta.env.BASE_URL, window.location.origin).toString(),
+      );
+    });
+
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: originalLocation,
+    });
+  });
+
+  it('keeps the login screen stable while auth hydration is still loading', () => {
+    mockUseAuth.mockReturnValue({
+      authenticated: false,
+      loading: true,
+      localBypass: false,
+    });
+
+    render(<Login />);
+
+    expect(screen.getByRole('button', { name: 'Enviar magic link' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Finance Copilot' })).toBeInTheDocument();
+  });
+});

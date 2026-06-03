@@ -1,0 +1,58 @@
+{
+  "name": "financemgmtbot-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
+    "test:e2e:smoke": "playwright test app.smoke.spec.ts",
+    "test:e2e:integration": "playwright test auth.integration.spec.ts",
+    "test:e2e:install": "playwright install chromium firefox",
+    "build": "tsc && vite build",
+    "postbuild": "node ./scripts/pages-fallback.mjs copy",
+    "verify:build-env": "node ./scripts/validate-build-env.mjs",
+    "verify:bundle": "node ./scripts/verify-bundle.mjs",
+    "verify:pages-fallback": "node ./scripts/pages-fallback.mjs verify",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.101.1",
+    "@tanstack/react-table": "^8.11.8",
+    "@tremor/react": "^3.13.4",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.1.0",
+    "date-fns": "^3.3.1",
+    "lucide-react": "^0.323.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.22.0",
+    "recharts": "^2.12.0",
+    "tailwind-merge": "^2.2.1"
+  },
+  "overrides": {
+    "lodash": "^4.17.24"
+  },
+  "devDependencies": {
+    "@headlessui/react": "^1.7.18",
+    "@headlessui/tailwindcss": "^0.2.0",
+    "@playwright/test": "^1.55.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^20.11.20",
+    "@types/react": "^18.2.43",
+    "@types/react-dom": "^18.2.17",
+    "@vitejs/plugin-react": "^4.2.1",
+    "@vitest/coverage-v8": "^4.1.0",
+    "autoprefixer": "^10.4.17",
+    "jsdom": "^29.0.0",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.2.2",
+    "vite": "^5.0.8",
+    "vitest": "^4.1.0"
+  }
+}

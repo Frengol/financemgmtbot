@@ -1,0 +1,246 @@
+import { useEffect, useState } from 'react';
+import { Activity, Mail, Loader2, CheckCircle2 } from 'lucide-react';
+import {
+  browserAdminAuthTestModeEnabled,
+  clearBrowserAdminLoginNotice,
+  isJwtShapeValid,
+  loadBrowserAdminLoginNotice,
+} from '@/features/auth/lib/browserState';
+import { localDevBypassEnabled, requestTestMagicLink } from '@/features/admin/api';
+import { useAuth } from '@/hooks/useAuth';
+import { clearBrowserAuthState, supabase } from '@/features/auth/lib/supabaseBrowserSession';
+import { emitClientTelemetry, ensureSupportCodeInMessage } from '@/features/observability/clientTelemetry';
+
+function buildCallbackUrl() {
+  return new URL('auth/callback', new URL(import.meta.env.BASE_URL, window.location.origin)).toString();
+}
+
+function buildAppRootUrl() {
+  return new URL(import.meta.env.BASE_URL, window.location.origin).toString();
+}
+
+function isRateLimitedMessage(message: string) {
+  const normalized = message.toLowerCase();
+  return normalized.includes('rate limit') || normalized.includes('for security purposes');
+}
+
+function shouldMaskIdentityLookupFailure(message: string) {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('user not found')
+    || normalized.includes('signup')
+    || normalized.includes('sign up')
+    || normalized.includes('invalid login credentials')
+  );
+}
+
+export default function Login() {
+  const { authenticated, loading, localBypass } = useAuth();
+  const searchParams = new URLSearchParams(window.location.search);
+  const reason = searchParams.get('reason');
+  const requestId = searchParams.get('requestId');
+  const [email, setEmail] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [success, setSuccess] = useState(false);
+  const [error, setError] = useState(() => {
+    const loginNotice = loadBrowserAdminLoginNotice();
+    clearBrowserAdminLoginNotice();
+    return loginNotice?.message || '';
+  });
+
+  if (localDevBypassEnabled) {
+    window.location.replace(new URL(import.meta.env.BASE_URL, window.location.origin).toString());
+    return null;
+  }
+
+  useEffect(() => {
+    if (loading) {
+      return;
+    }
+
+    if (authenticated || localBypass) {
+      window.location.replace(buildAppRootUrl());
+    }
+  }, [authenticated, loading, localBypass]);
+
+  useEffect(() => {
+    if (browserAdminAuthTestModeEnabled() || authenticated || localBypass) {
+      return;
+    }
+
+    let active = true;
+
+    const bootstrapLoginSession = async () => {
+      try {
+        const { data } = await supabase.auth.getSession();
+        const accessToken = data.session?.access_token ?? null;
+
+        if (!active) {
+          return;
+        }
+
+        if (!accessToken) {
+          return;
+        }
+
+        if (!isJwtShapeValid(accessToken)) {
+          await clearBrowserAuthState();
+          emitClientTelemetry({
+            event: 'login_bootstrap_cleared',
+            phase: 'login_bootstrap',
+            errorCode: 'AUTH_SESSION_INVALID',
+            diagnostic: 'auth_state_unusable',
+          });
+          return;
+        }
+
+        window.location.replace(buildAppRootUrl());
+      } catch {
+        await clearBrowserAuthState();
+        if (!active) {
+          return;
+        }
+        emitClientTelemetry({
+          event: 'login_bootstrap_failed',
+          phase: 'login_bootstrap',
+          errorCode: 'AUTH_SESSION_STORAGE_UNAVAILABLE',
+          diagnostic: 'login_bootstrap_session_read_failed',
+        });
+      }
+    };
+
+    void bootstrapLoginSession();
+
+    return () => {
+      active = false;
+    };
+  }, [authenticated, localBypass]);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+    setError('');
+
+    try {
+      if (browserAdminAuthTestModeEnabled()) {
+        await requestTestMagicLink(email, buildCallbackUrl());
+        setSuccess(true);
+        return;
+      }
+
+      const { error: requestError } = await supabase.auth.signInWithOtp({
+        email,
+        options: {
+          shouldCreateUser: false,
+          emailRedirectTo: buildCallbackUrl(),
+        },
+      });
+
+      if (requestError) {
+        const upstreamMessage = requestError.message || '';
+        if (isRateLimitedMessage(upstreamMessage)) {
+          throw new Error('Muitos pedidos de login em pouco tempo. Aguarde alguns minutos e tente novamente.');
+        }
+        if (shouldMaskIdentityLookupFailure(upstreamMessage)) {
+          setSuccess(true);
+          return;
+        }
+        throw new Error('Não foi possível enviar o link de acesso agora. Tente novamente em instantes.');
+      }
+
+      setSuccess(true);
+    } catch (requestError) {
+      const clientEventId = emitClientTelemetry({
+        event: 'magic_link_request_failed',
+        phase: 'login_submit',
+        errorCode: 'MAGIC_LINK_REQUEST_FAILED',
+        diagnostic: 'magic_link_request_failed',
+      });
+      const baseMessage = requestError instanceof Error
+        ? requestError.message
+        : 'Não foi possível solicitar o magic link agora.';
+      setError(ensureSupportCodeInMessage(baseMessage, clientEventId));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
+      <div className="max-w-md w-full bg-white rounded-2xl shadow-sm border p-8 space-y-6">
+        <div className="flex flex-col items-center justify-center space-y-3">
+          <div className="h-12 w-12 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center">
+            <Activity className="h-6 w-6" />
+          </div>
+          <h2 className="text-2xl font-semibold text-slate-800">Finance Copilot</h2>
+          <p className="text-slate-500 text-sm text-center">
+            Acesso restrito via magic link. <br /> Informe seu e-mail para receber o acesso.
+          </p>
+        </div>
+
+        {success ? (
+          <div className="bg-emerald-50 text-emerald-700 p-4 rounded-lg flex flex-col items-center gap-2 text-center border border-emerald-100">
+            <CheckCircle2 className="h-6 w-6" />
+            <p className="text-sm font-medium">Link mágico enviado!</p>
+            <p className="text-xs opacity-90">Verifique a caixa de entrada (e o Spam) do e-mail <b>{email}</b> para fazer login.</p>
+          </div>
+        ) : (
+          <form onSubmit={handleLogin} className="space-y-4">
+            {reason === 'unauthorized' && (
+              <div className="bg-amber-50 text-amber-700 p-3 rounded-lg text-sm border border-amber-100">
+                Este usuário autenticou, mas não está autorizado a acessar o painel administrativo.
+              </div>
+            )}
+            {reason === 'auth_unavailable' && (
+              <div className="bg-amber-50 text-amber-700 p-3 rounded-lg text-sm border border-amber-100">
+                <p>O login está temporariamente indisponível. Tente novamente em instantes.</p>
+                {requestId && <p className="mt-1 text-xs">Código de suporte: {requestId}</p>}
+              </div>
+            )}
+            {error && (
+              <div className="bg-rose-50 text-rose-600 p-3 rounded-lg text-sm border border-rose-100">
+                {error}
+              </div>
+            )}
+            
+            <div className="space-y-1.5">
+              <label htmlFor="email" className="text-xs font-medium text-slate-700">
+                E-mail de acesso
+              </label>
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
+                  <Mail className="h-4 w-4" />
+                </div>
+                <input
+                  id="email"
+                  name="email"
+                  type="email"
+                  autoComplete="email"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full pl-10 pr-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-shadow bg-slate-50 text-slate-900"
+                  placeholder="seu e-mail"
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={submitting || !email}
+              className="w-full flex justify-center items-center py-2.5 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {submitting ? (
+                <Loader2 className="h-5 w-5 animate-spin" />
+              ) : (
+                'Enviar magic link'
+              )}
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
