@@ -1,0 +1,9 @@
+quart>=0.19.6
+hypercorn>=0.16.0
+httpx==0.27.2
+supabase==2.12.0
+openai==1.55.3
+groq==0.13.0
+python-json-logger==2.0.7
+google-generativeai==0.8.3
+cryptography>=46.0.0

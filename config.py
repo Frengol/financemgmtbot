@@ -1,0 +1,233 @@
+import os
+import logging
+import traceback
+import sys
+from pathlib import Path
+from urllib.parse import urlsplit
+from unittest.mock import MagicMock
+from pythonjsonlogger import jsonlogger
+from supabase import create_client, Client
+from openai import AsyncOpenAI
+from groq import AsyncGroq
+import google.generativeai as genai
+
+logHandler = logging.StreamHandler()
+formatter = jsonlogger.JsonFormatter('%(asctime)s %(levelname)s %(message)s %(module)s')
+logHandler.setFormatter(formatter)
+logger = logging.getLogger(__name__)
+logger.addHandler(logHandler)
+logger.setLevel(logging.INFO)
+
+
+DEFAULT_FRONTEND_ALLOWED_ORIGINS = (
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+)
+
+
+def load_local_env():
+    if "pytest" in sys.modules:
+        return
+
+    env_path = Path(".env")
+    if not env_path.exists():
+        return
+
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+load_local_env()
+
+
+def normalize_frontend_origin(origin: str):
+    normalized = (origin or "").strip()
+    if not normalized:
+        return ""
+
+    parsed = urlsplit(normalized)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    return normalized.rstrip("/")
+
+
+def parse_frontend_allowed_origins(raw_origins: str | None):
+    source = raw_origins or ",".join(DEFAULT_FRONTEND_ALLOWED_ORIGINS)
+    return frozenset(
+        normalized
+        for normalized in (normalize_frontend_origin(origin) for origin in source.split(","))
+        if normalized
+    )
+
+
+def is_loopback_origin(origin: str):
+    normalized = normalize_frontend_origin(origin)
+    parsed = urlsplit(normalized)
+    hostname = (parsed.hostname or "").lower()
+    return hostname in {"localhost", "127.0.0.1", "::1"} or hostname.startswith("127.")
+
+
+def resolve_frontend_allowed_origins(raw_origins: str | None, frontend_public_url: str | None):
+    if raw_origins and raw_origins.strip():
+        return parse_frontend_allowed_origins(raw_origins)
+
+    derived_public_origin = normalize_frontend_origin(frontend_public_url or "")
+    if derived_public_origin:
+        if is_loopback_origin(derived_public_origin):
+            return frozenset({*DEFAULT_FRONTEND_ALLOWED_ORIGINS, derived_public_origin})
+        return frozenset({derived_public_origin})
+
+    return parse_frontend_allowed_origins(None)
+
+
+def managed_runtime_enabled():
+    return any(value for value in (K_SERVICE, K_REVISION, K_CONFIGURATION))
+
+
+def validate_frontend_runtime_config(frontend_public_url: str, frontend_allowed_origins: frozenset[str]):
+    if not managed_runtime_enabled():
+        return
+
+    if not frontend_public_url:
+        logger.critical({
+            "event": "frontend_cors_configuration_invalid",
+            "reason": "missing_frontend_public_url",
+        })
+        raise RuntimeError("AppSec Fatal Error: FRONTEND_PUBLIC_URL não configurada para runtime gerenciado.")
+
+    public_origins = [origin for origin in frontend_allowed_origins if not is_loopback_origin(origin)]
+    if not public_origins:
+        logger.critical({
+            "event": "frontend_cors_configuration_invalid",
+            "reason": "missing_public_frontend_origin",
+        })
+        raise RuntimeError("AppSec Fatal Error: FRONTEND_ALLOWED_ORIGINS não resolve uma origem pública válida para runtime gerenciado.")
+
+
+def normalize_public_url(raw_url: str | None, *, trailing_slash: bool = False):
+    normalized = (raw_url or "").strip()
+    if not normalized:
+        return ""
+
+    parsed = urlsplit(normalized)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+
+    base = normalized.rstrip("/")
+    return f"{base}/" if trailing_slash else base
+
+
+REQUIRED_VARS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_SECRET_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"]
+for var in REQUIRED_VARS:
+    if not os.environ.get(var):
+        logger.critical({"event": "startup_failed", "reason": f"Missing variable {var}"})
+        raise RuntimeError(f"AppSec Fatal Error: Variável de ambiente {var} não configurada.")
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+SECRET_TOKEN = os.environ.get("TELEGRAM_SECRET_TOKEN")
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+ADMIN_EMAILS = frozenset(
+    email.strip().lower()
+    for email in (os.environ.get("SUPABASE_ADMIN_EMAILS") or "").split(",")
+    if email.strip()
+)
+ADMIN_USER_IDS = frozenset(
+    user_id.strip()
+    for user_id in (os.environ.get("SUPABASE_ADMIN_USER_IDS") or "").split(",")
+    if user_id.strip()
+)
+FRONTEND_PUBLIC_URL = normalize_public_url(os.environ.get("FRONTEND_PUBLIC_URL"), trailing_slash=True)
+FRONTEND_ALLOWED_ORIGINS = resolve_frontend_allowed_origins(
+    os.environ.get("FRONTEND_ALLOWED_ORIGINS"),
+    FRONTEND_PUBLIC_URL,
+)
+K_SERVICE = (os.environ.get("K_SERVICE") or "").strip()
+K_REVISION = (os.environ.get("K_REVISION") or "").strip()
+K_CONFIGURATION = (os.environ.get("K_CONFIGURATION") or "").strip()
+APP_COMMIT_SHA = (os.environ.get("APP_COMMIT_SHA") or "").strip()
+APP_RELEASE_SHA = (os.environ.get("APP_RELEASE_SHA") or APP_COMMIT_SHA[:12]).strip()
+AUTH_TEST_MODE = (os.environ.get("AUTH_TEST_MODE") or "").strip().lower() == "true"
+AUTH_TEST_DATA_SOURCE = (os.environ.get("AUTH_TEST_DATA_SOURCE") or "").strip().lower()
+RECURRING_EXPENSES_CRON_SECRET = (os.environ.get("RECURRING_EXPENSES_CRON_SECRET") or "").strip()
+
+
+def resolve_allow_local_dev_auth():
+    configured = (os.environ.get("ALLOW_LOCAL_DEV_AUTH") or "").strip().lower()
+    if configured:
+        return configured == "true"
+
+    return not managed_runtime_enabled() and not AUTH_TEST_MODE
+
+
+ALLOW_LOCAL_DEV_AUTH = resolve_allow_local_dev_auth()
+
+
+def auth_test_database_mode_enabled():
+    return AUTH_TEST_MODE and AUTH_TEST_DATA_SOURCE == "database"
+
+
+def auth_test_seeded_mode_enabled():
+    return AUTH_TEST_MODE and not auth_test_database_mode_enabled()
+
+
+def resolve_transactions_table_name():
+    configured = (os.environ.get("SUPABASE_GASTOS_TABLE") or "").strip()
+    if configured:
+        return configured
+
+    if "pytest" in sys.modules or auth_test_seeded_mode_enabled() or managed_runtime_enabled():
+        return "gastos"
+
+    return "gastos_qa"
+
+
+TRANSACTIONS_TABLE = resolve_transactions_table_name()
+
+validate_frontend_runtime_config(FRONTEND_PUBLIC_URL, FRONTEND_ALLOWED_ORIGINS)
+logger.info({
+    "event": "frontend_cors_configured",
+    "frontend_public_url": FRONTEND_PUBLIC_URL or None,
+    "resolved_origins": sorted(FRONTEND_ALLOWED_ORIGINS),
+})
+logger.info({
+    "event": "database_tables_configured",
+    "transactions_table": TRANSACTIONS_TABLE,
+})
+logger.info({
+    "event": "runtime_metadata_configured",
+    "commit_sha": APP_COMMIT_SHA or None,
+    "release_sha": APP_RELEASE_SHA or None,
+    "service": K_SERVICE or None,
+    "revision": K_REVISION or None,
+})
+
+def mascarar_segredos(texto):
+    if not isinstance(texto, str): return texto
+    for var_name in REQUIRED_VARS:
+        val = os.environ.get(var_name)
+        if val and len(val) > 4:
+            texto = texto.replace(val, f"[MASKED_{var_name}]")
+    return texto
+
+try:
+    supa_url = os.environ.get("SUPABASE_URL") or ""
+    supa_key = os.environ.get("SUPABASE_KEY") or ""
+    if auth_test_seeded_mode_enabled():
+        supabase = MagicMock(name="auth_test_supabase")
+    else:
+        supabase: Client = create_client(supa_url, supa_key)
+    groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY") or "")
+    deepseek_client = AsyncOpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY") or "", base_url="https://api.deepseek.com")
+    genai.configure(api_key=os.environ.get("GEMINI_API_KEY") or "")
+    logger.info({"event": "clients_initialized", "status": "success"})
+except Exception:
+    logger.critical({"event": "init_error", "error": mascarar_segredos(traceback.format_exc())})
+    raise
