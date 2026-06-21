@@ -108,6 +108,7 @@ def test_backend_cloud_build_contract_uses_dockerfile_image_deploy():
 
     assert 'gcr.io/cloud-builders/docker' in cloudbuild
     assert 'gcr.io/cloud-builders/gcloud' in cloudbuild
+    assert 'id: "resolve-secret-versions"' in cloudbuild
     assert '--image' in cloudbuild
     assert 'gcr.io/k8s-skaffold/pack' not in cloudbuild
     assert '--source' not in cloudbuild
@@ -115,6 +116,8 @@ def test_backend_cloud_build_contract_uses_dockerfile_image_deploy():
     assert 'IMAGE_REF=$$(cat /workspace/image_ref.txt)' in cloudbuild
     assert '--image "$$IMAGE_REF"' in cloudbuild
     assert '${IMAGE_REF}' not in cloudbuild
+    assert '--update-secrets "$$SECRET_ENV_VARS"' in cloudbuild
+    assert ':latest' not in cloudbuild
     assert 'APP_COMMIT_SHA=${COMMIT_SHA}' in cloudbuild
     assert 'APP_RELEASE_SHA=${SHORT_SHA}' in cloudbuild
     assert '--update-labels "commit-sha=${SHORT_SHA}"' in cloudbuild
@@ -123,6 +126,12 @@ def test_backend_cloud_build_contract_uses_dockerfile_image_deploy():
     assert '--concurrency "10"' in cloudbuild
     assert '--timeout "30s"' in cloudbuild
     assert '--memory "512Mi"' in cloudbuild
+    assert 'id: "smoke-runtime-metadata"' in cloudbuild
+    assert '/api/meta/runtime' in cloudbuild
+    assert 'id: "prune-secret-versions"' in cloudbuild
+    assert 'scripts/prune_secret_versions.py' in cloudbuild
+    assert '--execute' in cloudbuild
+    assert '--protected-version-file' in cloudbuild
 
 
 def test_architecture_document_is_not_part_of_public_git_snapshot():

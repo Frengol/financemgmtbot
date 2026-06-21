@@ -70,8 +70,10 @@ Esses valores ficam no Google Secret Manager e sao expostos ao Cloud Run como va
 | `DEEPSEEK_API_KEY` | `DEEPSEEK_API_KEY` | chave da DeepSeek |
 | `GROQ_API_KEY` | `GROQ_API_KEY` | chave da Groq |
 | `GEMINI_API_KEY` | `GEMINI_API_KEY` | chave da Gemini |
-| `RECURRING_EXPENSES_CRON_SECRET` | `RECURRING_EXPENSES_CRON_SECRET` | segredo da rotina diaria |
+| `RECURRING_EXPENSES_CRON_SECRET` | `recurring-expenses-cron-secret` | segredo da rotina diaria |
 | `DATA_ENCRYPTION_KEY` | `DATA_ENCRYPTION_KEY` | opcional, recomendado para criptografia estavel dos payloads pendentes |
+
+O nome da variavel no Cloud Run nao precisa ser igual ao nome do secret. O `cloudbuild.yaml` usa substitutions para mapear cada variavel para o secret correto.
 
 ### Variaveis nao secretas do Cloud Run
 
@@ -349,6 +351,13 @@ O Cloud Build precisa de permissao para construir imagem, publicar no Artifact R
    - `Service Account User` sobre a conta `cloud-run-financemgmtbot-runtime`;
    - `Logs Writer`.
 
+Para a limpeza automatica de versoes antigas do Secret Manager, conceda tambem permissao apenas nos secrets da aplicacao:
+
+- opcao simples: `Secret Manager Secret Version Manager` em cada secret do app;
+- opcao mais restrita: papel customizado com `secretmanager.secrets.get`, `secretmanager.versions.list` e `secretmanager.versions.destroy`.
+
+Nao conceda `Secret Manager Admin` ao Cloud Build so por causa dessa limpeza. Nao inclua secrets gerenciados pelo Google, como secrets de Developer Connect/GitHub.
+
 Para um ambiente mais rigoroso, limite cada papel apenas aos recursos necessarios. Para o primeiro setup de uma pessoa leiga, o importante e nao usar uma conta pessoal no trigger.
 
 ## 14. Fazer o primeiro deploy no Cloud Run
@@ -381,7 +390,7 @@ gcloud run deploy <SERVICE_NAME> \
   --allow-unauthenticated \
   --service-account cloud-run-financemgmtbot-runtime@<GCP_PROJECT_ID>.iam.gserviceaccount.com \
   --set-env-vars "SUPABASE_URL=<SUPABASE_URL>,SUPABASE_ADMIN_EMAILS=<ADMIN_EMAIL>,SUPABASE_ADMIN_USER_IDS=,SUPABASE_GASTOS_TABLE=gastos,FRONTEND_PUBLIC_URL=<FRONTEND_URL>,FRONTEND_ALLOWED_ORIGINS=<FRONTEND_ORIGIN>,AUTH_TEST_MODE=false,ALLOW_LOCAL_DEV_AUTH=false" \
-  --update-secrets "SUPABASE_KEY=SUPABASE_KEY:latest,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:latest,TELEGRAM_SECRET_TOKEN=TELEGRAM_SECRET_TOKEN:latest,DEEPSEEK_API_KEY=DEEPSEEK_API_KEY:latest,GROQ_API_KEY=GROQ_API_KEY:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,RECURRING_EXPENSES_CRON_SECRET=RECURRING_EXPENSES_CRON_SECRET:latest,DATA_ENCRYPTION_KEY=DATA_ENCRYPTION_KEY:latest"
+  --update-secrets "SUPABASE_KEY=SUPABASE_KEY:1,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:1,TELEGRAM_SECRET_TOKEN=TELEGRAM_SECRET_TOKEN:1,DEEPSEEK_API_KEY=DEEPSEEK_API_KEY:1,GROQ_API_KEY=GROQ_API_KEY:1,GEMINI_API_KEY=GEMINI_API_KEY:1,RECURRING_EXPENSES_CRON_SECRET=recurring-expenses-cron-secret:1,DATA_ENCRYPTION_KEY=DATA_ENCRYPTION_KEY:1"
 ```
 
 Exemplo de valores:
@@ -418,10 +427,57 @@ Depois do primeiro deploy, crie um trigger para usar o `cloudbuild.yaml`.
    - `_AR_REPOSITORY`: `cloud-run-source-deploy`;
    - `_IMAGE_NAME`: `financemgmtbot-git` ou o nome que voce quiser para a imagem;
    - `_SERVICE_NAME`: `<SERVICE_NAME>`;
-   - `_REGION`: `<REGION>`.
+   - `_REGION`: `<REGION>`;
+   - `_SECRET_ID_SUPABASE_KEY`: `SUPABASE_KEY`;
+   - `_SECRET_ID_TELEGRAM_BOT_TOKEN`: `TELEGRAM_BOT_TOKEN`;
+   - `_SECRET_ID_TELEGRAM_SECRET_TOKEN`: `TELEGRAM_SECRET_TOKEN`;
+   - `_SECRET_ID_DEEPSEEK_API_KEY`: `DEEPSEEK_API_KEY`;
+   - `_SECRET_ID_GROQ_API_KEY`: `GROQ_API_KEY`;
+   - `_SECRET_ID_GEMINI_API_KEY`: `GEMINI_API_KEY`;
+   - `_SECRET_ID_RECURRING_EXPENSES_CRON_SECRET`: `recurring-expenses-cron-secret`;
+   - `_SECRET_ID_DATA_ENCRYPTION_KEY`: `DATA_ENCRYPTION_KEY`;
+   - `_PRUNE_SECRET_VERSIONS`: `true`.
 10. Salve.
 
-O `cloudbuild.yaml` atual carimba `APP_COMMIT_SHA`, `APP_RELEASE_SHA` e a label `commit-sha`. Ele nao recria todos os secrets do servico a cada build. Por isso o primeiro deploy precisa ter deixado as variaveis e secrets corretos.
+O `cloudbuild.yaml` resolve a versao numerica habilitada de cada secret antes do deploy, aplica essas versoes no Cloud Run, valida `/api/meta/runtime` e depois remove versoes antigas. Ele nao le valores de secrets e nao imprime payloads.
+
+### 15.1 Limpeza segura de versoes de secrets
+
+Por padrao, o deploy automatico mantem as 2 versoes habilitadas mais recentes de cada secret gerenciado pelo app e destroi versoes ativas mais antigas. Ele tambem protege versoes ainda referenciadas por revisoes do Cloud Run.
+
+Secrets incluidos na limpeza:
+
+```text
+SUPABASE_KEY
+TELEGRAM_BOT_TOKEN
+TELEGRAM_SECRET_TOKEN
+DEEPSEEK_API_KEY
+GROQ_API_KEY
+GEMINI_API_KEY
+recurring-expenses-cron-secret
+DATA_ENCRYPTION_KEY
+```
+
+`DATA_ENCRYPTION_KEY` e opcional. Se existir, o script nao destroi versoes criadas ha menos de 7 dias, porque essa chave pode ser necessaria para payloads pendentes de aprovacao.
+
+Para ver o que seria destruido sem executar:
+
+```bash
+python3 scripts/prune_secret_versions.py prune \
+  --project <GCP_PROJECT_ID> \
+  --secret SUPABASE_KEY
+```
+
+Para executar manualmente depois de revisar o dry-run:
+
+```bash
+python3 scripts/prune_secret_versions.py prune \
+  --project <GCP_PROJECT_ID> \
+  --secret SUPABASE_KEY \
+  --execute
+```
+
+Se voce precisar pausar a limpeza automatica, altere a substitution `_PRUNE_SECRET_VERSIONS` para `false` no trigger. A aplicacao continua fazendo deploy normalmente, mas as versoes antigas voltam a acumular custo.
 
 ## 16. Configurar GitHub Actions para o frontend
 
@@ -601,6 +657,8 @@ Antes de entregar para outra pessoa usar, confira:
 - Telegram `getWebhookInfo` mostra `<CLOUD_RUN_URL>/`.
 - Bot responde a uma mensagem simples.
 - Workflow `Daily recurring expenses generation` roda manualmente.
+- Cloud Build consegue listar/destroir versoes antigas apenas dos secrets do app.
+- Secret Manager fica com no maximo 2 versoes habilitadas por secret do app, salvo versoes protegidas por revisoes do Cloud Run.
 
 ## 23. Problemas comuns
 
@@ -652,6 +710,15 @@ Verifique:
 - `RECURRING_EXPENSES_CRON_SECRET` igual no GitHub e Cloud Run;
 - `CLOUD_RUN_BASE_URL` correto;
 - logs do workflow no GitHub Actions.
+
+### O deploy falha na limpeza de secrets
+
+Verifique:
+
+- se a service account `cloud-build-financemgmtbot` tem permissao de versao apenas nos secrets do app;
+- se as substitutions `_SECRET_ID_*` batem com os nomes reais no Secret Manager;
+- se `_SECRET_ID_RECURRING_EXPENSES_CRON_SECRET` aponta para `recurring-expenses-cron-secret`, caso esse seja o nome usado no seu projeto;
+- se `DATA_ENCRYPTION_KEY` existe. Ele e opcional, mas, se a substitution apontar para outro nome, ajuste antes do proximo deploy.
 
 ## 24. Referencias oficiais
 
