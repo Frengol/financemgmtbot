@@ -46,11 +46,11 @@ test-frontend-e2e:
 	npm run test:e2e --prefix frontend
 
 audit-backend-deps:
-	pip-audit -r requirements.txt
-	pip-audit -r requirements-dev.txt
+	pip-audit --require-hashes --disable-pip -r requirements.txt
+	pip-audit --require-hashes --disable-pip -r requirements-dev.txt
 
 audit-frontend-deps:
-	npm audit --omit=dev --prefix frontend
+	npm audit --prefix frontend
 
 audit-repo-security:
 	@command -v gitleaks >/dev/null 2>&1 || { \

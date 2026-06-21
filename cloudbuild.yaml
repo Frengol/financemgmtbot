@@ -26,6 +26,35 @@ steps:
           > /workspace/image_ref.txt
 
   - name: "gcr.io/cloud-builders/gcloud"
+    id: "resolve-secret-versions"
+    entrypoint: "python3"
+    args:
+      - "scripts/prune_secret_versions.py"
+      - "resolve-latest"
+      - "--project"
+      - "${PROJECT_ID}"
+      - "--secret-spec"
+      - "SUPABASE_KEY=${_SECRET_ID_SUPABASE_KEY}"
+      - "--secret-spec"
+      - "TELEGRAM_BOT_TOKEN=${_SECRET_ID_TELEGRAM_BOT_TOKEN}"
+      - "--secret-spec"
+      - "TELEGRAM_SECRET_TOKEN=${_SECRET_ID_TELEGRAM_SECRET_TOKEN}"
+      - "--secret-spec"
+      - "DEEPSEEK_API_KEY=${_SECRET_ID_DEEPSEEK_API_KEY}"
+      - "--secret-spec"
+      - "GROQ_API_KEY=${_SECRET_ID_GROQ_API_KEY}"
+      - "--secret-spec"
+      - "GEMINI_API_KEY=${_SECRET_ID_GEMINI_API_KEY}"
+      - "--secret-spec"
+      - "RECURRING_EXPENSES_CRON_SECRET=${_SECRET_ID_RECURRING_EXPENSES_CRON_SECRET}"
+      - "--optional-secret-spec"
+      - "DATA_ENCRYPTION_KEY=${_SECRET_ID_DATA_ENCRYPTION_KEY}"
+      - "--env-output"
+      - "/workspace/secret_env_vars.txt"
+      - "--protected-output"
+      - "/workspace/resolved_secret_versions.json"
+
+  - name: "gcr.io/cloud-builders/gcloud"
     id: "deploy-cloud-run"
     entrypoint: "/bin/sh"
     args:
@@ -33,6 +62,7 @@ steps:
       - |
         set -eu
         IMAGE_REF=$$(cat /workspace/image_ref.txt)
+        SECRET_ENV_VARS=$$(cat /workspace/secret_env_vars.txt)
         gcloud run deploy "${_SERVICE_NAME}" \
           --image "$$IMAGE_REF" \
           --region "${_REGION}" \
@@ -44,8 +74,59 @@ steps:
           --cpu "1" \
           --memory "512Mi" \
           --update-env-vars "APP_COMMIT_SHA=${COMMIT_SHA},APP_RELEASE_SHA=${SHORT_SHA}" \
+          --update-secrets "$$SECRET_ENV_VARS" \
           --update-labels "commit-sha=${SHORT_SHA}" \
           --quiet
+
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: "smoke-runtime-metadata"
+    entrypoint: "/bin/sh"
+    args:
+      - "-c"
+      - |
+        set -eu
+        SERVICE_URL=$$(gcloud run services describe "${_SERVICE_NAME}" \
+          --region "${_REGION}" \
+          --platform managed \
+          --format='value(status.url)')
+        python3 - "$$SERVICE_URL/api/meta/runtime" <<'PY'
+        import sys
+        import urllib.request
+
+        with urllib.request.urlopen(sys.argv[1], timeout=20) as response:
+            if response.status != 200:
+                raise SystemExit(f"unexpected status {response.status}")
+        PY
+
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: "prune-secret-versions"
+    entrypoint: "/bin/sh"
+    args:
+      - "-c"
+      - |
+        set -eu
+        if [ "${_PRUNE_SECRET_VERSIONS}" != "true" ]; then
+          echo "secret version pruning disabled"
+          exit 0
+        fi
+
+        python3 scripts/prune_secret_versions.py prune \
+          --project "${PROJECT_ID}" \
+          --retention 2 \
+          --protected-version-file /workspace/resolved_secret_versions.json \
+          --cloud-run-service "${_SERVICE_NAME}" \
+          --cloud-run-region "${_REGION}" \
+          --min-age-secret "${_SECRET_ID_DATA_ENCRYPTION_KEY}=7" \
+          --ignore-missing-secrets \
+          --execute \
+          --secret "${_SECRET_ID_SUPABASE_KEY}" \
+          --secret "${_SECRET_ID_TELEGRAM_BOT_TOKEN}" \
+          --secret "${_SECRET_ID_TELEGRAM_SECRET_TOKEN}" \
+          --secret "${_SECRET_ID_DEEPSEEK_API_KEY}" \
+          --secret "${_SECRET_ID_GROQ_API_KEY}" \
+          --secret "${_SECRET_ID_GEMINI_API_KEY}" \
+          --secret "${_SECRET_ID_RECURRING_EXPENSES_CRON_SECRET}" \
+          --secret "${_SECRET_ID_DATA_ENCRYPTION_KEY}"
 
 images:
   - "${_AR_HOSTNAME}/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}"
@@ -56,6 +137,15 @@ substitutions:
   _IMAGE_NAME: "financemgmtbot-git"
   _SERVICE_NAME: "financemgmtbot-git"
   _REGION: "southamerica-east1"
+  _SECRET_ID_SUPABASE_KEY: "SUPABASE_KEY"
+  _SECRET_ID_TELEGRAM_BOT_TOKEN: "TELEGRAM_BOT_TOKEN"
+  _SECRET_ID_TELEGRAM_SECRET_TOKEN: "TELEGRAM_SECRET_TOKEN"
+  _SECRET_ID_DEEPSEEK_API_KEY: "DEEPSEEK_API_KEY"
+  _SECRET_ID_GROQ_API_KEY: "GROQ_API_KEY"
+  _SECRET_ID_GEMINI_API_KEY: "GEMINI_API_KEY"
+  _SECRET_ID_RECURRING_EXPENSES_CRON_SECRET: "recurring-expenses-cron-secret"
+  _SECRET_ID_DATA_ENCRYPTION_KEY: "DATA_ENCRYPTION_KEY"
+  _PRUNE_SECRET_VERSIONS: "true"
 
 options:
   logging: "CLOUD_LOGGING_ONLY"
