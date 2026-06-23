@@ -1,0 +1,6 @@
+-r requirements.in
+coverage[toml]
+pip-audit
+pytest
+pytest-asyncio
+pytest-cov

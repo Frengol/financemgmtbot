@@ -1,4 +1,4 @@
-.PHONY: test-backend test-backend-coverage test-backend-live-db-smoke test-frontend test-frontend-coverage test-frontend-e2e audit-backend-deps audit-frontend-deps audit-repo-security pre-push pre-push-full install-git-hooks run-backend-local run-frontend-local run-backend-qa-auth run-frontend-qa-auth
+.PHONY: test-backend test-backend-coverage test-backend-live-db-smoke test-frontend test-frontend-coverage test-frontend-e2e compile-python-locks audit-backend-deps audit-frontend-deps audit-repo-security pre-push pre-push-full install-git-hooks run-backend-local run-frontend-local run-backend-qa-auth run-frontend-qa-auth
 
 BACKEND_COVERAGE_ARGS = \
 	--cov=admin_runtime \
@@ -45,9 +45,13 @@ test-frontend-coverage:
 test-frontend-e2e:
 	npm run test:e2e --prefix frontend
 
+compile-python-locks:
+	uv pip compile requirements.in --python-version 3.11 --generate-hashes --output-file requirements.txt
+	uv pip compile requirements-dev.in --python-version 3.11 --generate-hashes --output-file requirements-dev.txt
+
 audit-backend-deps:
-	pip-audit -r requirements.txt
-	pip-audit -r requirements-dev.txt
+	pip-audit --require-hashes --disable-pip -r requirements.txt
+	pip-audit --require-hashes --disable-pip -r requirements-dev.txt
 
 audit-frontend-deps:
 	npm audit --omit=dev --prefix frontend

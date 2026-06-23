@@ -1,0 +1,9 @@
+quart
+hypercorn
+httpx
+supabase
+openai
+groq
+python-json-logger
+google-generativeai
+cryptography
