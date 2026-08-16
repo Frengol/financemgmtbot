@@ -735,9 +735,10 @@ class TestEnviarMensagemTelegram:
         assert payload["reply_markup"] == markup
 
     @pytest.mark.asyncio
-    async def test_no_client_noop(self):
+    async def test_no_client_is_retryable(self):
         telegram_service.http_client = None
-        await telegram_service.enviar_mensagem_telegram(123, "Hello")
+        with pytest.raises(telegram_service.TelegramRetryableError):
+            await telegram_service.enviar_mensagem_telegram(123, "Hello")
 
 
 class TestEditarMensagemTelegram:
@@ -776,19 +777,19 @@ class TestBaixarArquivoTelegram:
         assert mock_http_client.get.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_returns_none_on_failure(self, mock_http_client):
+    async def test_rejected_file_metadata_is_permanent(self, mock_http_client):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"ok": False}
         mock_http_client.get = AsyncMock(return_value=mock_resp)
 
-        result = await telegram_service.baixar_arquivo_telegram("bad_file_id")
-        assert result is None
+        with pytest.raises(telegram_service.TelegramPermanentError):
+            await telegram_service.baixar_arquivo_telegram("bad_file_id")
 
     @pytest.mark.asyncio
-    async def test_no_client_returns_none(self):
+    async def test_no_client_is_retryable(self):
         telegram_service.http_client = None
-        result = await telegram_service.baixar_arquivo_telegram("any_id")
-        assert result is None
+        with pytest.raises(telegram_service.TelegramRetryableError):
+            await telegram_service.baixar_arquivo_telegram("any_id")
 
 
 # ============================================================
@@ -1013,7 +1014,8 @@ class TestProcessarUpdateAssincrono:
         update = {"update_id": 1004, "message": {"chat": {"id": 123}, "text": "faça um bolo"}}
 
         with patch("handlers.processar_texto_com_llm", new_callable=AsyncMock, return_value=llm_response):
-            await handlers.processar_update_assincrono(update)
+            with pytest.raises(Exception, match="Intenção não reconhecida"):
+                await handlers.processar_update_assincrono(update)
 
         msgs = [c[1]["json"]["text"] for c in mock_http_client.post.call_args_list if "json" in c[1] and "text" in c[1].get("json", {})]
         assert any("Falha" in m or "não reconhecida" in m for m in msgs)
@@ -1138,23 +1140,16 @@ class TestProcessarUpdateAssincrono:
         assert any("Muitas solicitações" in m for m in msgs)
 
     @pytest.mark.asyncio
-    async def test_idempotency_duplicate_skipped(self, mock_http_client):
-        from postgrest.exceptions import APIError
-
-        mock_table = MagicMock()
-        mock_table.insert.return_value.execute.side_effect = APIError(
-            {"message": "duplicate key", "code": "23505", "details": "", "hint": ""}
-        )
-        config.supabase.table = MagicMock(return_value=mock_table)
-
+    async def test_handler_does_not_preclaim_idempotency(self, mock_http_client):
+        config.supabase.table = MagicMock()
         update = {"update_id": 9999, "message": {"chat": {"id": 123}, "text": "test"}}
-        await handlers.processar_update_assincrono(update)
+        with patch(
+            "handlers.processar_texto_com_llm",
+            AsyncMock(return_value={"intencao": "consultar", "filtros_pesquisa": {}}),
+        ), patch("handlers.consultar_no_banco", return_value=(0, 0)):
+            await handlers.processar_update_assincrono(update)
 
-        # Should NOT have processed (no LLM call)
-        # http_client.post should NOT have been called with sendMessage
-        for call in mock_http_client.post.call_args_list:
-            if "json" in call[1]:
-                assert "sendMessage" not in call[0][0]
+        assert all(call.args[0] != "webhook_idempotencia" for call in config.supabase.table.call_args_list)
 
 
 # ============================================================
@@ -1206,13 +1201,13 @@ class TestCallbackQuery:
         await handlers.processar_update_assincrono(update)
 
         urls = [c[0][0] for c in mock_http_client.post.call_args_list]
-        assert any("editMessageReplyMarkup" in url for url in urls)
-        assert not any("editMessageText" in url for url in urls)
+        assert any("editMessageText" in url for url in urls)
+        assert not any("editMessageReplyMarkup" in url for url in urls)
 
         msgs = [
             c[1]["json"]["text"]
             for c in mock_http_client.post.call_args_list
-            if "sendMessage" in c[0][0] and "json" in c[1] and "text" in c[1].get("json", {})
+            if "editMessageText" in c[0][0] and "json" in c[1] and "text" in c[1].get("json", {})
         ]
         assert any(
             "Registros salvos" in m
@@ -1339,7 +1334,7 @@ class TestTelegramWebhook:
         self._setup_supabase()
 
         async with main.app.test_client() as client:
-            with patch.object(webhook_routes, "processar_update_assincrono", new_callable=AsyncMock):
+            with patch.object(webhook_routes, "enqueue_telegram_update", new_callable=AsyncMock):
                 resp = await client.post(
                     "/",
                     json={"update_id": 9001, "message": {"chat": {"id": 1}, "text": "hi"}},
@@ -1365,7 +1360,7 @@ class TestTelegramWebhook:
     async def test_webhook_rejects_large_payload_before_handler(self, mock_http_client):
         async with main.app.test_client() as client:
             with patch.object(webhook_routes, "MAX_WEBHOOK_BODY_BYTES", 8), \
-                 patch.object(webhook_routes, "processar_update_assincrono", new_callable=AsyncMock) as processor:
+                 patch.object(webhook_routes, "enqueue_telegram_update", new_callable=AsyncMock) as processor:
                 resp = await client.post(
                     "/",
                     data='{"update_id":9003}',
@@ -1379,9 +1374,9 @@ class TestTelegramWebhook:
         processor.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_processing_error_returns_500(self, mock_http_client):
+    async def test_enqueue_error_returns_503(self, mock_http_client):
         async with main.app.test_client() as client:
-            with patch.object(webhook_routes, "processar_update_assincrono", new_callable=AsyncMock, side_effect=Exception("boom-secret")):
+            with patch.object(webhook_routes, "enqueue_telegram_update", new_callable=AsyncMock, side_effect=Exception("boom-secret")):
                 resp = await client.post(
                     "/",
                     json={"update_id": 9002, "message": {"chat": {"id": 1}, "text": "hi"}},
@@ -1390,9 +1385,10 @@ class TestTelegramWebhook:
                         "Origin": "http://localhost:5173",
                     },
                 )
-                assert resp.status_code == 500
+                assert resp.status_code == 503
                 payload = await resp.get_json()
-                assert payload["message"] == "Internal processing error."
+                assert payload["message"] == "Update queue unavailable."
+                assert payload["retryable"] is True
                 assert "boom-secret" not in json.dumps(payload)
                 assert "Access-Control-Allow-Origin" not in resp.headers
 

@@ -103,6 +103,28 @@ def test_ci_and_pages_deploy_workflows_require_api_and_supabase_public_env():
     assert "      - '.github/workflows/deploy-pages.yml'" in deploy_workflow
 
 
+def test_e2e_backend_supplies_durable_queue_runtime_configuration():
+    playwright = (REPO_ROOT / "frontend" / "playwright.config.ts").read_text(encoding="utf-8")
+
+    for variable_name in (
+        "TELEGRAM_TASKS_PROJECT",
+        "TELEGRAM_TASKS_LOCATION",
+        "TELEGRAM_TASKS_QUEUE",
+        "TELEGRAM_WORKER_URL",
+        "TELEGRAM_TASK_INVOKER_SERVICE_ACCOUNT",
+    ):
+        assert f"{variable_name}:" in playwright
+
+
+def test_split_runtimes_require_one_shared_encryption_secret():
+    cloudbuild = (REPO_ROOT / "cloudbuild.yaml").read_text(encoding="utf-8")
+
+    assert '"DATA_ENCRYPTION_KEY=${_SECRET_ID_DATA_ENCRYPTION_KEY}"' in cloudbuild
+    assert '"--optional-secret-spec"' not in cloudbuild
+    assert 'allowed={"SUPABASE_KEY","TELEGRAM_SECRET_TOKEN","RECURRING_EXPENSES_CRON_SECRET","DATA_ENCRYPTION_KEY"}' in cloudbuild
+    assert 'allowed={"SUPABASE_KEY","TELEGRAM_BOT_TOKEN","DEEPSEEK_API_KEY","GROQ_API_KEY","GEMINI_API_KEY","DATA_ENCRYPTION_KEY"}' in cloudbuild
+
+
 def test_manual_dependency_security_contract_avoids_automated_pr_flood():
     ci_workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     deploy_workflow = (REPO_ROOT / ".github" / "workflows" / "deploy-pages.yml").read_text(encoding="utf-8")
@@ -145,6 +167,7 @@ def test_python_dependencies_are_reproducible_hashed_locks():
         "groq",
         "python-json-logger",
         "google-generativeai",
+        "google-cloud-tasks",
         "cryptography",
     ):
         assert direct_dependency in runtime_input
@@ -178,6 +201,7 @@ def test_python_dependencies_are_reproducible_hashed_locks():
 
 def test_backend_cloud_build_contract_uses_dockerfile_image_deploy():
     cloudbuild = (REPO_ROOT / "cloudbuild.yaml").read_text(encoding="utf-8")
+    setup = (REPO_ROOT / "SETUP.md").read_text(encoding="utf-8")
 
     assert 'gcr.io/cloud-builders/docker' in cloudbuild
     assert 'gcr.io/cloud-builders/gcloud' in cloudbuild
@@ -191,7 +215,9 @@ def test_backend_cloud_build_contract_uses_dockerfile_image_deploy():
     assert 'IMAGE_REF=$$(cat /workspace/image_ref.txt)' in cloudbuild
     assert '--image "$$IMAGE_REF"' in cloudbuild
     assert '${IMAGE_REF}' not in cloudbuild
-    assert '--update-secrets "$$SECRET_ENV_VARS"' in cloudbuild
+    assert '--set-secrets "$$API_SECRET_ENV_VARS"' in cloudbuild
+    assert '--set-secrets "$$WORKER_SECRET_ENV_VARS"' in cloudbuild
+    assert "--update-secrets" not in cloudbuild
     assert ':latest' not in cloudbuild
     assert 'APP_COMMIT_SHA=${COMMIT_SHA}' in cloudbuild
     assert 'APP_RELEASE_SHA=${SHORT_SHA}' in cloudbuild
@@ -200,6 +226,19 @@ def test_backend_cloud_build_contract_uses_dockerfile_image_deploy():
     assert '--max-instances "1"' in cloudbuild
     assert '--concurrency "10"' in cloudbuild
     assert '--timeout "30s"' in cloudbuild
+    assert 'id: "deploy-worker-cloud-run"' in cloudbuild
+    assert 'id: "deploy-api-cloud-run"' in cloudbuild
+    assert '--concurrency "1"' in cloudbuild
+    assert '--timeout "240s"' in cloudbuild
+    assert '--ingress internal' in cloudbuild
+    assert '--no-allow-unauthenticated' in cloudbuild
+    assert '--service-account "${_WORKER_RUNTIME_SERVICE_ACCOUNT}"' in cloudbuild
+    assert '--service-account "${_API_RUNTIME_SERVICE_ACCOUNT}"' in cloudbuild
+    assert 'APP_COMPONENT=telegram-worker' in cloudbuild
+    assert 'APP_COMPONENT=api' in cloudbuild
+    assert 'TELEGRAM_TASKS_LOCATION=${_REGION}' in cloudbuild
+    assert "replace-me" not in cloudbuild
+    assert cloudbuild.count('--project "${PROJECT_ID}"') >= 4
     assert '--memory "512Mi"' in cloudbuild
     assert 'id: "smoke-runtime-metadata"' in cloudbuild
     assert '/api/meta/runtime' in cloudbuild
@@ -207,6 +246,9 @@ def test_backend_cloud_build_contract_uses_dockerfile_image_deploy():
     assert 'scripts/prune_secret_versions.py' in cloudbuild
     assert '--execute' in cloudbuild
     assert '--protected-version-file' in cloudbuild
+    dedicated_build_account = "financemgmtbot-deploy@financemgmtbot.iam.gserviceaccount.com"
+    assert f'--service-account="{dedicated_build_account}"' in setup
+    assert "cloudbuild-yaml-09-04-26" in setup
 
 
 def test_architecture_document_is_not_part_of_public_git_snapshot():

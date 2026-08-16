@@ -16,11 +16,15 @@ from utils import get_brasilia_time
 
 PENDING_TTL_HOURS = 24
 PENDING_KEY_VERSION = "v1"
-MAX_WEBHOOK_BODY_BYTES = int(os.environ.get("MAX_WEBHOOK_BODY_BYTES") or 262_144)
+MAX_WEBHOOK_BODY_BYTES = int(os.environ.get("MAX_WEBHOOK_BODY_BYTES") or 75_000)
 MAX_TELEGRAM_IMAGE_BYTES = int(os.environ.get("MAX_TELEGRAM_IMAGE_BYTES") or 8_000_000)
 MAX_TELEGRAM_AUDIO_BYTES = int(os.environ.get("MAX_TELEGRAM_AUDIO_BYTES") or 12_000_000)
 
 _RATE_LIMIT_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
+PENDING_SELECT_FIELDS = (
+    "id, kind, payload_ciphertext, payload_key_version, preview_json, created_at, expires_at, "
+    "origin_chat_id, origin_user_id, source_update_id, payload"
+)
 
 def _derive_secret(label: str):
     seed = "|".join(
@@ -143,9 +147,11 @@ def store_pending_item(
     cache_id: str | None = None,
     origin_chat_id: int | str | None = None,
     origin_user_id: int | str | None = None,
+    source_update_id: int | None = None,
 ):
     resolved_kind = kind or detect_pending_kind(payload)
-    record_id = cache_id or generate_pending_id()
+    stable_id = f"tu_{hash_text(str(source_update_id))[:20]}" if source_update_id is not None else None
+    record_id = cache_id or stable_id or generate_pending_id()
     now = get_brasilia_time()
     expires_at = now + timedelta(hours=PENDING_TTL_HOURS)
     preview = build_pending_preview(resolved_kind, payload)
@@ -158,25 +164,44 @@ def store_pending_item(
         "preview_json": preview,
         "origin_chat_id": str(origin_chat_id) if origin_chat_id is not None else None,
         "origin_user_id": str(origin_user_id) if origin_user_id is not None else None,
+        "source_update_id": source_update_id,
         "created_at": now.isoformat(),
         "expires_at": expires_at.isoformat(),
     }
-    supabase.table("cache_aprovacao").insert(insert_payload).execute()
-    return {"id": record_id, "kind": resolved_kind, "preview": preview, "expires_at": expires_at.isoformat()}
+    table = supabase.table("cache_aprovacao")
+    if source_update_id is None:
+        table.insert(insert_payload).execute()
+    else:
+        response = table.upsert(
+            insert_payload,
+            on_conflict="source_update_id",
+            ignore_duplicates=True,
+        ).execute()
+        if not isinstance(getattr(response, "data", None), list) or not response.data:
+            persisted = load_pending_item_by_source_update_id(source_update_id)
+            if not persisted:
+                raise RuntimeError("Pending item conflict winner is unavailable.")
+            if origin_chat_id is not None and str(persisted.get("origin_chat_id") or "") != str(origin_chat_id):
+                raise RuntimeError("Pending conflict winner belongs to another chat.")
+            return {
+                "id": persisted["id"],
+                "kind": persisted["kind"],
+                "preview": persisted["preview_json"],
+                "expires_at": persisted.get("expires_at"),
+                "payload": persisted.get("payload"),
+                "source_update_id": persisted.get("source_update_id"),
+            }
+    return {
+        "id": record_id,
+        "kind": resolved_kind,
+        "preview": preview,
+        "expires_at": expires_at.isoformat(),
+        "payload": payload,
+        "source_update_id": source_update_id,
+    }
 
 
-def load_pending_item(cache_id: str):
-    response = (
-        supabase
-        .table("cache_aprovacao")
-        .select("id, kind, payload_ciphertext, payload_key_version, preview_json, created_at, expires_at, origin_chat_id, origin_user_id, payload")
-        .eq("id", cache_id)
-        .execute()
-    )
-    if not getattr(response, "data", None):
-        return None
-
-    item = response.data[0]
+def _hydrate_pending_item(item: dict[str, Any], cache_id: str):
     payload = None
     ciphertext = item.get("payload_ciphertext")
     if ciphertext:
@@ -196,6 +221,37 @@ def load_pending_item(cache_id: str):
         "payload": payload,
         "preview_json": preview,
     }
+
+
+def load_pending_item(cache_id: str):
+    response = (
+        supabase
+        .table("cache_aprovacao")
+        .select(PENDING_SELECT_FIELDS)
+        .eq("id", cache_id)
+        .execute()
+    )
+    if not getattr(response, "data", None):
+        return None
+
+    return _hydrate_pending_item(response.data[0], cache_id)
+
+
+def load_pending_item_by_source_update_id(source_update_id: int | None):
+    if source_update_id is None:
+        return None
+    response = (
+        supabase
+        .table("cache_aprovacao")
+        .select(PENDING_SELECT_FIELDS)
+        .eq("source_update_id", source_update_id)
+        .limit(1)
+        .execute()
+    )
+    data = getattr(response, "data", None)
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        return None
+    return _hydrate_pending_item(data[0], str(data[0].get("id") or "unknown"))
 
 
 def pending_item_expired(item: dict[str, Any] | None):

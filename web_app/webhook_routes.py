@@ -1,9 +1,9 @@
 from quart import jsonify, request
 
 from api_responses import with_request_id
-from config import SECRET_TOKEN, logger, mascarar_segredos
-from handlers import processar_update_assincrono
+from config import SECRET_TOKEN, logger
 from security import MAX_WEBHOOK_BODY_BYTES
+from telegram_tasks import InvalidTelegramUpdate, enqueue_telegram_update
 
 from .http import _json_error, rate_limited
 
@@ -32,8 +32,10 @@ def register_webhook_routes(app):
         try:
             request_body = await request.get_json()
             logger.info(with_request_id({"event": "webhook_received_raw", "module": "main"}))
-            await processar_update_assincrono(request_body)
+            await enqueue_telegram_update(request_body)
             return jsonify({"status": "ok"}), 200
+        except InvalidTelegramUpdate:
+            return _json_error("Invalid Telegram update.", 400, code="INVALID_TELEGRAM_UPDATE")
         except Exception as exc:
-            logger.error(with_request_id({"event": "webhook_processing_error", "error": mascarar_segredos(str(exc))}))
-            return _json_error("Internal processing error.", 500)
+            logger.error(with_request_id({"event": "telegram_task_enqueue_failed", "error_code": type(exc).__name__}))
+            return _json_error("Update queue unavailable.", 503, code="QUEUE_UNAVAILABLE", retryable=True)

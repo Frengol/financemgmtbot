@@ -1,3 +1,4 @@
+import base64
 import importlib.util
 import os
 import sys
@@ -15,6 +16,12 @@ REQUIRED_ENV = {
     "DEEPSEEK_API_KEY": "FAKE_DEEPSEEK_KEY_1234567890",
     "GROQ_API_KEY": "FAKE_GROQ_KEY_1234567890",
     "GEMINI_API_KEY": "FAKE_GEMINI_KEY_1234567890",
+    "DATA_ENCRYPTION_KEY": base64.urlsafe_b64encode(b"0" * 32).decode("ascii"),
+    "TELEGRAM_TASKS_PROJECT": "financemgmtbot",
+    "TELEGRAM_TASKS_LOCATION": "southamerica-east1",
+    "TELEGRAM_TASKS_QUEUE": "telegram-updates",
+    "TELEGRAM_WORKER_URL": "https://worker.example.run.app",
+    "TELEGRAM_TASK_INVOKER_SERVICE_ACCOUNT": "telegram-task-invoker@financemgmtbot.iam.gserviceaccount.com",
 }
 for _key, _value in REQUIRED_ENV.items():
     os.environ.setdefault(_key, _value)
@@ -63,6 +70,64 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, **overrides: str):
 
 
 class TestConfigCoverage:
+    def test_worker_runtime_does_not_require_frontend_or_api_only_secrets(self, monkeypatch: pytest.MonkeyPatch):
+        _set_required_env(
+            monkeypatch,
+            APP_COMPONENT="telegram-worker",
+            K_SERVICE="financemgmtbot-worker",
+            FRONTEND_PUBLIC_URL="",
+            FRONTEND_ALLOWED_ORIGINS="",
+        )
+        monkeypatch.delenv("TELEGRAM_SECRET_TOKEN", raising=False)
+
+        pytest_module = sys.modules.pop("pytest", None)
+        try:
+            with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
+                 patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
+                 patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
+                 patch("google.generativeai.configure"):
+                module = _import_fresh_config("config_cov_worker_component")
+        finally:
+            if pytest_module is not None:
+                sys.modules["pytest"] = pytest_module
+
+        assert module.APP_COMPONENT == "telegram-worker"
+        assert "TELEGRAM_SECRET_TOKEN" not in module.REQUIRED_VARS
+        assert "DATA_ENCRYPTION_KEY" in module.REQUIRED_VARS
+
+    def test_api_runtime_does_not_initialize_ai_clients(self, monkeypatch: pytest.MonkeyPatch):
+        _set_required_env(
+            monkeypatch,
+            APP_COMPONENT="api",
+            TELEGRAM_TASKS_PROJECT="financemgmtbot",
+            TELEGRAM_TASKS_LOCATION="southamerica-east1",
+            TELEGRAM_TASKS_QUEUE="telegram-updates",
+            TELEGRAM_WORKER_URL="https://worker.example.run.app",
+            TELEGRAM_TASK_INVOKER_SERVICE_ACCOUNT="invoker@financemgmtbot.iam.gserviceaccount.com",
+        )
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+        pytest_module = sys.modules.pop("pytest", None)
+        try:
+            with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
+                 patch("openai.AsyncOpenAI") as deepseek, \
+                 patch("groq.AsyncGroq") as groq, \
+                 patch("google.generativeai.configure") as gemini:
+                module = _import_fresh_config("config_cov_api_component")
+        finally:
+            if pytest_module is not None:
+                sys.modules["pytest"] = pytest_module
+
+        assert module.APP_COMPONENT == "api"
+        assert "DATA_ENCRYPTION_KEY" in module.REQUIRED_VARS
+        assert module.deepseek_client is None
+        deepseek.assert_not_called()
+        groq.assert_not_called()
+        gemini.assert_not_called()
+
     def test_load_local_env_reads_dotenv_when_pytest_module_is_temporarily_absent(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         _set_required_env(monkeypatch)
         monkeypatch.chdir(tmp_path)
@@ -373,7 +438,9 @@ class TestTelegramServiceCoverage:
         with patch("telegram_service.httpx.AsyncClient", return_value=fake_client) as async_client_cls:
             telegram_service.http_client = None
             await telegram_service.init_http_client()
-            async_client_cls.assert_called_once_with(timeout=30.0)
+            timeout = async_client_cls.call_args.kwargs["timeout"]
+            assert timeout.connect == 10.0
+            assert timeout.read == 30.0
             assert telegram_service.http_client is fake_client
 
             await telegram_service.close_http_client()
@@ -386,13 +453,15 @@ class TestTelegramServiceCoverage:
         assert telegram_service.http_client is None
 
     @pytest.mark.asyncio
-    async def test_send_helpers_swallow_provider_failures(self):
+    async def test_only_best_effort_action_swallows_provider_failures(self):
         failing_client = AsyncMock()
         failing_client.post.side_effect = RuntimeError("network down")
         telegram_service.http_client = failing_client
 
         await telegram_service.enviar_acao_telegram(123)
-        await telegram_service.enviar_mensagem_telegram(123, "oi")
-        await telegram_service.editar_mensagem_telegram(123, 99, "oi")
+        with pytest.raises(telegram_service.TelegramRetryableError):
+            await telegram_service.enviar_mensagem_telegram(123, "oi")
+        with pytest.raises(telegram_service.TelegramRetryableError):
+            await telegram_service.editar_mensagem_telegram(123, 99, "oi")
 
         assert failing_client.post.await_count == 3

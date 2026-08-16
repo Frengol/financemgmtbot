@@ -71,7 +71,7 @@ Esses valores ficam no Google Secret Manager e sao expostos ao Cloud Run como va
 | `GROQ_API_KEY` | `GROQ_API_KEY` | chave da Groq |
 | `GEMINI_API_KEY` | `GEMINI_API_KEY` | chave da Gemini |
 | `RECURRING_EXPENSES_CRON_SECRET` | `recurring-expenses-cron-secret` | segredo da rotina diaria |
-| `DATA_ENCRYPTION_KEY` | `DATA_ENCRYPTION_KEY` | opcional, recomendado para criptografia estavel dos payloads pendentes |
+| `DATA_ENCRYPTION_KEY` | `DATA_ENCRYPTION_KEY` | obrigatorio e compartilhado entre API e worker para criptografia estavel dos payloads pendentes |
 
 O nome da variavel no Cloud Run nao precisa ser igual ao nome do secret. O `cloudbuild.yaml` usa substitutions para mapear cada variavel para o secret correto.
 
@@ -89,6 +89,12 @@ Configure como variaveis normais no Cloud Run.
 | `FRONTEND_ALLOWED_ORIGINS` | `<FRONTEND_ORIGIN>` |
 | `AUTH_TEST_MODE` | `false` |
 | `ALLOW_LOCAL_DEV_AUTH` | `false` |
+| `APP_COMPONENT` | `api` no servico publico; `telegram-worker` no worker privado |
+| `TELEGRAM_TASKS_PROJECT` | `financemgmtbot` no servico publico |
+| `TELEGRAM_TASKS_LOCATION` | `southamerica-east1` no servico publico |
+| `TELEGRAM_TASKS_QUEUE` | `telegram-updates` no servico publico |
+| `TELEGRAM_WORKER_URL` | URL HTTPS do worker privado |
+| `TELEGRAM_TASK_INVOKER_SERVICE_ACCOUNT` | `financemgmtbot-task-invoker@financemgmtbot.iam.gserviceaccount.com` |
 
 ### Secrets do GitHub Actions
 
@@ -208,6 +214,7 @@ supabase/migrations/20260410_despesas_recorrentes.sql
 supabase/migrations/20260410_drop_admin_web_sessions.sql
 supabase/migrations/20260411_recurring_expenses_hardening.sql
 supabase/migrations/20260412_remove_recurring_expense_description.sql
+supabase/migrations/20260815_telegram_update_reliability.sql
 ```
 
 Se o Supabase avisar que algum objeto ja existe, confira a mensagem. Muitos comandos usam `if not exists` e podem ser reexecutados, mas erros de tabela inexistente normalmente indicam que a etapa das tabelas base foi pulada.
@@ -281,6 +288,7 @@ Habilite as APIs:
    - Cloud Build API;
    - Artifact Registry API;
    - Secret Manager API.
+   - Cloud Tasks API.
 
 ## 11. Criar o Artifact Registry
 
@@ -321,125 +329,105 @@ Para `DATA_ENCRYPTION_KEY`, gere uma chave Fernet. Se voce tiver Python local:
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Se nao quiser configurar `DATA_ENCRYPTION_KEY` agora, o backend consegue derivar uma chave a partir de outros segredos. Ainda assim, para producao propria, e melhor criar e manter um valor fixo.
+`DATA_ENCRYPTION_KEY` e obrigatorio no fluxo dividido. API e worker devem apontar para a mesma versao do secret para que ambos consigam ler o mesmo payload pendente cifrado.
 
 Para `RECURRING_EXPENSES_CRON_SECRET`, gere um valor longo e aleatorio. Voce usara exatamente o mesmo valor no GitHub Actions depois.
 
-## 13. Criar as service accounts
+## 13. Preflight obrigatorio e identidades dedicadas
 
-Crie uma service account para o Cloud Run rodar a aplicacao:
-
-1. No Google Cloud, va em `IAM & Admin -> Service Accounts`.
-2. Clique em `Create service account`.
-3. Nome: `cloud-run-financemgmtbot-runtime`.
-4. Crie a conta.
-5. Va em `IAM`.
-6. Conceda a ela o papel `Secret Manager Secret Accessor`.
-
-Essa conta e a identidade do backend em execucao. Sem esse acesso, o Cloud Run pode subir sem conseguir ler os secrets.
-
-O Cloud Build precisa de permissao para construir imagem, publicar no Artifact Registry e atualizar o Cloud Run.
-
-1. No Google Cloud, va em `IAM & Admin -> Service Accounts`.
-2. Clique em `Create service account`.
-3. Nome: `cloud-build-financemgmtbot`.
-4. Crie a conta.
-5. Va em `IAM`.
-6. Conceda a essa service account os papeis:
-   - `Artifact Registry Writer`;
-   - `Cloud Run Admin`;
-   - `Service Account User` sobre a conta `cloud-run-financemgmtbot-runtime`;
-   - `Logs Writer`.
-
-Para a limpeza automatica de versoes antigas do Secret Manager, conceda tambem permissao apenas nos secrets da aplicacao:
-
-- opcao simples: `Secret Manager Secret Version Manager` em cada secret do app;
-- opcao mais restrita: papel customizado com `secretmanager.secrets.get`, `secretmanager.versions.list` e `secretmanager.versions.destroy`.
-
-Nao conceda `Secret Manager Admin` ao Cloud Build so por causa dessa limpeza. Nao inclua secrets gerenciados pelo Google, como secrets de Developer Connect/GitHub.
-
-Para um ambiente mais rigoroso, limite cada papel apenas aos recursos necessarios. Para o primeiro setup de uma pessoa leiga, o importante e nao usar uma conta pessoal no trigger.
-
-## 14. Fazer o primeiro deploy no Cloud Run
-
-O primeiro deploy precisa criar o servico e deixar variaveis/secrets corretos. Depois disso, o `cloudbuild.yaml` consegue atualizar a imagem e preservar a configuracao do servico.
-
-O caminho mais direto e usar o Cloud Shell do Google:
-
-1. No Google Cloud Console, clique no icone `Activate Cloud Shell`.
-2. Rode os comandos abaixo, trocando os placeholders.
+Nao configure projeto, regiao nem ADC local. Use sempre os flags explicitos abaixo. Antes de qualquer alteracao, inventarie a conta ativa, os servicos, o trigger e os vinculos da conta padrao:
 
 ```bash
-gcloud config set project <GCP_PROJECT_ID>
-gcloud config set run/region <REGION>
-
-git clone https://github.com/<GITHUB_USER>/<REPO_NAME>.git
-cd <REPO_NAME>
-
-gcloud builds submit \
-  --tag <REGION>-docker.pkg.dev/<GCP_PROJECT_ID>/cloud-run-source-deploy/financemgmtbot-git:initial
+gcloud auth list --filter=status:ACTIVE
+gcloud services list --enabled --project=financemgmtbot
+gcloud run services describe financemgmtbot-git --project=financemgmtbot --region=southamerica-east1 --format=json
+gcloud builds triggers list --project=financemgmtbot --region=southamerica-east1 --format=json
+gcloud projects get-iam-policy financemgmtbot --project=financemgmtbot --format=json
 ```
 
-Depois que a imagem for enviada, crie o servico no Cloud Run:
+Crie tres identidades de runtime separadas. A identidade dedicada de build
+`financemgmtbot-deploy@financemgmtbot.iam.gserviceaccount.com` ja existe e deve
+ser reutilizada. Estes comandos alteram IAM e so devem ser executados durante o
+rollout aprovado:
 
 ```bash
-gcloud run deploy <SERVICE_NAME> \
-  --image <REGION>-docker.pkg.dev/<GCP_PROJECT_ID>/cloud-run-source-deploy/financemgmtbot-git:initial \
-  --region <REGION> \
-  --platform managed \
-  --allow-unauthenticated \
-  --service-account cloud-run-financemgmtbot-runtime@<GCP_PROJECT_ID>.iam.gserviceaccount.com \
-  --set-env-vars "SUPABASE_URL=<SUPABASE_URL>,SUPABASE_ADMIN_EMAILS=<ADMIN_EMAIL>,SUPABASE_ADMIN_USER_IDS=,SUPABASE_GASTOS_TABLE=gastos,FRONTEND_PUBLIC_URL=<FRONTEND_URL>,FRONTEND_ALLOWED_ORIGINS=<FRONTEND_ORIGIN>,AUTH_TEST_MODE=false,ALLOW_LOCAL_DEV_AUTH=false" \
-  --update-secrets "SUPABASE_KEY=SUPABASE_KEY:1,TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN:1,TELEGRAM_SECRET_TOKEN=TELEGRAM_SECRET_TOKEN:1,DEEPSEEK_API_KEY=DEEPSEEK_API_KEY:1,GROQ_API_KEY=GROQ_API_KEY:1,GEMINI_API_KEY=GEMINI_API_KEY:1,RECURRING_EXPENSES_CRON_SECRET=recurring-expenses-cron-secret:1,DATA_ENCRYPTION_KEY=DATA_ENCRYPTION_KEY:1"
+gcloud iam service-accounts create financemgmtbot-api --project=financemgmtbot --display-name="Finance Mgmt API runtime"
+gcloud iam service-accounts create financemgmtbot-worker --project=financemgmtbot --display-name="Finance Mgmt Telegram worker"
+gcloud iam service-accounts create financemgmtbot-task-invoker --project=financemgmtbot --display-name="Finance Mgmt task invoker"
 ```
 
-Exemplo de valores:
+Conceda `Secret Manager Secret Accessor` por secret, nunca no projeto inteiro:
 
-```text
-<FRONTEND_URL> = https://<GITHUB_USER>.github.io/financemgmtbot/
-<FRONTEND_ORIGIN> = https://<GITHUB_USER>.github.io
-```
+- API runtime: `SUPABASE_KEY`, `TELEGRAM_SECRET_TOKEN`, `recurring-expenses-cron-secret` e `DATA_ENCRYPTION_KEY`.
+- Worker runtime: `SUPABASE_KEY`, `TELEGRAM_BOT_TOKEN`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY` e `DATA_ENCRYPTION_KEY`.
 
-No final, o terminal mostrara a URL do Cloud Run. Guarde esse valor como `<CLOUD_RUN_URL>`.
-
-Validacao rapida:
+Exemplo, repetido apenas para os pares acima:
 
 ```bash
-curl "<CLOUD_RUN_URL>/api/meta/runtime"
+gcloud secrets add-iam-policy-binding SUPABASE_KEY --project=financemgmtbot --member="serviceAccount:financemgmtbot-api@financemgmtbot.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
+gcloud secrets add-iam-policy-binding SUPABASE_KEY --project=financemgmtbot --member="serviceAccount:financemgmtbot-worker@financemgmtbot.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
 ```
 
-Se o servico responder JSON, o backend subiu. Se der erro de startup, revise as variaveis obrigatorias e os secrets.
+O build runtime recebe `roles/run.admin`, `roles/artifactregistry.writer` e `roles/logging.logWriter` nos recursos necessarios e `roles/iam.serviceAccountUser` somente sobre `financemgmtbot-api` e `financemgmtbot-worker`. Para a limpeza de secrets, mantenha o papel customizado restrito com `secretmanager.secrets.get`, `secretmanager.versions.list` e `secretmanager.versions.destroy`. Nao conceda `Editor` nem `Secret Manager Admin`.
 
-## 15. Criar o trigger do Cloud Build para proximos deploys
+Nao retire `Editor` da conta padrao automaticamente. Primeiro confirme que nenhum outro recurso a utiliza; a remocao e uma operacao posterior e separadamente autorizada.
 
-Depois do primeiro deploy, crie um trigger para usar o `cloudbuild.yaml`.
+## 14. Criar a fila pausada e preparar o worker privado
 
-1. No Google Cloud, va em `Cloud Build -> Triggers`.
-2. Clique em `Create trigger`.
-3. Nome: `deploy-financemgmtbot-cloud-run`.
-4. Evento: push na branch principal, normalmente `main`.
-5. Conecte o repositorio GitHub.
-6. Em `Configuration`, escolha `Cloud Build configuration file`.
-7. Local do arquivo: `cloudbuild.yaml`.
-8. Em `Service account`, selecione `cloud-build-financemgmtbot`.
-9. Confira as substitutions:
-   - `_AR_HOSTNAME`: `<REGION>-docker.pkg.dev`;
-   - `_AR_REPOSITORY`: `cloud-run-source-deploy`;
-   - `_IMAGE_NAME`: `financemgmtbot-git` ou o nome que voce quiser para a imagem;
-   - `_SERVICE_NAME`: `<SERVICE_NAME>`;
-   - `_REGION`: `<REGION>`;
-   - `_SECRET_ID_SUPABASE_KEY`: `SUPABASE_KEY`;
-   - `_SECRET_ID_TELEGRAM_BOT_TOKEN`: `TELEGRAM_BOT_TOKEN`;
-   - `_SECRET_ID_TELEGRAM_SECRET_TOKEN`: `TELEGRAM_SECRET_TOKEN`;
-   - `_SECRET_ID_DEEPSEEK_API_KEY`: `DEEPSEEK_API_KEY`;
-   - `_SECRET_ID_GROQ_API_KEY`: `GROQ_API_KEY`;
-   - `_SECRET_ID_GEMINI_API_KEY`: `GEMINI_API_KEY`;
-   - `_SECRET_ID_RECURRING_EXPENSES_CRON_SECRET`: `recurring-expenses-cron-secret`;
-   - `_SECRET_ID_DATA_ENCRYPTION_KEY`: `DATA_ENCRYPTION_KEY`;
-   - `_PRUNE_SECRET_VERSIONS`: `true`.
-10. Salve.
+Depois de aplicar `20260815_telegram_update_reliability.sql`, habilite a API e crie a fila regional ainda pausada:
 
-O `cloudbuild.yaml` resolve a versao numerica habilitada de cada secret antes do deploy, aplica essas versoes no Cloud Run, valida `/api/meta/runtime` e depois remove versoes antigas. Ele nao le valores de secrets e nao imprime payloads.
+```bash
+gcloud services enable cloudtasks.googleapis.com --project=financemgmtbot
+gcloud tasks queues create telegram-updates --project=financemgmtbot --location=southamerica-east1 --max-attempts=12 --min-backoff=5s --max-backoff=300s --max-retry-duration=3600s --max-concurrent-dispatches=1 --max-dispatches-per-second=1
+gcloud tasks queues pause telegram-updates --project=financemgmtbot --location=southamerica-east1
+```
+
+Restrinja enqueue, emissao do token OIDC e invocacao do worker:
+
+```bash
+gcloud tasks queues add-iam-policy-binding telegram-updates --project=financemgmtbot --location=southamerica-east1 --member="serviceAccount:financemgmtbot-api@financemgmtbot.iam.gserviceaccount.com" --role="roles/cloudtasks.enqueuer"
+gcloud iam service-accounts add-iam-policy-binding financemgmtbot-task-invoker@financemgmtbot.iam.gserviceaccount.com --project=financemgmtbot --member="serviceAccount:financemgmtbot-api@financemgmtbot.iam.gserviceaccount.com" --role="roles/iam.serviceAccountUser"
+```
+
+O `cloudbuild.yaml` publica uma imagem imutavel e faz rollout primeiro de `financemgmtbot-worker` privado (`ingress=internal`, sem anonimo, concorrencia `1`, timeout `240s`) e depois de `financemgmtbot-git` publico (`concorrencia=10`, timeout `30s`). O worker aplica um budget interno de `150s`; a task usa deadline de `180s`.
+
+Configure `_SUPABASE_URL`, `_FRONTEND_PUBLIC_URL` e `_FRONTEND_ALLOWED_ORIGIN` no trigger antes do primeiro build. O build falha se essas substitutions nao forem informadas.
+
+## 15. Migrar o trigger e executar o rollout
+
+Antes do build, mova o trigger para a identidade dedicada:
+
+```bash
+gcloud builds triggers update github cloudbuild-yaml-09-04-26 --project=financemgmtbot --region=southamerica-east1 --service-account="projects/financemgmtbot/serviceAccounts/financemgmtbot-deploy@financemgmtbot.iam.gserviceaccount.com" --build-config=cloudbuild.yaml
+```
+
+Ordem obrigatoria do rollout:
+
+1. aplicar a migration e validar as funcoes RPC como `service_role`;
+2. criar identidades e IAM;
+3. criar e pausar a fila;
+4. executar o build, que publica o worker privado e depois a API:
+
+```bash
+gcloud builds submit --project=financemgmtbot --region=southamerica-east1 --service-account="financemgmtbot-deploy@financemgmtbot.iam.gserviceaccount.com" --config=cloudbuild.yaml --substitutions="_SUPABASE_URL=<SUPABASE_URL>,_FRONTEND_PUBLIC_URL=<FRONTEND_URL>,_FRONTEND_ALLOWED_ORIGIN=<FRONTEND_ORIGIN>"
+```
+
+5. conceder invocacao somente ao task invoker depois que o worker existir:
+
+```bash
+gcloud run services add-iam-policy-binding financemgmtbot-worker --project=financemgmtbot --region=southamerica-east1 --member="serviceAccount:financemgmtbot-task-invoker@financemgmtbot.iam.gserviceaccount.com" --role="roles/run.invoker"
+```
+
+6. comprovar que chamada anonima ao worker recebe `401` ou `403` e que o invocador OIDC recebe `200`;
+7. liberar a fila somente depois dos testes de autenticacao:
+
+```bash
+gcloud tasks queues resume telegram-updates --project=financemgmtbot --location=southamerica-east1
+```
+
+Depois do cupom sintetico de validacao, confirme uma task, uma unica pendencia, ledger `completed`, entrega `telegram_delivery_confirmed`, fila vazia e ausencia de novo `504`. Aplique `location=southamerica-east1` no filtro de Logging e confira as duas revisoes e service accounts anexadas. Nunca registre o payload do cupom nessa validacao.
+
+O `cloudbuild.yaml` resolve versoes numericas dos secrets, substitui integralmente os bindings com `--set-secrets` e listas separadas por servico, valida `/api/meta/runtime` e protege versoes ainda referenciadas pelas revisoes dos dois servicos antes da limpeza. Essa substituicao integral e obrigatoria na migracao do servico unificado: `--update-secrets` preservaria bindings antigos e poderia manter credenciais de OCR/LLM na API publica.
 
 ### 15.1 Limpeza segura de versoes de secrets
 
@@ -458,7 +446,7 @@ recurring-expenses-cron-secret
 DATA_ENCRYPTION_KEY
 ```
 
-`DATA_ENCRYPTION_KEY` e opcional. Se existir, o script nao destroi versoes criadas ha menos de 7 dias, porque essa chave pode ser necessaria para payloads pendentes de aprovacao.
+`DATA_ENCRYPTION_KEY` e obrigatorio. O script nao destroi versoes criadas ha menos de 7 dias, porque essa chave pode ser necessaria para payloads pendentes de aprovacao.
 
 Para ver o que seria destruido sem executar:
 
@@ -715,10 +703,10 @@ Verifique:
 
 Verifique:
 
-- se a service account `cloud-build-financemgmtbot` tem permissao de versao apenas nos secrets do app;
+- se a service account `financemgmtbot-deploy` tem permissao de versao apenas nos secrets do app;
 - se as substitutions `_SECRET_ID_*` batem com os nomes reais no Secret Manager;
 - se `_SECRET_ID_RECURRING_EXPENSES_CRON_SECRET` aponta para `recurring-expenses-cron-secret`, caso esse seja o nome usado no seu projeto;
-- se `DATA_ENCRYPTION_KEY` existe. Ele e opcional, mas, se a substitution apontar para outro nome, ajuste antes do proximo deploy.
+- se `DATA_ENCRYPTION_KEY` existe e possui uma versao habilitada; se a substitution apontar para outro nome, ajuste antes do proximo deploy.
 
 ## 24. Referencias oficiais
 

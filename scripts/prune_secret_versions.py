@@ -347,7 +347,10 @@ def command_prune(args: argparse.Namespace) -> int:
     protected_versions = merge_protected_versions(
         load_protected_version_file(args.protected_version_file),
         parse_protected_version_args(args.protected_version),
-        load_cloud_run_protected_versions(args.project, args.cloud_run_service, args.cloud_run_region),
+        *(
+            load_cloud_run_protected_versions(args.project, service_name, args.cloud_run_region)
+            for service_name in (args.cloud_run_service or [])
+        ),
     )
     now = datetime.now(timezone.utc)
 
@@ -405,7 +408,7 @@ def build_parser() -> argparse.ArgumentParser:
     prune_parser.add_argument("--retention", type=int, default=2)
     prune_parser.add_argument("--protected-version", action="append", help="SECRET_ID=VERSION_ID")
     prune_parser.add_argument("--protected-version-file", help="JSON map of SECRET_ID to protected version ids.")
-    prune_parser.add_argument("--cloud-run-service")
+    prune_parser.add_argument("--cloud-run-service", action="append")
     prune_parser.add_argument("--cloud-run-region")
     prune_parser.add_argument("--min-age-secret", action="append", help="SECRET_ID=DAYS")
     prune_parser.add_argument("--ignore-missing-secrets", action="store_true")

@@ -21,6 +21,9 @@ class TestSecurityCoverage:
         assert derived != b"invalid-key"
         warning_mock.assert_called_once()
 
+        with patch.dict("os.environ", {}, clear=True):
+            assert Fernet(security._fernet_key())
+
         assert security.hash_optional(None) is None
         assert security.hash_optional("") is None
         assert security.hash_optional("value") == security.hash_text("value")

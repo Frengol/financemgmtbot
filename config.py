@@ -46,6 +46,10 @@ def load_local_env():
 
 load_local_env()
 
+APP_COMPONENT = (os.environ.get("APP_COMPONENT") or "api").strip().lower()
+if APP_COMPONENT not in {"api", "telegram-worker"}:
+    raise RuntimeError("AppSec Fatal Error: APP_COMPONENT inválido.")
+
 
 def normalize_frontend_origin(origin: str):
     normalized = (origin or "").strip()
@@ -125,7 +129,30 @@ def normalize_public_url(raw_url: str | None, *, trailing_slash: bool = False):
     return f"{base}/" if trailing_slash else base
 
 
-REQUIRED_VARS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_SECRET_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"]
+if "pytest" in sys.modules:
+    REQUIRED_VARS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_SECRET_TOKEN", "SUPABASE_URL", "SUPABASE_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"]
+elif APP_COMPONENT == "telegram-worker":
+    REQUIRED_VARS = [
+        "TELEGRAM_BOT_TOKEN",
+        "SUPABASE_URL",
+        "SUPABASE_KEY",
+        "DEEPSEEK_API_KEY",
+        "GROQ_API_KEY",
+        "GEMINI_API_KEY",
+        "DATA_ENCRYPTION_KEY",
+    ]
+else:
+    REQUIRED_VARS = [
+        "TELEGRAM_SECRET_TOKEN",
+        "SUPABASE_URL",
+        "SUPABASE_KEY",
+        "TELEGRAM_TASKS_PROJECT",
+        "TELEGRAM_TASKS_LOCATION",
+        "TELEGRAM_TASKS_QUEUE",
+        "TELEGRAM_WORKER_URL",
+        "TELEGRAM_TASK_INVOKER_SERVICE_ACCOUNT",
+        "DATA_ENCRYPTION_KEY",
+    ]
 for var in REQUIRED_VARS:
     if not os.environ.get(var):
         logger.critical({"event": "startup_failed", "reason": f"Missing variable {var}"})
@@ -191,7 +218,8 @@ def resolve_transactions_table_name():
 
 TRANSACTIONS_TABLE = resolve_transactions_table_name()
 
-validate_frontend_runtime_config(FRONTEND_PUBLIC_URL, FRONTEND_ALLOWED_ORIGINS)
+if APP_COMPONENT == "api":
+    validate_frontend_runtime_config(FRONTEND_PUBLIC_URL, FRONTEND_ALLOWED_ORIGINS)
 logger.info({
     "event": "frontend_cors_configured",
     "frontend_public_url": FRONTEND_PUBLIC_URL or None,
@@ -224,9 +252,13 @@ try:
         supabase = MagicMock(name="auth_test_supabase")
     else:
         supabase: Client = create_client(supa_url, supa_key)
-    groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY") or "")
-    deepseek_client = AsyncOpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY") or "", base_url="https://api.deepseek.com")
-    genai.configure(api_key=os.environ.get("GEMINI_API_KEY") or "")
+    if APP_COMPONENT == "telegram-worker" or "pytest" in sys.modules:
+        groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY") or "")
+        deepseek_client = AsyncOpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY") or "", base_url="https://api.deepseek.com")
+        genai.configure(api_key=os.environ.get("GEMINI_API_KEY") or "")
+    else:
+        groq_client = None
+        deepseek_client = None
     logger.info({"event": "clients_initialized", "status": "success"})
 except Exception:
     logger.critical({"event": "init_error", "error": mascarar_segredos(traceback.format_exc())})

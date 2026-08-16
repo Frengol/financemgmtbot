@@ -11,6 +11,8 @@ source =
     main
     security
     telegram_service
+    telegram_tasks
+    telegram_update_ledger
     utils
 omit =
     test_*

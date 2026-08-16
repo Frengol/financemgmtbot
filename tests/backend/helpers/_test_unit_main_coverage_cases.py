@@ -60,7 +60,9 @@ class TestMainHelperCoverage:
     async def test_main_runtime_helpers_cover_startup_shutdown_harden_response_and_rate_limit(self):
         init_http_client = AsyncMock()
         close_http_client = AsyncMock()
-        with patch.object(main, "init_http_client", init_http_client), patch.object(main, "close_http_client", close_http_client):
+        with patch.object(main, "APP_COMPONENT", "telegram-worker"), patch.object(
+            main, "init_http_client", init_http_client
+        ), patch.object(main, "close_http_client", close_http_client):
             await main.startup()
             await main.shutdown()
         init_http_client.assert_awaited_once()

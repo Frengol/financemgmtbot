@@ -74,7 +74,7 @@ def aprovar_cache_admin(cache_id: str):
             )
             return _json_success({"id": cache_id, "deleted_records": len(ids)}, 200)
 
-        linhas, total = gravar_lote_no_banco(payload)
+        linhas, total = gravar_lote_no_banco(payload, source_update_id=item.get("source_update_id"))
         delete_pending_item(cache_id)
         registrar_auditoria_admin(
             actor,

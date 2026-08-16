@@ -47,7 +47,7 @@ steps:
       - "GEMINI_API_KEY=${_SECRET_ID_GEMINI_API_KEY}"
       - "--secret-spec"
       - "RECURRING_EXPENSES_CRON_SECRET=${_SECRET_ID_RECURRING_EXPENSES_CRON_SECRET}"
-      - "--optional-secret-spec"
+      - "--secret-spec"
       - "DATA_ENCRYPTION_KEY=${_SECRET_ID_DATA_ENCRYPTION_KEY}"
       - "--env-output"
       - "/workspace/secret_env_vars.txt"
@@ -55,26 +55,59 @@ steps:
       - "/workspace/resolved_secret_versions.json"
 
   - name: "gcr.io/cloud-builders/gcloud"
-    id: "deploy-cloud-run"
+    id: "deploy-worker-cloud-run"
     entrypoint: "/bin/sh"
     args:
       - "-c"
       - |
         set -eu
         IMAGE_REF=$$(cat /workspace/image_ref.txt)
-        SECRET_ENV_VARS=$$(cat /workspace/secret_env_vars.txt)
-        gcloud run deploy "${_SERVICE_NAME}" \
+        WORKER_SECRET_ENV_VARS=$$(python3 -c 'import sys; allowed={"SUPABASE_KEY","TELEGRAM_BOT_TOKEN","DEEPSEEK_API_KEY","GROQ_API_KEY","GEMINI_API_KEY","DATA_ENCRYPTION_KEY"}; print(",".join(item for item in open(sys.argv[1]).read().strip().split(",") if item.split("=",1)[0] in allowed))' /workspace/secret_env_vars.txt)
+        gcloud run deploy "${_WORKER_SERVICE_NAME}" \
+          --project "${PROJECT_ID}" \
           --image "$$IMAGE_REF" \
           --region "${_REGION}" \
           --platform managed \
+          --service-account "${_WORKER_RUNTIME_SERVICE_ACCOUNT}" \
+          --ingress internal \
+          --no-allow-unauthenticated \
+          --min-instances "0" \
+          --max-instances "1" \
+          --concurrency "1" \
+          --timeout "240s" \
+          --cpu "1" \
+          --memory "512Mi" \
+          --update-env-vars "APP_COMPONENT=telegram-worker,APP_COMMIT_SHA=${COMMIT_SHA},APP_RELEASE_SHA=${SHORT_SHA},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_GASTOS_TABLE=gastos" \
+          --set-secrets "$$WORKER_SECRET_ENV_VARS" \
+          --update-labels "commit-sha=${SHORT_SHA}" \
+          --quiet
+
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: "deploy-api-cloud-run"
+    entrypoint: "/bin/sh"
+    args:
+      - "-c"
+      - |
+        set -eu
+        IMAGE_REF=$$(cat /workspace/image_ref.txt)
+        API_SECRET_ENV_VARS=$$(python3 -c 'import sys; allowed={"SUPABASE_KEY","TELEGRAM_SECRET_TOKEN","RECURRING_EXPENSES_CRON_SECRET","DATA_ENCRYPTION_KEY"}; print(",".join(item for item in open(sys.argv[1]).read().strip().split(",") if item.split("=",1)[0] in allowed))' /workspace/secret_env_vars.txt)
+        WORKER_URL=$$(gcloud run services describe "${_WORKER_SERVICE_NAME}" --project "${PROJECT_ID}" --region "${_REGION}" --platform managed --format='value(status.url)')
+        gcloud run deploy "${_API_SERVICE_NAME}" \
+          --project "${PROJECT_ID}" \
+          --image "$$IMAGE_REF" \
+          --region "${_REGION}" \
+          --platform managed \
+          --service-account "${_API_RUNTIME_SERVICE_ACCOUNT}" \
+          --ingress all \
+          --allow-unauthenticated \
           --min-instances "0" \
           --max-instances "1" \
           --concurrency "10" \
           --timeout "30s" \
           --cpu "1" \
           --memory "512Mi" \
-          --update-env-vars "APP_COMMIT_SHA=${COMMIT_SHA},APP_RELEASE_SHA=${SHORT_SHA}" \
-          --update-secrets "$$SECRET_ENV_VARS" \
+          --update-env-vars "APP_COMPONENT=api,APP_COMMIT_SHA=${COMMIT_SHA},APP_RELEASE_SHA=${SHORT_SHA},SUPABASE_URL=${_SUPABASE_URL},SUPABASE_GASTOS_TABLE=gastos,FRONTEND_PUBLIC_URL=${_FRONTEND_PUBLIC_URL},FRONTEND_ALLOWED_ORIGINS=${_FRONTEND_ALLOWED_ORIGIN},AUTH_TEST_MODE=false,ALLOW_LOCAL_DEV_AUTH=false,TELEGRAM_TASKS_PROJECT=${PROJECT_ID},TELEGRAM_TASKS_LOCATION=${_REGION},TELEGRAM_TASKS_QUEUE=${_TASK_QUEUE_NAME},TELEGRAM_WORKER_URL=$$WORKER_URL,TELEGRAM_TASK_INVOKER_SERVICE_ACCOUNT=${_TASK_INVOKER_SERVICE_ACCOUNT}" \
+          --set-secrets "$$API_SECRET_ENV_VARS" \
           --update-labels "commit-sha=${SHORT_SHA}" \
           --quiet
 
@@ -85,7 +118,8 @@ steps:
       - "-c"
       - |
         set -eu
-        SERVICE_URL=$$(gcloud run services describe "${_SERVICE_NAME}" \
+        SERVICE_URL=$$(gcloud run services describe "${_API_SERVICE_NAME}" \
+          --project "${PROJECT_ID}" \
           --region "${_REGION}" \
           --platform managed \
           --format='value(status.url)')
@@ -114,7 +148,8 @@ steps:
           --project "${PROJECT_ID}" \
           --retention 2 \
           --protected-version-file /workspace/resolved_secret_versions.json \
-          --cloud-run-service "${_SERVICE_NAME}" \
+          --cloud-run-service "${_API_SERVICE_NAME}" \
+          --cloud-run-service "${_WORKER_SERVICE_NAME}" \
           --cloud-run-region "${_REGION}" \
           --min-age-secret "${_SECRET_ID_DATA_ENCRYPTION_KEY}=7" \
           --ignore-missing-secrets \
@@ -135,8 +170,13 @@ substitutions:
   _AR_HOSTNAME: "southamerica-east1-docker.pkg.dev"
   _AR_REPOSITORY: "cloud-run-source-deploy"
   _IMAGE_NAME: "financemgmtbot-git"
-  _SERVICE_NAME: "financemgmtbot-git"
+  _API_SERVICE_NAME: "financemgmtbot-git"
+  _WORKER_SERVICE_NAME: "financemgmtbot-worker"
   _REGION: "southamerica-east1"
+  _TASK_QUEUE_NAME: "telegram-updates"
+  _API_RUNTIME_SERVICE_ACCOUNT: "financemgmtbot-api@financemgmtbot.iam.gserviceaccount.com"
+  _WORKER_RUNTIME_SERVICE_ACCOUNT: "financemgmtbot-worker@financemgmtbot.iam.gserviceaccount.com"
+  _TASK_INVOKER_SERVICE_ACCOUNT: "financemgmtbot-task-invoker@financemgmtbot.iam.gserviceaccount.com"
   _SECRET_ID_SUPABASE_KEY: "SUPABASE_KEY"
   _SECRET_ID_TELEGRAM_BOT_TOKEN: "TELEGRAM_BOT_TOKEN"
   _SECRET_ID_TELEGRAM_SECRET_TOKEN: "TELEGRAM_SECRET_TOKEN"

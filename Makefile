@@ -11,6 +11,8 @@ BACKEND_COVERAGE_ARGS = \
 	--cov=main \
 	--cov=security \
 	--cov=telegram_service \
+	--cov=telegram_tasks \
+	--cov=telegram_update_ledger \
 	--cov=utils \
 	--cov=web_app \
 	--cov-branch \

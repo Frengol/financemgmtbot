@@ -12,6 +12,7 @@ O FinanceMgmtBot recebe texto, audio ou foto pelo canal conversacional, transfor
 
 - **Linguagem natural com controle de backend:** o usuario escreve como fala, a IA analisa a intencao e o backend limita o resultado a acoes conhecidas, estruturas previsiveis e regras financeiras deterministicas.
 - **Texto, audio e foto no mesmo contrato financeiro:** independente da entrada, tudo converge para o mesmo pipeline de categorias, datas, valores, contas, filtros e validacoes.
+- **Processamento resiliente a interrupcoes:** cada mensagem e confirmada em uma fila duravel antes do trabalho pesado, pode ser retomada apos falha e nao duplica pendencias nem lancamentos financeiros.
 - **Cupons Com Revisao:** fotos de cupons viram lotes revisaveis, com itens, descontos e pagamento organizados antes do salvamento final.
 - **Despesas fixas sem duplicidade:** recorrencias sao geradas diariamente com idempotencia, evitando relancar a mesma conta ou assinatura.
 - **Painel administrativo como camada de operacao:** aprovacoes, historico editavel, exclusoes seguras, recorrencias e consultas ficam em um painel unico para revisar e corrigir o que a conversa capturou.

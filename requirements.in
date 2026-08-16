@@ -1,9 +1,13 @@
 quart
 hypercorn
 httpx
+h2>=4.4.1
 supabase
 openai
 groq
 python-json-logger
 google-generativeai
-cryptography
+google-cloud-tasks
+httplib2>=0.32.0
+pyasn1>=0.6.4
+cryptography>=50.0.0

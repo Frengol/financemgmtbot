@@ -144,6 +144,42 @@ def test_cli_defaults_to_dry_run_and_requires_execute_to_destroy(monkeypatch, ca
     assert '"dry_run": true' in capsys.readouterr().out
 
 
+def test_prune_collects_protected_versions_from_both_cloud_run_services(monkeypatch):
+    inspected = []
+
+    monkeypatch.setattr(
+        prune_secret_versions,
+        "list_secret_versions",
+        lambda project_id, secret_id: [_version(secret_id, 3), _version(secret_id, 2), _version(secret_id, 1)],
+    )
+    monkeypatch.setattr(prune_secret_versions, "destroy_secret_version", lambda *args: None)
+
+    def load_protected(project_id, service_name, region):
+        inspected.append(service_name)
+        return {"SUPABASE_KEY": {"1" if service_name == "api" else "2"}}
+
+    monkeypatch.setattr(prune_secret_versions, "load_cloud_run_protected_versions", load_protected)
+
+    exit_code = prune_secret_versions.main(
+        [
+            "prune",
+            "--project",
+            "project-1",
+            "--secret",
+            "SUPABASE_KEY",
+            "--cloud-run-service",
+            "api",
+            "--cloud-run-service",
+            "worker",
+            "--cloud-run-region",
+            "southamerica-east1",
+        ]
+    )
+
+    assert exit_code == 0
+    assert inspected == ["api", "worker"]
+
+
 def test_cli_default_managed_secrets_use_real_secret_ids(monkeypatch):
     listed_secrets = []
 

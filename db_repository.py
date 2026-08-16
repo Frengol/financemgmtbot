@@ -43,12 +43,55 @@ def consultar_no_banco(filtros):
     resposta = aplicar_filtros_query(query, filtros).execute()
     return sum(item["valor"] for item in resposta.data), len(resposta.data)
 
-def _inserir_registros_lote(registros, total):
+
+def load_records_by_source_update_id(source_update_id, origin_chat_id=None):
+    if source_update_id is None:
+        return []
+    query = (
+        supabase
+        .table(TRANSACTIONS_TABLE)
+        .select("id, data, valor, natureza, categoria, descricao, metodo_pagamento, conta, source_record_key")
+        .eq("source_update_id", source_update_id)
+    )
+    if origin_chat_id is not None:
+        query = query.eq("source_origin_chat_id", origin_chat_id)
+    response = query.order("source_record_key").execute()
+    data = getattr(response, "data", None)
+    return data if isinstance(data, list) else []
+
+def _with_effect_keys(registros, source_update_id, prefix, origin_chat_id=None):
+    if source_update_id is None:
+        return registros
+    enriched = []
+    for index, record in enumerate(registros, start=1):
+        row = {
+            **record,
+            "source_update_id": source_update_id,
+            "source_record_key": f"{prefix}:{index:04d}",
+        }
+        if origin_chat_id is not None:
+            row["source_origin_chat_id"] = origin_chat_id
+        enriched.append(row)
+    return enriched
+
+
+def _persist_records(registros, *, source_update_id=None):
+    table = supabase.table(TRANSACTIONS_TABLE)
+    if source_update_id is None:
+        return table.insert(registros).execute()
+    return table.upsert(
+        registros,
+        on_conflict="source_update_id,source_record_key",
+        ignore_duplicates=True,
+    ).execute()
+
+
+def _inserir_registros_lote(registros, total, *, source_update_id=None):
     if not registros:
         return 0, 0.0
 
     try:
-        supabase.table(TRANSACTIONS_TABLE).insert(registros).execute()
+        _persist_records(registros, source_update_id=source_update_id)
         logger.info({"event": "db_bulk_insert_success", "items_grouped": len(registros), "total_value": total})
         return len(registros), total
     except APIError as e:
@@ -61,21 +104,32 @@ def _inserir_registros_lote(registros, total):
         })
         raise Exception(f"Erro no Banco (Cod: {e.code}): {e.message}")
 
-def gravar_lote_no_banco_com_registros(dados_lote):
+def gravar_lote_no_banco_com_registros(dados_lote, *, source_update_id=None, origin_chat_id=None):
     data_atual = get_brasilia_time().strftime("%Y-%m-%d")
     registros, total = build_receipt_transaction_records(dados_lote, data_atual)
-    linhas, total_salvo = _inserir_registros_lote(registros, total)
+    registros = _with_effect_keys(registros, source_update_id, "receipt", origin_chat_id=origin_chat_id)
+    linhas, total_salvo = _inserir_registros_lote(
+        registros,
+        total,
+        source_update_id=source_update_id,
+    )
     return linhas, total_salvo, registros if linhas else []
 
-def gravar_lote_no_banco(dados_lote):
-    linhas, total, _ = gravar_lote_no_banco_com_registros(dados_lote)
+def gravar_lote_no_banco(dados_lote, *, source_update_id=None, origin_chat_id=None):
+    linhas, total, _ = gravar_lote_no_banco_com_registros(
+        dados_lote,
+        source_update_id=source_update_id,
+        origin_chat_id=origin_chat_id,
+    )
     return linhas, total
 
-def inserir_no_banco(dados_reg):
+def inserir_no_banco(dados_reg, *, source_update_id=None, origin_chat_id=None):
     registros_em_lote = build_installment_records(dados_reg, fallback_date=get_brasilia_time())
+    registros_em_lote = _with_effect_keys(registros_em_lote, source_update_id, "installment", origin_chat_id=origin_chat_id)
     try:
-        supabase.table(TRANSACTIONS_TABLE).insert(registros_em_lote).execute()
+        _persist_records(registros_em_lote, source_update_id=source_update_id)
         logger.info({"event": "db_insert_success", "installments": len(registros_em_lote)})
+        return registros_em_lote
     except APIError as e:
         logger.error({
             "event": "db_error_insert",
