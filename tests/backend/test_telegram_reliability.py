@@ -132,6 +132,34 @@ class TestTaskProducer:
             await telegram_tasks.enqueue_telegram_update({"message": {}}, client=AsyncMock())
 
 
+class _StrictGetClient:
+    """Reproduz a assinatura real do httpx.AsyncClient.get (sem kwarg json)."""
+
+    def __init__(self):
+        self.get_calls = []
+
+    async def get(self, url, *, params=None):
+        self.get_calls.append((url, params))
+        if "/getFile" in url:
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"file_path": "voice/file_223.oga"}},
+                request=httpx.Request("GET", url),
+            )
+        return httpx.Response(200, content=b"ogg-bytes", request=httpx.Request("GET", url))
+
+
+class TestTelegramServiceHttp:
+    @pytest.mark.asyncio
+    async def test_baixar_arquivo_telegram_usa_get_sem_json(self):
+        client = _StrictGetClient()
+        with patch.object(telegram_service, "http_client", client):
+            content = await telegram_service.baixar_arquivo_telegram("FILE_ID")
+
+        assert content == b"ogg-bytes"
+        assert client.get_calls[0][1] == {"file_id": "FILE_ID"}
+
+
 class TestWebhookEnqueue:
     @pytest.mark.asyncio
     async def test_acknowledges_only_after_enqueue_confirmation(self):
@@ -587,6 +615,41 @@ class TestFinancialEffects:
 
         assert all(row["source_origin_chat_id"] == 5 for row in records)
 
+    @pytest.mark.asyncio
+    async def test_failure_notice_sent_only_when_notify_failure(self):
+        delivery = AsyncMock()
+        logmock = MagicMock()
+        with patch.object(handlers, "load_records_by_source_update_id", return_value=[]), patch.object(
+            handlers, "load_pending_item_by_source_update_id", return_value=None
+        ), patch.object(handlers, "processar_texto_com_llm", AsyncMock(side_effect=RuntimeError("boom"))), patch.object(
+            handlers, "enviar_mensagem_telegram", delivery
+        ), patch.object(handlers, "logger", logmock):
+            with pytest.raises(RuntimeError):
+                await handlers.processar_update_assincrono(
+                    {"update_id": 701, "message": {"chat": {"id": 1}, "from": {"id": 2}, "text": "oi"}},
+                    source_update_id=701,
+                    notify_failure=False,
+                )
+
+        delivery.assert_not_awaited()
+        assert logmock.error.call_args.args[0]["update_id"] == 701
+
+    @pytest.mark.asyncio
+    async def test_failure_notice_sent_by_default_on_first_attempt(self):
+        delivery = AsyncMock()
+        with patch.object(handlers, "load_records_by_source_update_id", return_value=[]), patch.object(
+            handlers, "load_pending_item_by_source_update_id", return_value=None
+        ), patch.object(handlers, "processar_texto_com_llm", AsyncMock(side_effect=RuntimeError("boom"))), patch.object(
+            handlers, "enviar_mensagem_telegram", delivery
+        ):
+            with pytest.raises(RuntimeError):
+                await handlers.processar_update_assincrono(
+                    {"update_id": 702, "message": {"chat": {"id": 1}, "from": {"id": 2}, "text": "oi"}},
+                    source_update_id=702,
+                )
+
+        delivery.assert_awaited_once()
+
     def test_reliability_migration_binds_financial_origin(self):
         migration = (
             Path(__file__).resolve().parents[2]
@@ -700,6 +763,34 @@ class TestWorkerRoute:
 
         assert response.status_code == 503
         assert "database detail" not in await response.get_data(as_text=True)
+
+    @pytest.mark.asyncio
+    async def test_worker_requests_notice_only_on_first_attempt(self):
+        app = worker_routes.create_worker_app_for_test()
+        retry_claim = telegram_update_ledger.UpdateClaim(True, "processing", 3, None)
+        async with app.test_client() as client:
+            with patch.object(worker_routes, "claim_update", AsyncMock(return_value=retry_claim)), patch.object(
+                worker_routes, "processar_update_assincrono", AsyncMock()
+            ) as retry_processor, patch.object(worker_routes, "mark_completed", AsyncMock()):
+                retry_response = await client.post(
+                    "/internal/tasks/telegram-update",
+                    json={"update_id": 45, "message": {"chat": {"id": 1}, "text": "x"}},
+                    headers={"X-CloudTasks-TaskName": "task-45", "X-CloudTasks-QueueName": "telegram-updates"},
+                )
+            first_claim = telegram_update_ledger.UpdateClaim(True, "processing", 1, None)
+            with patch.object(worker_routes, "claim_update", AsyncMock(return_value=first_claim)), patch.object(
+                worker_routes, "processar_update_assincrono", AsyncMock()
+            ) as first_processor, patch.object(worker_routes, "mark_completed", AsyncMock()):
+                first_response = await client.post(
+                    "/internal/tasks/telegram-update",
+                    json={"update_id": 46, "message": {"chat": {"id": 1}, "text": "x"}},
+                    headers={"X-CloudTasks-TaskName": "task-46", "X-CloudTasks-QueueName": "telegram-updates"},
+                )
+
+        assert retry_response.status_code == 200
+        assert retry_processor.await_args.kwargs["notify_failure"] is False
+        assert first_response.status_code == 200
+        assert first_processor.await_args.kwargs["notify_failure"] is True
 
     @pytest.mark.asyncio
     async def test_completed_update_does_not_run_handler_again(self):

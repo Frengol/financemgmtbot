@@ -69,6 +69,7 @@ def register_worker_routes(app):
                     source_update_id=update_id,
                     progress_message_id=claim.progress_message_id,
                     stage_callback=record_stage,
+                    notify_failure=(claim.attempt_count == 1),
                 )
             await mark_completed(update_id, lease_owner)
         except TelegramPermanentError as exc:

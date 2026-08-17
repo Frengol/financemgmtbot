@@ -155,6 +155,7 @@ async def processar_update_assincrono(
     source_update_id=None,
     progress_message_id=None,
     stage_callback=None,
+    notify_failure=True,
 ):
     chat_id = None
 
@@ -241,7 +242,7 @@ async def processar_update_assincrono(
         origin_user_id = message.get("from", {}).get("id")
         texto_analise = ""
 
-        logger.info({"event": "webhook_received", "type": "photo" if "photo" in message else "voice" if "voice" in message else "text"})
+        logger.info({"event": "webhook_received", "type": "photo" if "photo" in message else "voice" if "voice" in message else "text", "update_id": source_update_id})
 
         if await _resume_existing_effect(chat_id, source_update_id, progress_message_id, origin_user_id=origin_user_id):
             return
@@ -435,10 +436,10 @@ async def processar_update_assincrono(
             raise Exception("Intenção não reconhecida.")
 
     except Exception:
-        logger.error({"event": "system_failure", "error_code": "processing_failed"})
-        if "chat_id" in locals() and chat_id:
+        logger.error({"event": "system_failure", "error_code": "processing_failed", "update_id": source_update_id})
+        if notify_failure and "chat_id" in locals() and chat_id:
             try:
                 await enviar_mensagem_telegram(chat_id, "❌ *Falha Sistémica*\n⚠️ O processamento foi interrompido com segurança. Tente novamente em instantes.")
             except Exception:
-                logger.error({"event": "telegram_failure_notice_failed"})
+                logger.error({"event": "telegram_failure_notice_failed", "update_id": source_update_id})
         raise

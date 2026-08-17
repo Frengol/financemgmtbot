@@ -108,11 +108,15 @@ async def _request(method: str, endpoint: str, *, payload=None, params=None) -> 
     if not http_client:
         raise TelegramRetryableError("Telegram HTTP client is unavailable.")
     url = f"{TELEGRAM_API_URL}/{endpoint}"
+    kwargs: dict[str, Any] = {"params": params}
+    if payload is not None:
+        kwargs["json"] = payload
     try:
-        response = await getattr(http_client, method)(url, json=payload, params=params)
+        response = await getattr(http_client, method)(url, **kwargs)
     except (httpx.TimeoutException, httpx.NetworkError, asyncio.TimeoutError) as exc:
         raise TelegramRetryableError("Telegram request failed temporarily.") from exc
     except Exception as exc:
+        logger.warning({"event": "telegram_request_failed", "error_code": type(exc).__name__, "endpoint": endpoint})
         raise TelegramRetryableError("Telegram request failed temporarily.") from exc
     return _parse_response(response)
 
