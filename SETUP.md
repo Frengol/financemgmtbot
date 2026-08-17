@@ -485,6 +485,8 @@ VITE_ALLOWED_ADMIN_EMAILS=<ADMIN_EMAIL>
 
 Nao crie `SUPABASE_KEY` aqui. O frontend usa apenas `anon public`, nunca `service_role`.
 
+O gate de audit do CI roda com `--audit-level=high`. Aceite documentado (16/08/2026): 2 vulnerabilidades moderadas no react-router 6.30.4 (GHSA-wrjc-x8rr-h8h6, GHSA-337j-9hxr-rhxg); a correcao exige migracao breaking para react-router-dom 7.18.2, adiada.
+
 Agora configure os secrets do workflow de despesas recorrentes:
 
 1. Ainda em `Settings -> Secrets and variables -> Actions`.

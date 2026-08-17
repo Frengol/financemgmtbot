@@ -56,7 +56,7 @@ audit-backend-deps:
 	pip-audit --require-hashes --disable-pip -r requirements-dev.txt
 
 audit-frontend-deps:
-	npm audit --omit=dev --prefix frontend
+	npm audit --omit=dev --audit-level=high --prefix frontend
 
 audit-repo-security:
 	@command -v gitleaks >/dev/null 2>&1 || { \
