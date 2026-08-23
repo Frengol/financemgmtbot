@@ -391,6 +391,14 @@ gcloud iam service-accounts add-iam-policy-binding financemgmtbot-task-invoker@f
 
 O `cloudbuild.yaml` publica uma imagem imutavel e faz rollout primeiro de `financemgmtbot-worker` privado (`ingress=internal`, sem anonimo, concorrencia `1`, timeout `240s`) e depois de `financemgmtbot-git` publico (`concorrencia=10`, timeout `30s`). O worker aplica um budget interno de `150s`; a task usa deadline de `180s`.
 
+O worker registra `media_get_file`, `media_download`, `ocr`, `stt`, `llm` e `telegram_delivery` separadamente. Para investigar uma atualização sem expor conteúdo do cupom, use somente metadados sanitizados:
+
+```bash
+gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.location="southamerica-east1" AND (jsonPayload.update_id=611390377 OR jsonPayload.error_code="ResourceExhausted")' --project=financemgmtbot --freshness=7d --format='value(timestamp,jsonPayload.event,jsonPayload.update_id,jsonPayload.attempt,jsonPayload.stage,jsonPayload.provider,jsonPayload.error_code,jsonPayload.duration_ms)'
+```
+
+Repetições de `media_download` ou `ResourceExhausted` para o mesmo `update_id` devem gerar alerta operacional. A criação/alteração de alertas e da fila continua sendo uma operação de infraestrutura separada e exige autorização explícita; este diagnóstico não altera recursos do Google Cloud.
+
 Configure `_SUPABASE_URL`, `_FRONTEND_PUBLIC_URL` e `_FRONTEND_ALLOWED_ORIGIN` no trigger antes do primeiro build. O build falha se essas substitutions nao forem informadas.
 
 ## 15. Migrar o trigger e executar o rollout

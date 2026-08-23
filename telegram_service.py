@@ -8,6 +8,8 @@ from config import TELEGRAM_API_URL, TELEGRAM_TOKEN, logger
 
 
 TELEGRAM_TEXT_LIMIT = 4096
+TELEGRAM_GET_FILE_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
+TELEGRAM_MEDIA_DOWNLOAD_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
 
 
 class TelegramError(RuntimeError):
@@ -15,7 +17,9 @@ class TelegramError(RuntimeError):
 
 
 class TelegramRetryableError(TelegramError):
-    pass
+    def __init__(self, message, *, internal_retryable=False):
+        super().__init__(message)
+        self.internal_retryable = internal_retryable
 
 
 class TelegramPermanentError(TelegramError):
@@ -104,17 +108,19 @@ def _parse_response(response: Any) -> dict[str, Any]:
     return payload.get("result") if isinstance(payload.get("result"), dict) else {}
 
 
-async def _request(method: str, endpoint: str, *, payload=None, params=None) -> dict[str, Any]:
+async def _request(method: str, endpoint: str, *, payload=None, params=None, timeout=None) -> dict[str, Any]:
     if not http_client:
         raise TelegramRetryableError("Telegram HTTP client is unavailable.")
     url = f"{TELEGRAM_API_URL}/{endpoint}"
     kwargs: dict[str, Any] = {"params": params}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
     if payload is not None:
         kwargs["json"] = payload
     try:
         response = await getattr(http_client, method)(url, **kwargs)
     except (httpx.TimeoutException, httpx.NetworkError, asyncio.TimeoutError) as exc:
-        raise TelegramRetryableError("Telegram request failed temporarily.") from exc
+        raise TelegramRetryableError("Telegram request failed temporarily.", internal_retryable=True) from exc
     except Exception as exc:
         logger.warning({"event": "telegram_request_failed", "error_code": type(exc).__name__, "endpoint": endpoint})
         raise TelegramRetryableError("Telegram request failed temporarily.") from exc
@@ -196,21 +202,83 @@ async def responder_callback_telegram(callback_query_id):
         return {}
 
 
-async def baixar_arquivo_telegram(file_id):
-    file_info = await _request("get", "getFile", params={"file_id": file_id})
+async def baixar_arquivo_telegram(file_id, *, stage_callback=None, progress_message_id=None):
+    async def record_stage(stage):
+        if stage_callback:
+            await stage_callback(stage, progress_message_id)
+
+    file_info = None
+    for attempt in range(1, 3):
+        await record_stage("media_get_file")
+        started_at = asyncio.get_running_loop().time()
+        try:
+            file_info = await _request(
+                "get",
+                "getFile",
+                params={"file_id": file_id},
+                timeout=TELEGRAM_GET_FILE_TIMEOUT,
+            )
+            logger.info(
+                {
+                    "event": "telegram_media_stage_completed",
+                    "stage": "media_get_file",
+                    "provider": "telegram",
+                    "attempt": attempt,
+                    "duration_ms": round((asyncio.get_running_loop().time() - started_at) * 1000),
+                }
+            )
+            break
+        except TelegramRetryableError as exc:
+            logger.warning(
+                {
+                    "event": "telegram_media_stage_retryable_failure",
+                    "stage": "media_get_file",
+                    "provider": "telegram",
+                    "attempt": attempt,
+                    "error_code": getattr(exc.__cause__, "__class__", type(exc)).__name__,
+                    "duration_ms": round((asyncio.get_running_loop().time() - started_at) * 1000),
+                }
+            )
+            if not exc.internal_retryable or attempt == 2:
+                raise
+            await asyncio.sleep(0.5)
     file_path = file_info.get("file_path")
     if not file_path:
         raise TelegramPermanentError("Telegram file metadata is incomplete.")
     if not http_client:
         raise TelegramRetryableError("Telegram HTTP client is unavailable.")
     download_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-    try:
-        response = await http_client.get(download_url)
-        response.raise_for_status()
-    except (httpx.TimeoutException, httpx.NetworkError) as exc:
-        raise TelegramRetryableError("Telegram file download failed temporarily.") from exc
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 429 or exc.response.status_code >= 500:
-            raise TelegramRetryableError("Telegram file download failed temporarily.") from exc
-        raise TelegramPermanentError("Telegram rejected the file download.") from exc
-    return response.content
+    for attempt in range(1, 3):
+        await record_stage("media_download")
+        started_at = asyncio.get_running_loop().time()
+        try:
+            response = await http_client.get(download_url, timeout=TELEGRAM_MEDIA_DOWNLOAD_TIMEOUT)
+            response.raise_for_status()
+            logger.info(
+                {
+                    "event": "telegram_media_stage_completed",
+                    "stage": "media_download",
+                    "provider": "telegram",
+                    "attempt": attempt,
+                    "duration_ms": round((asyncio.get_running_loop().time() - started_at) * 1000),
+                }
+            )
+            return response.content
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            logger.warning(
+                {
+                    "event": "telegram_media_stage_retryable_failure",
+                    "stage": "media_download",
+                    "provider": "telegram",
+                    "attempt": attempt,
+                    "error_code": type(exc).__name__,
+                    "duration_ms": round((asyncio.get_running_loop().time() - started_at) * 1000),
+                }
+            )
+            if attempt == 2:
+                raise TelegramRetryableError("Telegram file download failed temporarily.") from exc
+            await asyncio.sleep(0.5)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429 or exc.response.status_code >= 500:
+                raise TelegramRetryableError("Telegram file download failed temporarily.") from exc
+            raise TelegramPermanentError("Telegram rejected the file download.") from exc

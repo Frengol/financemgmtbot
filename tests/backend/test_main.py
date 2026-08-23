@@ -819,8 +819,35 @@ class TestExtrairTabelaReciboGemini:
 
         assert "Arroz" in result
 
+    @pytest.mark.asyncio
+    async def test_resource_exhausted_is_logged_with_ocr_provider(self):
+        class ResourceExhausted(Exception):
+            pass
+
+        with patch("google.generativeai.GenerativeModel") as mock_model_cls, patch(
+            "asyncio.to_thread", new_callable=AsyncMock, side_effect=ResourceExhausted("quota")
+        ), patch.object(ai_service.logger, "warning") as warning:
+            mock_model_cls.return_value = MagicMock()
+            with pytest.raises(ResourceExhausted):
+                await ai_service.extrair_tabela_recibo_gemini(b"fake_image_bytes")
+
+        event = warning.call_args.args[0]
+        assert event["event"] == "ai_provider_retryable_failure"
+        assert event["provider"] == "gemini"
+        assert event["stage"] == "ocr"
+        assert event["error_code"] == "ResourceExhausted"
+        assert isinstance(event["duration_ms"], int)
+
 
 class TestProcessarTextoComLLM:
+    @pytest.mark.asyncio
+    async def test_non_transient_provider_error_is_not_misclassified(self):
+        config.deepseek_client.chat.completions.create = AsyncMock(side_effect=ValueError("invalid request"))
+        with patch.object(ai_service.logger, "warning") as warning:
+            with pytest.raises(ValueError):
+                await ai_service.processar_texto_com_llm("teste")
+        warning.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_returns_parsed_json(self):
         class MockMessage:
@@ -911,6 +938,28 @@ class TestIniciarFluxoExclusao:
 # 9. WEBHOOK CONTROLLER — processar_update_assincrono
 # ============================================================
 class TestProcessarUpdateAssincrono:
+    @pytest.mark.asyncio
+    async def test_resume_pending_effect_rejects_non_mapping_payload(self):
+        with patch.object(handlers, "load_records_by_source_update_id", return_value=[]), patch.object(
+            handlers, "load_pending_item_by_source_update_id", return_value={"kind": "receipt_batch", "payload": "invalid"}
+        ), patch.object(handlers, "pending_item_expired", return_value=False), patch.object(
+            handlers, "matches_pending_origin", return_value=True
+        ):
+            assert await handlers._resume_existing_effect(1, 42, None) is False
+
+    @pytest.mark.asyncio
+    async def test_final_delivery_records_stage_for_edit_and_send(self):
+        stage_callback = AsyncMock()
+        with patch.object(handlers, "editar_mensagem_telegram", AsyncMock()) as edit_message, patch.object(
+            handlers, "enviar_mensagem_telegram", AsyncMock()
+        ) as send_message:
+            await handlers._deliver_final_message(1, 2, "edit", stage_callback=stage_callback)
+            await handlers._deliver_final_message(1, None, "send", stage_callback=stage_callback)
+
+        edit_message.assert_awaited_once_with(1, 2, "edit", None)
+        send_message.assert_awaited_once_with(1, "send", None)
+        assert stage_callback.await_count == 2
+
     """Integration tests for the main processing pipeline."""
 
     def _setup_supabase_idempotency(self):
@@ -1201,13 +1250,13 @@ class TestCallbackQuery:
         await handlers.processar_update_assincrono(update)
 
         urls = [c[0][0] for c in mock_http_client.post.call_args_list]
-        assert any("editMessageText" in url for url in urls)
-        assert not any("editMessageReplyMarkup" in url for url in urls)
+        assert any("editMessageReplyMarkup" in url for url in urls)
+        assert not any("editMessageText" in url for url in urls)
 
         msgs = [
             c[1]["json"]["text"]
             for c in mock_http_client.post.call_args_list
-            if "editMessageText" in c[0][0] and "json" in c[1] and "text" in c[1].get("json", {})
+            if "sendMessage" in c[0][0] and "json" in c[1] and "text" in c[1].get("json", {})
         ]
         assert any(
             "Registros salvos" in m

@@ -52,10 +52,22 @@ def register_worker_routes(app):
             return jsonify({"status": "retry", "code": "LEASE_ACTIVE"}), 503
 
         stage = "processing"
+        stage_started_at = time.monotonic()
         try:
             async def record_stage(next_stage, progress_message_id=None):
-                nonlocal stage
+                nonlocal stage, stage_started_at
+                now = time.monotonic()
+                logger.info(
+                    {
+                        "event": "telegram_update_stage",
+                        "update_id": update_id,
+                        "attempt": claim.attempt_count,
+                        "stage": next_stage,
+                        "duration_ms": round((now - stage_started_at) * 1000),
+                    }
+                )
                 stage = next_stage
+                stage_started_at = now
                 await update_stage(
                     update_id,
                     lease_owner,

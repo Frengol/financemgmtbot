@@ -22,6 +22,7 @@ from security import (
     delete_pending_item,
     load_pending_item,
     load_pending_item_by_source_update_id,
+    mark_pending_summary_sent,
     matches_pending_origin,
     pending_item_expired,
     store_pending_item,
@@ -31,6 +32,7 @@ from telegram_service import (
     editar_mensagem_telegram,
     enviar_acao_telegram,
     enviar_mensagem_telegram,
+    remover_teclado_mensagem_telegram,
     responder_callback_telegram,
 )
 from utils import inferir_natureza
@@ -64,7 +66,9 @@ async def _chat_rate_limited(scope: str, chat_id, user_id, *, limit: int, window
     return True
 
 
-async def _deliver_final_message(chat_id, progress_message_id, text, reply_markup=None):
+async def _deliver_final_message(chat_id, progress_message_id, text, reply_markup=None, stage_callback=None):
+    if stage_callback:
+        await stage_callback("telegram_delivery", progress_message_id)
     if progress_message_id:
         return await editar_mensagem_telegram(chat_id, progress_message_id, text, reply_markup)
     return await enviar_mensagem_telegram(chat_id, text, reply_markup)
@@ -205,11 +209,18 @@ async def processar_update_assincrono(
                     source_update_id=effect_source_update_id,
                     origin_chat_id=chat_id,
                 )
-                await editar_mensagem_telegram(
-                    chat_id,
-                    msg_id,
-                    formatar_resumo_registros_salvos(registros_salvos),
-                )
+                if stage_callback:
+                    await stage_callback("approval_persisted", progress_message_id)
+                    await stage_callback("telegram_delivery", progress_message_id)
+                await remover_teclado_mensagem_telegram(chat_id, msg_id)
+                if stage_callback:
+                    await stage_callback("approval_keyboard_removed", progress_message_id)
+                    await stage_callback("telegram_delivery", progress_message_id)
+                if not payload_cache.get("_approval_summary_sent"):
+                    await enviar_mensagem_telegram(chat_id, formatar_resumo_registros_salvos(registros_salvos))
+                    mark_pending_summary_sent(cache_id, payload_cache)
+                    if stage_callback:
+                        await stage_callback("approval_summary_sent", progress_message_id)
                 delete_pending_item(cache_id)
 
             elif acao == "editar":
@@ -262,13 +273,19 @@ async def processar_update_assincrono(
             else:
                 progress = await enviar_mensagem_telegram(chat_id, "👀 *Lendo cupom fiscal...*")
                 progress_message_id = progress.get("message_id") or progress_message_id
-            if stage_callback:
-                await stage_callback("media_download", progress_message_id)
             foto_id = message["photo"][-1]["file_id"]
-            img_bytes = await baixar_arquivo_telegram(foto_id)
+            if stage_callback:
+                await stage_callback("media_get_file", progress_message_id)
+            img_bytes = await baixar_arquivo_telegram(
+                foto_id,
+                stage_callback=stage_callback,
+                progress_message_id=progress_message_id,
+            )
             if not img_bytes or len(img_bytes) > MAX_TELEGRAM_IMAGE_BYTES:
                 await enviar_mensagem_telegram(chat_id, "⚠️ A imagem enviada é inválida ou excede o tamanho suportado.")
                 return
+            if stage_callback:
+                await stage_callback("ocr", progress_message_id)
             tabela_md = await extrair_tabela_recibo_gemini(img_bytes)
             texto_analise = f"Contexto: {message.get('caption', '')}\n\nNota Fiscal Extratada:\n{tabela_md}"
             logger.info({"event": "ocr_completed", "model": "gemini-2.5-flash"})
@@ -288,11 +305,17 @@ async def processar_update_assincrono(
                 progress = await enviar_mensagem_telegram(chat_id, "⏳ *Ouvindo...*")
                 progress_message_id = progress.get("message_id") or progress_message_id
             if stage_callback:
-                await stage_callback("media_download", progress_message_id)
-            audio_bytes = await baixar_arquivo_telegram(message["voice"]["file_id"])
+                await stage_callback("media_get_file", progress_message_id)
+            audio_bytes = await baixar_arquivo_telegram(
+                message["voice"]["file_id"],
+                stage_callback=stage_callback,
+                progress_message_id=progress_message_id,
+            )
             if not audio_bytes or len(audio_bytes) > MAX_TELEGRAM_AUDIO_BYTES:
                 await enviar_mensagem_telegram(chat_id, "⚠️ O áudio enviado é inválido ou excede o tamanho suportado.")
                 return
+            if stage_callback:
+                await stage_callback("stt", progress_message_id)
             texto_analise = await transcrever_audio(audio_bytes)
             logger.info({"event": "stt_completed", "model": "whisper-large-v3"})
         elif "text" in message:
@@ -318,6 +341,8 @@ async def processar_update_assincrono(
                 window_seconds=CHAT_AI_RATE_WINDOW_SECONDS,
             ):
                 return
+        if stage_callback:
+            await stage_callback("llm", progress_message_id)
         analise_ia = await processar_texto_com_llm(texto_analise)
         intencao = analise_ia.get("intencao")
 
@@ -345,7 +370,7 @@ async def processar_update_assincrono(
             grupos, total_final, desc_global = aplicar_map_reduce(dados_lote)
             texto_resumo = gerar_mensagem_resumo(cache_record["id"], dados_lote, grupos, total_final, desc_global)
             teclado = _receipt_approval_keyboard(cache_record["id"])
-            await _deliver_final_message(chat_id, progress_message_id, texto_resumo, teclado)
+            await _deliver_final_message(chat_id, progress_message_id, texto_resumo, teclado, stage_callback)
 
         elif intencao == "salvar_edicao_cupom":
             dados_lote = _normalize_dados_lote(analise_ia.get("dados_lote", {}))
@@ -358,6 +383,7 @@ async def processar_update_assincrono(
                 chat_id,
                 progress_message_id,
                 formatar_resumo_registros_salvos(registros_salvos),
+                stage_callback=stage_callback,
             )
 
         elif intencao == "registrar":
@@ -379,7 +405,7 @@ async def processar_update_assincrono(
                 f"🏦 {dados_reg.get('conta')} ({dados_reg.get('metodo_pagamento')})\n"
                 f"📝 {dados_reg.get('descricao')}"
             )
-            await _deliver_final_message(chat_id, progress_message_id, msg)
+            await _deliver_final_message(chat_id, progress_message_id, msg, stage_callback=stage_callback)
 
         elif intencao == "consultar":
             filtros = analise_ia.get("filtros_pesquisa", {})
@@ -423,7 +449,7 @@ async def processar_update_assincrono(
             else:
                 msg += "🗂️ Busca Global"
 
-            await _deliver_final_message(chat_id, progress_message_id, msg)
+            await _deliver_final_message(chat_id, progress_message_id, msg, stage_callback=stage_callback)
 
         elif intencao == "excluir":
             filtros_exc = analise_ia.get("filtros_exclusao", {})

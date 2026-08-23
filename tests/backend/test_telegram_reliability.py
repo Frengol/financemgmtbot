@@ -138,7 +138,7 @@ class _StrictGetClient:
     def __init__(self):
         self.get_calls = []
 
-    async def get(self, url, *, params=None):
+    async def get(self, url, *, params=None, timeout=None):
         self.get_calls.append((url, params))
         if "/getFile" in url:
             return httpx.Response(
@@ -158,6 +158,62 @@ class TestTelegramServiceHttp:
 
         assert content == b"ogg-bytes"
         assert client.get_calls[0][1] == {"file_id": "FILE_ID"}
+
+    @pytest.mark.asyncio
+    async def test_media_download_retries_one_timeout_then_confirms(self):
+        client = AsyncMock()
+        client.get.side_effect = [
+            httpx.Response(
+                200,
+                json={"ok": True, "result": {"file_path": "voice/file.oga"}},
+                request=httpx.Request("GET", "https://api.telegram.org"),
+            ),
+            httpx.ReadTimeout("download timeout"),
+            httpx.Response(200, content=b"bytes", request=httpx.Request("GET", "https://api.telegram.org/file")),
+        ]
+        stages = AsyncMock()
+        with patch.object(telegram_service, "http_client", client):
+            result = await telegram_service.baixar_arquivo_telegram(
+                "FILE_ID", stage_callback=stages, progress_message_id=77
+            )
+
+        assert result == b"bytes"
+        assert client.get.await_count == 3
+        assert client.get.await_args_list[1].kwargs["timeout"] == telegram_service.TELEGRAM_MEDIA_DOWNLOAD_TIMEOUT
+        assert [call.args[0] for call in stages.await_args_list] == [
+            "media_get_file", "media_download", "media_download"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_get_file_retries_one_network_timeout(self):
+        client = AsyncMock()
+        client.get.side_effect = [
+            httpx.ReadTimeout("metadata timeout"),
+            httpx.Response(
+                200,
+                json={"ok": True, "result": {"file_path": "voice/file.oga"}},
+                request=httpx.Request("GET", "https://api.telegram.org"),
+            ),
+            httpx.Response(200, content=b"bytes", request=httpx.Request("GET", "https://api.telegram.org/file")),
+        ]
+        with patch.object(telegram_service, "http_client", client), patch("telegram_service.asyncio.sleep", AsyncMock()):
+            assert await telegram_service.baixar_arquivo_telegram("FILE_ID") == b"bytes"
+
+        assert client.get.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_get_file_rate_limit_is_not_retried_internally(self):
+        client = AsyncMock()
+        client.get.return_value = httpx.Response(
+            429,
+            json={"ok": False, "error_code": 429, "description": "Too Many Requests"},
+            request=httpx.Request("GET", "https://api.telegram.org"),
+        )
+        with patch.object(telegram_service, "http_client", client):
+            with pytest.raises(telegram_service.TelegramRetryableError):
+                await telegram_service.baixar_arquivo_telegram("FILE_ID")
+
+        assert client.get.await_count == 1
 
 
 class TestWebhookEnqueue:
@@ -289,6 +345,24 @@ class TestLedger:
 
 
 class TestFinancialEffects:
+    def test_pending_summary_marker_is_encrypted_and_updated(self):
+        table = MagicMock()
+        response = MagicMock(data=[{"id": "pending-1"}])
+        table.update.return_value.eq.return_value.execute.return_value = response
+        with patch.object(security.supabase, "table", return_value=table):
+            security.mark_pending_summary_sent("pending-1", {"itens": []})
+
+        update_payload = table.update.call_args.args[0]
+        assert "payload_ciphertext" in update_payload
+        assert security.decrypt_pending_payload(update_payload["payload_ciphertext"])["_approval_summary_sent"] is True
+
+    def test_pending_summary_marker_requires_persistence_confirmation(self):
+        table = MagicMock()
+        table.update.return_value.eq.return_value.execute.return_value = MagicMock(data=None)
+        with patch.object(security.supabase, "table", return_value=table):
+            with pytest.raises(RuntimeError, match="delivery marker"):
+                security.mark_pending_summary_sent("pending-1", {"itens": []})
+
     def test_installments_use_stable_effect_keys_and_conflict_safe_upsert(self):
         table = MagicMock()
         table.upsert.return_value.execute.return_value = MagicMock(data=[])
@@ -675,8 +749,10 @@ class TestFinancialEffects:
         ), patch.object(handlers, "pending_item_expired", return_value=False), patch.object(
             handlers, "matches_pending_origin", return_value=True
         ), patch.object(handlers, "gravar_lote_no_banco_com_registros", saved), patch.object(
+            handlers, "remover_teclado_mensagem_telegram", AsyncMock()
+        ) as remove_keyboard, patch.object(handlers, "enviar_mensagem_telegram", AsyncMock()) as send_summary, patch.object(
             handlers, "editar_mensagem_telegram", AsyncMock()
-        ), patch.object(handlers, "delete_pending_item"):
+        ) as edit_text, patch.object(handlers, "delete_pending_item"):
             await handlers.processar_update_assincrono(
                 {
                     "update_id": 999,
@@ -691,6 +767,78 @@ class TestFinancialEffects:
             )
 
         assert saved.call_args.kwargs["source_update_id"] == 701
+        remove_keyboard.assert_awaited_once_with(1, 3)
+        send_summary.assert_awaited_once()
+        edit_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_telegram_approval_keeps_pending_when_summary_delivery_fails(self):
+        pending = {
+            "id": "pending-1",
+            "kind": "receipt_batch",
+            "payload": {"itens": [], "metodo_pagamento": "Pix", "conta": "Conta"},
+            "source_update_id": 701,
+        }
+        delete_pending = MagicMock()
+        with patch.object(handlers, "responder_callback_telegram", AsyncMock()), patch.object(
+            handlers, "load_pending_item", return_value=pending
+        ), patch.object(handlers, "pending_item_expired", return_value=False), patch.object(
+            handlers, "matches_pending_origin", return_value=True
+        ), patch.object(handlers, "gravar_lote_no_banco_com_registros", return_value=(1, 10.0, [])), patch.object(
+            handlers, "remover_teclado_mensagem_telegram", AsyncMock()
+        ), patch.object(
+            handlers, "enviar_mensagem_telegram", AsyncMock(side_effect=RuntimeError("telegram unavailable"))
+        ), patch.object(handlers, "delete_pending_item", delete_pending):
+            with pytest.raises(RuntimeError):
+                await handlers.processar_update_assincrono(
+                    {
+                        "update_id": 999,
+                        "callback_query": {
+                            "id": "cb",
+                            "data": "aprovar_pending-1",
+                            "from": {"id": 2},
+                            "message": {"chat": {"id": 1}, "message_id": 3},
+                        },
+                    }
+                )
+
+        delete_pending.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_telegram_approval_retry_with_delivery_marker_does_not_resend_summary(self):
+        pending = {
+            "id": "pending-1",
+            "kind": "receipt_batch",
+            "payload": {
+                "itens": [],
+                "metodo_pagamento": "Pix",
+                "conta": "Conta",
+                "_approval_summary_sent": True,
+            },
+            "source_update_id": 701,
+        }
+        with patch.object(handlers, "responder_callback_telegram", AsyncMock()), patch.object(
+            handlers, "load_pending_item", return_value=pending
+        ), patch.object(handlers, "pending_item_expired", return_value=False), patch.object(
+            handlers, "matches_pending_origin", return_value=True
+        ), patch.object(handlers, "gravar_lote_no_banco_com_registros", return_value=(1, 10.0, [])), patch.object(
+            handlers, "remover_teclado_mensagem_telegram", AsyncMock()
+        ), patch.object(handlers, "enviar_mensagem_telegram", AsyncMock()) as send_summary, patch.object(
+            handlers, "delete_pending_item"
+        ):
+            await handlers.processar_update_assincrono(
+                {
+                    "update_id": 999,
+                    "callback_query": {
+                        "id": "cb",
+                        "data": "aprovar_pending-1",
+                        "from": {"id": 2},
+                        "message": {"chat": {"id": 1}, "message_id": 3},
+                    },
+                }
+            )
+
+        send_summary.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_admin_approval_uses_original_pending_source_identity(self):
@@ -1075,6 +1223,7 @@ class TestTelegramDelivery:
                 json={"ok": True, "result": {"file_path": "files/test"}},
                 request=httpx.Request("GET", "https://api.telegram.org"),
             ),
+            httpx.ReadTimeout("download timeout"),
             httpx.ReadTimeout("download timeout"),
         ]
         with pytest.raises(telegram_service.TelegramRetryableError):

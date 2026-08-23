@@ -267,6 +267,20 @@ def delete_pending_item(cache_id: str):
     supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
 
 
+def mark_pending_summary_sent(cache_id: str, payload: dict[str, Any]):
+    marked_payload = dict(payload)
+    marked_payload["_approval_summary_sent"] = True
+    response = (
+        supabase
+        .table("cache_aprovacao")
+        .update({"payload_ciphertext": encrypt_pending_payload(marked_payload)})
+        .eq("id", cache_id)
+        .execute()
+    )
+    if getattr(response, "data", None) is None:
+        raise RuntimeError("Pending approval delivery marker was not persisted.")
+
+
 def matches_pending_origin(item: dict[str, Any] | None, chat_id: int | str | None, user_id: int | str | None):
     if not item:
         return False

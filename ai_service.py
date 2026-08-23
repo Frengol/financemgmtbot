@@ -2,9 +2,24 @@ import tempfile
 import os
 import json
 import asyncio
+import time
 import google.generativeai as genai
 from utils import get_brasilia_time
-from config import groq_client, deepseek_client
+from config import groq_client, deepseek_client, logger
+
+
+def _log_provider_failure(provider, stage, exc, started_at):
+    error_code = type(exc).__name__
+    if error_code in {"ResourceExhausted", "RateLimitError", "TimeoutError", "ReadTimeout", "APITimeoutError"}:
+        logger.warning(
+            {
+                "event": "ai_provider_retryable_failure",
+                "provider": provider,
+                "stage": stage,
+                "error_code": error_code,
+                "duration_ms": round((time.monotonic() - started_at) * 1000),
+            }
+        )
 
 async def transcrever_audio(audio_bytes):
     if not audio_bytes:
@@ -14,14 +29,19 @@ async def transcrever_audio(audio_bytes):
         tmp_file.write(audio_bytes)
     try:
         with open(tmp_path, "rb") as file_to_read:
-            transcription = await asyncio.wait_for(
-                groq_client.audio.transcriptions.create(
-                    file=(tmp_path, file_to_read.read()),
-                    model="whisper-large-v3",
-                    prompt="Transcreva este áudio em português sobre finanças, fast food, mercado, faturas e parcelamentos."
-                ),
-                timeout=45,
-            )
+            started_at = time.monotonic()
+            try:
+                transcription = await asyncio.wait_for(
+                    groq_client.audio.transcriptions.create(
+                        file=(tmp_path, file_to_read.read()),
+                        model="whisper-large-v3",
+                        prompt="Transcreva este áudio em português sobre finanças, fast food, mercado, faturas e parcelamentos."
+                    ),
+                    timeout=45,
+                )
+            except Exception as exc:
+                _log_provider_failure("groq", "stt", exc, started_at)
+                raise
         return transcription.text
     finally:
         if os.path.exists(tmp_path): os.remove(tmp_path)
@@ -39,13 +59,18 @@ async def extrair_tabela_recibo_gemini(image_bytes):
     Desconto Global: [Apenas o valor numérico do desconto final da nota. Diferencie de subtotais! Subtotal NÃO é desconto. Procure palavras como "Desconto", "Desconto total". Se não houver, escreva 0.00]
     Pagamento: [Infira o método lendo a nota inteira: Pix, Crédito, Débito, Dinheiro, Vale Alimentação. Se impossível saber, escreva Não Informado]
     """
-    response = await asyncio.wait_for(
-        asyncio.to_thread(
-            model.generate_content,
-            [{"mime_type": "image/jpeg", "data": image_bytes}, prompt_visao]
-        ),
-        timeout=45,
-    )
+    started_at = time.monotonic()
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                model.generate_content,
+                [{"mime_type": "image/jpeg", "data": image_bytes}, prompt_visao]
+            ),
+            timeout=45,
+        )
+    except Exception as exc:
+        _log_provider_failure("gemini", "ocr", exc, started_at)
+        raise
     return response.text
 
 async def processar_texto_com_llm(texto_usuario):
@@ -125,14 +150,19 @@ async def processar_texto_com_llm(texto_usuario):
     </formato_de_saida>
     """
     
-    response = await asyncio.wait_for(
-        deepseek_client.chat.completions.create(
-            model="deepseek-v4-pro",
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": texto_usuario}],
-            response_format={"type": "json_object"},
-            extra_body={"thinking": {"type": "disabled"}},
-        ),
-        timeout=45,
-    )
+    started_at = time.monotonic()
+    try:
+        response = await asyncio.wait_for(
+            deepseek_client.chat.completions.create(
+                model="deepseek-v4-pro",
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": texto_usuario}],
+                response_format={"type": "json_object"},
+                extra_body={"thinking": {"type": "disabled"}},
+            ),
+            timeout=45,
+        )
+    except Exception as exc:
+        _log_provider_failure("deepseek", "llm", exc, started_at)
+        raise
     texto_resposta = response.choices[0].message.content
     return json.loads(str(texto_resposta) if texto_resposta else "{}")
