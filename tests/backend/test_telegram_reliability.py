@@ -28,12 +28,13 @@ _dependency_patches = [
     patch("supabase.create_client", return_value=MagicMock()),
     patch("groq.AsyncGroq", return_value=MagicMock()),
     patch("openai.AsyncOpenAI", return_value=MagicMock()),
-    patch("google.generativeai.configure"),
+    patch("google.genai.Client", return_value=MagicMock()),
 ]
 for dependency_patch in _dependency_patches:
     dependency_patch.start()
 
 import db_repository
+import ai_service
 import handlers
 import main
 import security
@@ -690,7 +691,7 @@ class TestFinancialEffects:
         assert all(row["source_origin_chat_id"] == 5 for row in records)
 
     @pytest.mark.asyncio
-    async def test_failure_notice_sent_only_when_notify_failure(self):
+    async def test_processing_failure_does_not_send_orphan_failure_notice(self):
         delivery = AsyncMock()
         logmock = MagicMock()
         with patch.object(handlers, "load_records_by_source_update_id", return_value=[]), patch.object(
@@ -702,14 +703,13 @@ class TestFinancialEffects:
                 await handlers.processar_update_assincrono(
                     {"update_id": 701, "message": {"chat": {"id": 1}, "from": {"id": 2}, "text": "oi"}},
                     source_update_id=701,
-                    notify_failure=False,
                 )
 
         delivery.assert_not_awaited()
         assert logmock.error.call_args.args[0]["update_id"] == 701
 
     @pytest.mark.asyncio
-    async def test_failure_notice_sent_by_default_on_first_attempt(self):
+    async def test_processing_failure_is_silent_on_first_attempt(self):
         delivery = AsyncMock()
         with patch.object(handlers, "load_records_by_source_update_id", return_value=[]), patch.object(
             handlers, "load_pending_item_by_source_update_id", return_value=None
@@ -722,7 +722,7 @@ class TestFinancialEffects:
                     source_update_id=702,
                 )
 
-        delivery.assert_awaited_once()
+        delivery.assert_not_awaited()
 
     def test_reliability_migration_binds_financial_origin(self):
         migration = (
@@ -913,7 +913,7 @@ class TestWorkerRoute:
         assert "database detail" not in await response.get_data(as_text=True)
 
     @pytest.mark.asyncio
-    async def test_worker_requests_notice_only_on_first_attempt(self):
+    async def test_worker_never_requests_orphan_failure_notice(self):
         app = worker_routes.create_worker_app_for_test()
         retry_claim = telegram_update_ledger.UpdateClaim(True, "processing", 3, None)
         async with app.test_client() as client:
@@ -936,9 +936,9 @@ class TestWorkerRoute:
                 )
 
         assert retry_response.status_code == 200
-        assert retry_processor.await_args.kwargs["notify_failure"] is False
         assert first_response.status_code == 200
-        assert first_processor.await_args.kwargs["notify_failure"] is True
+        assert "notify_failure" not in retry_processor.await_args.kwargs
+        assert "notify_failure" not in first_processor.await_args.kwargs
 
     @pytest.mark.asyncio
     async def test_completed_update_does_not_run_handler_again(self):
@@ -1028,6 +1028,117 @@ class TestWorkerRoute:
         failed.assert_awaited_once()
         assert failed.await_args.kwargs["error_code"] == "RuntimeError"
         assert "secret receipt" not in json.dumps(failed.await_args.kwargs)
+
+    @pytest.mark.asyncio
+    async def test_ocr_retry_keeps_progress_message_silent(self):
+        app = worker_routes.create_worker_app_for_test()
+        claim = telegram_update_ledger.UpdateClaim(True, "processing", 1, None)
+
+        async def fail_ocr(*args, **kwargs):
+            await kwargs["stage_callback"]("ocr", 91)
+            raise ai_service.AIProviderRetryableError("provider unavailable", error_code="503")
+
+        async with app.test_client() as client:
+            with patch.object(worker_routes, "claim_update", AsyncMock(return_value=claim)), patch.object(
+                worker_routes, "processar_update_assincrono", AsyncMock(side_effect=fail_ocr)
+            ), patch.object(worker_routes, "update_stage", AsyncMock()), patch.object(
+                worker_routes, "mark_failed", AsyncMock()
+            ) as failed, patch.object(
+                worker_routes, "editar_mensagem_telegram", AsyncMock()
+            ) as edit:
+                response = await client.post(
+                    "/internal/tasks/telegram-update",
+                    json={"update_id": 461, "message": {"chat": {"id": 1}, "photo": [{"file_id": "x"}]}},
+                    headers={"X-CloudTasks-TaskName": "task-461", "X-CloudTasks-QueueName": "telegram-updates"},
+                )
+
+        assert response.status_code == 503
+        failed.assert_awaited_once()
+        edit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_final_ocr_failure_edits_existing_progress_and_stops_retry(self):
+        app = worker_routes.create_worker_app_for_test()
+        claim = telegram_update_ledger.UpdateClaim(True, "processing", 3, 91)
+
+        async def fail_ocr(*args, **kwargs):
+            await kwargs["stage_callback"]("ocr", 91)
+            raise ai_service.AIProviderRetryableError("provider unavailable", error_code="503")
+
+        async with app.test_client() as client:
+            with patch.object(worker_routes, "claim_update", AsyncMock(return_value=claim)), patch.object(
+                worker_routes, "processar_update_assincrono", AsyncMock(side_effect=fail_ocr)
+            ), patch.object(worker_routes, "update_stage", AsyncMock()), patch.object(
+                worker_routes, "mark_terminal_failed", AsyncMock()
+            ) as terminal, patch.object(
+                worker_routes, "editar_mensagem_telegram", AsyncMock()
+            ) as edit:
+                response = await client.post(
+                    "/internal/tasks/telegram-update",
+                    json={"update_id": 462, "message": {"chat": {"id": 1}, "photo": [{"file_id": "x"}]}},
+                    headers={"X-CloudTasks-TaskName": "task-462", "X-CloudTasks-QueueName": "telegram-updates"},
+                )
+
+        assert response.status_code == 200
+        edit.assert_awaited_once_with(1, 91, worker_routes.OCR_TERMINAL_MESSAGE)
+        terminal.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_permanent_ocr_failure_edits_existing_progress_and_stops_retry(self):
+        app = worker_routes.create_worker_app_for_test()
+        claim = telegram_update_ledger.UpdateClaim(True, "processing", 1, 92)
+
+        async def fail_ocr(*args, **kwargs):
+            await kwargs["stage_callback"]("ocr", 92)
+            raise ai_service.AIProviderPermanentError("invalid image", error_code="400")
+
+        async with app.test_client() as client:
+            with patch.object(worker_routes, "claim_update", AsyncMock(return_value=claim)), patch.object(
+                worker_routes, "processar_update_assincrono", AsyncMock(side_effect=fail_ocr)
+            ), patch.object(worker_routes, "update_stage", AsyncMock()), patch.object(
+                worker_routes, "mark_terminal_failed", AsyncMock()
+            ) as terminal, patch.object(
+                worker_routes, "editar_mensagem_telegram", AsyncMock()
+            ) as edit:
+                response = await client.post(
+                    "/internal/tasks/telegram-update",
+                    json={"update_id": 463, "message": {"chat": {"id": 1}, "photo": [{"file_id": "x"}]}},
+                    headers={"X-CloudTasks-TaskName": "task-463", "X-CloudTasks-QueueName": "telegram-updates"},
+                )
+
+        assert response.status_code == 200
+        edit.assert_awaited_once_with(1, 92, worker_routes.OCR_TERMINAL_MESSAGE)
+        terminal.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_permanent_ocr_notice_delivery_failure_keeps_task_retryable(self):
+        app = worker_routes.create_worker_app_for_test()
+        claim = telegram_update_ledger.UpdateClaim(True, "processing", 1, 93)
+
+        async def fail_ocr(*args, **kwargs):
+            await kwargs["stage_callback"]("ocr", 93)
+            raise ai_service.AIProviderPermanentError("bad image", error_code="400")
+
+        async with app.test_client() as client:
+            with patch.object(worker_routes, "claim_update", AsyncMock(return_value=claim)), patch.object(
+                worker_routes, "processar_update_assincrono", AsyncMock(side_effect=fail_ocr)
+            ), patch.object(worker_routes, "update_stage", AsyncMock()), patch.object(
+                worker_routes,
+                "editar_mensagem_telegram",
+                AsyncMock(side_effect=telegram_service.TelegramRetryableError("temporary")),
+            ), patch.object(worker_routes, "mark_failed", AsyncMock()) as failed, patch.object(
+                worker_routes, "mark_terminal_failed", AsyncMock()
+            ) as terminal:
+                response = await client.post(
+                    "/internal/tasks/telegram-update",
+                    json={"update_id": 464, "message": {"chat": {"id": 1}, "photo": [{"file_id": "x"}]}},
+                    headers={"X-CloudTasks-TaskName": "task-464", "X-CloudTasks-QueueName": "telegram-updates"},
+                )
+
+        assert response.status_code == 503
+        failed.assert_awaited_once()
+        assert failed.await_args.kwargs["stage"] == "telegram_delivery"
+        terminal.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_permanent_telegram_failure_is_terminal(self):

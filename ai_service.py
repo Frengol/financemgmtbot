@@ -1,27 +1,87 @@
-import tempfile
-import os
-import json
 import asyncio
+import json
+import os
+import random
+import tempfile
 import time
-import google.generativeai as genai
+
+import httpx
+from google.genai import types
+
 from utils import get_brasilia_time
-from config import groq_client, deepseek_client, logger
+from config import gemini_client, groq_client, deepseek_client, logger
 
 
-def _log_provider_failure(provider, stage, exc, started_at):
-    error_code = type(exc).__name__
-    if error_code in {"ResourceExhausted", "RateLimitError", "TimeoutError", "ReadTimeout", "APITimeoutError"}:
-        logger.warning(
-            {
-                "event": "ai_provider_retryable_failure",
-                "provider": provider,
-                "stage": stage,
-                "error_code": error_code,
-                "duration_ms": round((time.monotonic() - started_at) * 1000),
-            }
-        )
+GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_OCR_TIMEOUTS_SECONDS = (60, 45)
+GEMINI_INTERNAL_RETRY_DELAY_RANGE_SECONDS = (0.5, 1.5)
 
-async def transcrever_audio(audio_bytes):
+
+class AIProviderError(RuntimeError):
+    """Sanitized provider error used at the worker boundary."""
+
+    def __init__(self, message, *, error_code):
+        super().__init__(message)
+        self.error_code = error_code
+
+
+class AIProviderRetryableError(AIProviderError):
+    pass
+
+
+class AIProviderPermanentError(AIProviderError):
+    pass
+
+
+def _provider_error_code(exc):
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return str(code)
+    if isinstance(code, str) and code.strip():
+        return code.strip()[:40]
+    return type(exc).__name__
+
+
+def _is_retryable_provider_error(exc):
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code.isdigit():
+        code = int(code)
+    if code in {408, 429, 500, 502, 503, 504}:
+        return True
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    return type(exc).__name__ in {
+        "ResourceExhausted",
+        "RateLimitError",
+        "APITimeoutError",
+        "ReadTimeout",
+        "ServiceUnavailable",
+    }
+
+
+def _provider_log_fields(source_update_id=None, worker_attempt=None):
+    fields = {}
+    if source_update_id is not None:
+        fields["update_id"] = source_update_id
+    if worker_attempt is not None:
+        fields["worker_attempt"] = worker_attempt
+    return fields
+
+
+def _log_provider_failure(provider, stage, exc, started_at, *, source_update_id=None, worker_attempt=None):
+    logger.warning(
+        {
+            "event": "ai_provider_failure",
+            "provider": provider,
+            "stage": stage,
+            "error_code": _provider_error_code(exc),
+            "classification": "retryable" if _is_retryable_provider_error(exc) else "permanent",
+            "duration_ms": round((time.monotonic() - started_at) * 1000),
+            **_provider_log_fields(source_update_id, worker_attempt),
+        }
+    )
+
+async def transcrever_audio(audio_bytes, *, source_update_id=None, worker_attempt=None):
     if not audio_bytes:
         raise ValueError("Audio payload is empty.")
     with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp_file:
@@ -40,16 +100,24 @@ async def transcrever_audio(audio_bytes):
                     timeout=45,
                 )
             except Exception as exc:
-                _log_provider_failure("groq", "stt", exc, started_at)
+                _log_provider_failure(
+                    "groq",
+                    "stt",
+                    exc,
+                    started_at,
+                    source_update_id=source_update_id,
+                    worker_attempt=worker_attempt,
+                )
                 raise
         return transcription.text
     finally:
         if os.path.exists(tmp_path): os.remove(tmp_path)
 
-async def extrair_tabela_recibo_gemini(image_bytes):
+async def extrair_tabela_recibo_gemini(image_bytes, *, source_update_id=None, worker_attempt=None):
     if not image_bytes:
         raise ValueError("Image payload is empty.")
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    if gemini_client is None:
+        raise AIProviderRetryableError("Gemini client is unavailable.", error_code="client_unavailable")
     prompt_visao = """
     Atue como um extrator de dados. Extraia a tabela de itens comprados. 
     Colunas obrigatórias: [Nome do Produto] | [Valor Bruto] | [Desconto do Item]. 
@@ -59,21 +127,71 @@ async def extrair_tabela_recibo_gemini(image_bytes):
     Desconto Global: [Apenas o valor numérico do desconto final da nota. Diferencie de subtotais! Subtotal NÃO é desconto. Procure palavras como "Desconto", "Desconto total". Se não houver, escreva 0.00]
     Pagamento: [Infira o método lendo a nota inteira: Pix, Crédito, Débito, Dinheiro, Vale Alimentação. Se impossível saber, escreva Não Informado]
     """
-    started_at = time.monotonic()
-    try:
-        response = await asyncio.wait_for(
-            asyncio.to_thread(
-                model.generate_content,
-                [{"mime_type": "image/jpeg", "data": image_bytes}, prompt_visao]
-            ),
-            timeout=45,
-        )
-    except Exception as exc:
-        _log_provider_failure("gemini", "ocr", exc, started_at)
-        raise
-    return response.text
+    last_error = None
+    for attempt, timeout_seconds in enumerate(GEMINI_OCR_TIMEOUTS_SECONDS, start=1):
+        started_at = time.monotonic()
+        try:
+            response = await gemini_client.aio.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=[
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                    prompt_visao,
+                ],
+                config=types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                    http_options=types.HttpOptions(
+                        timeout=timeout_seconds * 1000,
+                        retry_options=types.HttpRetryOptions(attempts=1),
+                    ),
+                ),
+            )
+            logger.info(
+                {
+                    "event": "ai_provider_completed",
+                    "provider": "gemini",
+                    "stage": "ocr",
+                    "model": GEMINI_MODEL,
+                    "attempt": attempt,
+                    "duration_ms": round((time.monotonic() - started_at) * 1000),
+                    **_provider_log_fields(source_update_id, worker_attempt),
+                }
+            )
+            if not getattr(response, "text", None):
+                raise AIProviderPermanentError("Gemini returned an empty OCR response.", error_code="empty_response")
+            return response.text
+        except AIProviderPermanentError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            _log_provider_failure(
+                "gemini",
+                "ocr",
+                exc,
+                started_at,
+                source_update_id=source_update_id,
+                worker_attempt=worker_attempt,
+            )
+            if not _is_retryable_provider_error(exc):
+                raise AIProviderPermanentError("Gemini rejected the OCR request.", error_code=_provider_error_code(exc)) from exc
+            if attempt == len(GEMINI_OCR_TIMEOUTS_SECONDS):
+                raise AIProviderRetryableError("Gemini OCR is temporarily unavailable.", error_code=_provider_error_code(exc)) from exc
+            delay = random.uniform(*GEMINI_INTERNAL_RETRY_DELAY_RANGE_SECONDS)
+            logger.info(
+                {
+                    "event": "ai_provider_internal_retry",
+                    "provider": "gemini",
+                    "stage": "ocr",
+                    "model": GEMINI_MODEL,
+                    "attempt": attempt + 1,
+                    "previous_error_code": _provider_error_code(exc),
+                    "delay_ms": round(delay * 1000),
+                    **_provider_log_fields(source_update_id, worker_attempt),
+                }
+            )
+            await asyncio.sleep(delay)
+    raise AIProviderRetryableError("Gemini OCR is temporarily unavailable.", error_code=_provider_error_code(last_error))
 
-async def processar_texto_com_llm(texto_usuario):
+async def processar_texto_com_llm(texto_usuario, *, source_update_id=None, worker_attempt=None):
     hoje_bsb = get_brasilia_time()
     
     system_prompt = f"""
@@ -162,7 +280,14 @@ async def processar_texto_com_llm(texto_usuario):
             timeout=45,
         )
     except Exception as exc:
-        _log_provider_failure("deepseek", "llm", exc, started_at)
+        _log_provider_failure(
+            "deepseek",
+            "llm",
+            exc,
+            started_at,
+            source_update_id=source_update_id,
+            worker_attempt=worker_attempt,
+        )
         raise
     texto_resposta = response.choices[0].message.content
     return json.loads(str(texto_resposta) if texto_resposta else "{}")

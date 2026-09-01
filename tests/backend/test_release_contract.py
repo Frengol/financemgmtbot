@@ -135,13 +135,14 @@ def test_manual_dependency_security_contract_avoids_automated_pr_flood():
     assert not (REPO_ROOT / ".github" / "dependabot.yml").exists()
     assert "node-version: \"20.20.1\"" in ci_workflow
     assert "node-version: \"20.20.1\"" in deploy_workflow
-    assert "npm audit --omit=dev" in ci_workflow
+    assert "npm audit --audit-level=low" in ci_workflow
+    assert package_json["dependencies"]["react-router-dom"] == "^7.18.2"
 
     assert dev_dependencies["vite"] == "^8.1.0"
     assert dev_dependencies["@vitejs/plugin-react"] == "^6.0.3"
     assert dev_dependencies["vitest"] == "^4.1.9"
     assert dev_dependencies["@vitest/coverage-v8"] == "^4.1.9"
-    assert dev_dependencies["postcss"] == "^8.5.15"
+    assert dev_dependencies["postcss"] == "^8.5.26"
     assert dev_dependencies["jsdom"] == "^29.1.1"
 
     assert overrides["anymatch"]["picomatch"] == "^2.3.2"
@@ -166,14 +167,14 @@ def test_python_dependencies_are_reproducible_hashed_locks():
         "openai",
         "groq",
         "python-json-logger",
-        "google-generativeai",
+        "google-genai==2.18.1",
         "google-cloud-tasks",
         "cryptography",
     ):
         assert direct_dependency in runtime_input
 
     assert "-r requirements.in" in dev_input
-    for direct_dependency in ("coverage[toml]", "pip-audit", "pytest", "pytest-asyncio", "pytest-cov"):
+    for direct_dependency in ("coverage[toml]", "pip>=26.2", "pip-audit", "pytest", "pytest-asyncio", "pytest-cov"):
         assert direct_dependency in dev_input
 
     for lock_content in (runtime_lock, dev_lock):

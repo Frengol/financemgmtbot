@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockAuthProvider = vi.fn(({ children }: { children: React.ReactNode }) => <>{children}</>);
 const mockTransactionComposerProvider = vi.fn(({ children }: { children: React.ReactNode }) => <>{children}</>);
@@ -47,6 +47,10 @@ vi.mock('./components/TransactionModalGate', () => ({
 describe('App', () => {
   beforeEach(() => {
     vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it('renders providers and transaction modal', async () => {
@@ -97,7 +101,7 @@ describe('App', () => {
     expect(await screen.findByText('Login page')).toBeInTheDocument();
   });
 
-  it('opts into the react-router future flags that silence the v7 warnings', async () => {
+  it('uses React Router v7 defaults without legacy future flags', async () => {
     vi.resetModules();
     const browserRouterSpy = vi.fn();
 
@@ -105,7 +109,7 @@ describe('App', () => {
       const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
       return {
         ...actual,
-        BrowserRouter: (props: { children: React.ReactNode; basename?: string; future?: Record<string, boolean> }) => {
+        BrowserRouter: (props: { children: React.ReactNode; basename?: string }) => {
           browserRouterSpy(props);
           return <actual.BrowserRouter {...props} />;
         },
@@ -117,11 +121,7 @@ describe('App', () => {
 
     render(<App />);
 
-    expect(browserRouterSpy).toHaveBeenCalledWith(expect.objectContaining({
-      future: {
-        v7_startTransition: true,
-        v7_relativeSplatPath: true,
-      },
-    }));
+    expect(browserRouterSpy).toHaveBeenCalledWith(expect.objectContaining({ basename: '/' }));
+    expect(browserRouterSpy.mock.calls[0][0]).not.toHaveProperty('future');
   });
 });

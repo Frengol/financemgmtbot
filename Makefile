@@ -56,7 +56,7 @@ audit-backend-deps:
 	pip-audit --require-hashes --disable-pip -r requirements-dev.txt
 
 audit-frontend-deps:
-	npm audit --omit=dev --audit-level=high --prefix frontend
+	npm audit --audit-level=low --prefix frontend
 
 audit-repo-security:
 	@command -v gitleaks >/dev/null 2>&1 || { \
@@ -66,7 +66,7 @@ audit-repo-security:
 	gitleaks git --no-banner --redact .
 	gitleaks git --no-banner --redact --pre-commit .
 
-pre-push: audit-repo-security test-backend-coverage
+pre-push: audit-repo-security audit-backend-deps audit-frontend-deps test-backend-coverage
 	$(FRONTEND_BUILD_ENV_UNSET) npm run test:coverage --prefix frontend
 	$(FRONTEND_BUILD_ENV) npm run verify:build-env --prefix frontend
 	$(FRONTEND_BUILD_ENV) npm run build --prefix frontend

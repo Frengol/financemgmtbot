@@ -85,7 +85,7 @@ class TestConfigCoverage:
             with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
                  patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
                  patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
-                 patch("google.generativeai.configure"):
+                 patch("google.genai.Client"):
                 module = _import_fresh_config("config_cov_worker_component")
         finally:
             if pytest_module is not None:
@@ -115,7 +115,7 @@ class TestConfigCoverage:
             with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
                  patch("openai.AsyncOpenAI") as deepseek, \
                  patch("groq.AsyncGroq") as groq, \
-                 patch("google.generativeai.configure") as gemini:
+                 patch("google.genai.Client") as gemini:
                 module = _import_fresh_config("config_cov_api_component")
         finally:
             if pytest_module is not None:
@@ -147,7 +147,7 @@ class TestConfigCoverage:
         with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
              patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
              patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
-             patch("google.generativeai.configure"):
+                 patch("google.genai.Client"):
             module = _import_fresh_config("config_cov_env")
 
         pytest_module = sys.modules.pop("pytest", None)
@@ -166,7 +166,7 @@ class TestConfigCoverage:
         with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
              patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
              patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
-             patch("google.generativeai.configure"):
+                 patch("google.genai.Client"):
             module = _import_fresh_config("config_cov_helpers")
 
         assert module.normalize_frontend_origin(" https://admin.example.com/app/login ") == "https://admin.example.com"
@@ -197,7 +197,7 @@ class TestConfigCoverage:
         with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
              patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
              patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
-             patch("google.generativeai.configure"):
+                 patch("google.genai.Client"):
             module = _import_fresh_config("config_cov_local_dev_auth_default")
 
         assert module.managed_runtime_enabled() is False
@@ -209,7 +209,7 @@ class TestConfigCoverage:
         with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
              patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
              patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
-             patch("google.generativeai.configure"):
+                 patch("google.genai.Client"):
             module = _import_fresh_config("config_cov_local_dev_auth_auth_test")
 
         assert module.AUTH_TEST_MODE is True
@@ -227,7 +227,7 @@ class TestConfigCoverage:
         with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")) as mock_create_client, \
              patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
              patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
-             patch("google.generativeai.configure"):
+                 patch("google.genai.Client"):
             module = _import_fresh_config("config_cov_auth_test")
 
         assert isinstance(module.supabase, MagicMock)
@@ -248,7 +248,7 @@ class TestConfigCoverage:
             with patch("supabase.create_client", return_value=real_supabase_client) as mock_create_client, \
                  patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
                  patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
-                 patch("google.generativeai.configure"):
+                 patch("google.genai.Client"):
                 module = _import_fresh_config("config_cov_auth_test_database")
         finally:
             if pytest_module is not None:
@@ -272,7 +272,7 @@ class TestConfigCoverage:
         with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
              patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
              patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
-             patch("google.generativeai.configure"), \
+             patch("google.genai.Client"), \
              patch("logging.Logger.info") as info_mock:
             module = _import_fresh_config("config_cov_managed_runtime")
 
@@ -302,7 +302,7 @@ class TestConfigCoverage:
             with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
                  patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
                  patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
-                 patch("google.generativeai.configure"):
+                 patch("google.genai.Client"):
                 module = _import_fresh_config("config_cov_local_tables")
         finally:
             if pytest_module is not None:
@@ -316,7 +316,7 @@ class TestConfigCoverage:
         with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
              patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
              patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
-             patch("google.generativeai.configure"):
+                 patch("google.genai.Client"):
             module = _import_fresh_config("config_cov_table_override")
 
         assert module.TRANSACTIONS_TABLE == "gastos_custom"
@@ -333,7 +333,7 @@ class TestConfigCoverage:
         with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
              patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
              patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
-             patch("google.generativeai.configure"), \
+             patch("google.genai.Client"), \
              patch("logging.Logger.critical") as critical_mock, \
              pytest.raises(RuntimeError, match="FRONTEND_PUBLIC_URL"):
             _import_fresh_config("config_cov_missing_public_origin")
@@ -355,7 +355,7 @@ class TestConfigCoverage:
         with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
              patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
              patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
-             patch("google.generativeai.configure"), \
+             patch("google.genai.Client"), \
              pytest.raises(RuntimeError, match="FRONTEND_ALLOWED_ORIGINS"):
             _import_fresh_config("config_cov_loopback_only_origin")
 
@@ -366,7 +366,7 @@ class TestConfigCoverage:
         with patch("supabase.create_client", return_value=MagicMock(name="supabase_client")), \
              patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
              patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
-             patch("google.generativeai.configure"), \
+             patch("google.genai.Client"), \
              pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
             _import_fresh_config("config_cov_missing_var")
 
@@ -377,7 +377,7 @@ class TestConfigCoverage:
         with patch("supabase.create_client", side_effect=RuntimeError(f"boom {leaked_key}")), \
              patch("openai.AsyncOpenAI", return_value=MagicMock(name="deepseek_client")), \
              patch("groq.AsyncGroq", return_value=MagicMock(name="groq_client")), \
-             patch("google.generativeai.configure"), \
+             patch("google.genai.Client"), \
              pytest.raises(RuntimeError, match="boom"):
             _import_fresh_config("config_cov_init_failure")
 

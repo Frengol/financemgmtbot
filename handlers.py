@@ -159,7 +159,7 @@ async def processar_update_assincrono(
     source_update_id=None,
     progress_message_id=None,
     stage_callback=None,
-    notify_failure=True,
+    worker_attempt=None,
 ):
     chat_id = None
 
@@ -282,13 +282,29 @@ async def processar_update_assincrono(
                 progress_message_id=progress_message_id,
             )
             if not img_bytes or len(img_bytes) > MAX_TELEGRAM_IMAGE_BYTES:
-                await enviar_mensagem_telegram(chat_id, "⚠️ A imagem enviada é inválida ou excede o tamanho suportado.")
+                await _deliver_final_message(
+                    chat_id,
+                    progress_message_id,
+                    "⚠️ A imagem enviada é inválida ou excede o tamanho suportado.",
+                    stage_callback=stage_callback,
+                )
                 return
             if stage_callback:
                 await stage_callback("ocr", progress_message_id)
-            tabela_md = await extrair_tabela_recibo_gemini(img_bytes)
+            tabela_md = await extrair_tabela_recibo_gemini(
+                img_bytes,
+                source_update_id=source_update_id,
+                worker_attempt=worker_attempt,
+            )
             texto_analise = f"Contexto: {message.get('caption', '')}\n\nNota Fiscal Extratada:\n{tabela_md}"
-            logger.info({"event": "ocr_completed", "model": "gemini-2.5-flash"})
+            logger.info(
+                {
+                    "event": "ocr_completed",
+                    "model": "gemini-2.5-flash",
+                    "update_id": source_update_id,
+                    "worker_attempt": worker_attempt,
+                }
+            )
         elif "voice" in message:
             if await _chat_rate_limited(
                 "telegram-media",
@@ -312,12 +328,28 @@ async def processar_update_assincrono(
                 progress_message_id=progress_message_id,
             )
             if not audio_bytes or len(audio_bytes) > MAX_TELEGRAM_AUDIO_BYTES:
-                await enviar_mensagem_telegram(chat_id, "⚠️ O áudio enviado é inválido ou excede o tamanho suportado.")
+                await _deliver_final_message(
+                    chat_id,
+                    progress_message_id,
+                    "⚠️ O áudio enviado é inválido ou excede o tamanho suportado.",
+                    stage_callback=stage_callback,
+                )
                 return
             if stage_callback:
                 await stage_callback("stt", progress_message_id)
-            texto_analise = await transcrever_audio(audio_bytes)
-            logger.info({"event": "stt_completed", "model": "whisper-large-v3"})
+            texto_analise = await transcrever_audio(
+                audio_bytes,
+                source_update_id=source_update_id,
+                worker_attempt=worker_attempt,
+            )
+            logger.info(
+                {
+                    "event": "stt_completed",
+                    "model": "whisper-large-v3",
+                    "update_id": source_update_id,
+                    "worker_attempt": worker_attempt,
+                }
+            )
         elif "text" in message:
             if await _chat_rate_limited(
                 "telegram-ai",
@@ -343,10 +375,21 @@ async def processar_update_assincrono(
                 return
         if stage_callback:
             await stage_callback("llm", progress_message_id)
-        analise_ia = await processar_texto_com_llm(texto_analise)
+        analise_ia = await processar_texto_com_llm(
+            texto_analise,
+            source_update_id=source_update_id,
+            worker_attempt=worker_attempt,
+        )
         intencao = analise_ia.get("intencao")
 
-        logger.info({"event": "llm_routed", "intent": intencao})
+        logger.info(
+            {
+                "event": "llm_routed",
+                "intent": intencao,
+                "update_id": source_update_id,
+                "worker_attempt": worker_attempt,
+            }
+        )
         if stage_callback:
             await stage_callback("llm_routed", progress_message_id)
 
@@ -463,9 +506,4 @@ async def processar_update_assincrono(
 
     except Exception:
         logger.error({"event": "system_failure", "error_code": "processing_failed", "update_id": source_update_id})
-        if notify_failure and "chat_id" in locals() and chat_id:
-            try:
-                await enviar_mensagem_telegram(chat_id, "❌ *Falha Sistémica*\n⚠️ O processamento foi interrompido com segurança. Tente novamente em instantes.")
-            except Exception:
-                logger.error({"event": "telegram_failure_notice_failed", "update_id": source_update_id})
         raise

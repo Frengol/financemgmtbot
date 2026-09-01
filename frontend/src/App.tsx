@@ -30,10 +30,6 @@ export default function App() {
       <TransactionComposerProvider>
         <BrowserRouter
           basename={basename}
-          future={{
-            v7_startTransition: true,
-            v7_relativeSplatPath: true,
-          }}
         >
           <Suspense fallback={<RouteFallback />}>
             <Routes>

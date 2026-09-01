@@ -6,12 +6,27 @@ from quart import Quart, jsonify, request
 
 from config import logger
 from handlers import processar_update_assincrono
-from telegram_service import TelegramPermanentError
+from telegram_service import TelegramPermanentError, TelegramRetryableError, editar_mensagem_telegram
+from ai_service import AIProviderPermanentError
 from telegram_update_ledger import claim_update, mark_completed, mark_failed, mark_terminal_failed, update_stage
 
 
-WORKER_PROCESSING_BUDGET_SECONDS = 150
+WORKER_PROCESSING_BUDGET_SECONDS = 200
+OCR_MAX_WORKER_ATTEMPTS = 3
+OCR_TERMINAL_MESSAGE = "❌ *Não foi possível ler este cupom agora.*\nEnvie a foto novamente quando quiser tentar de novo."
 MAX_WORKER_BODY_BYTES = 75_000
+
+
+async def _edit_terminal_progress(update, progress_message_id):
+    """Replace the existing progress message only when a final user notice is needed."""
+    if progress_message_id is None:
+        return
+    message = update.get("message") if isinstance(update, dict) else None
+    chat = message.get("chat") if isinstance(message, dict) else None
+    chat_id = chat.get("id") if isinstance(chat, dict) else None
+    if chat_id is None:
+        return
+    await editar_mensagem_telegram(chat_id, progress_message_id, OCR_TERMINAL_MESSAGE)
 
 
 def register_worker_routes(app):
@@ -52,10 +67,11 @@ def register_worker_routes(app):
             return jsonify({"status": "retry", "code": "LEASE_ACTIVE"}), 503
 
         stage = "processing"
+        current_progress_message_id = claim.progress_message_id
         stage_started_at = time.monotonic()
         try:
             async def record_stage(next_stage, progress_message_id=None):
-                nonlocal stage, stage_started_at
+                nonlocal stage, stage_started_at, current_progress_message_id
                 now = time.monotonic()
                 logger.info(
                     {
@@ -68,6 +84,8 @@ def register_worker_routes(app):
                 )
                 stage = next_stage
                 stage_started_at = now
+                if progress_message_id is not None:
+                    current_progress_message_id = progress_message_id
                 await update_stage(
                     update_id,
                     lease_owner,
@@ -79,18 +97,51 @@ def register_worker_routes(app):
                 await processar_update_assincrono(
                     update,
                     source_update_id=update_id,
-                    progress_message_id=claim.progress_message_id,
+                    progress_message_id=current_progress_message_id,
                     stage_callback=record_stage,
-                    notify_failure=(claim.attempt_count == 1),
+                    worker_attempt=claim.attempt_count,
                 )
             await mark_completed(update_id, lease_owner)
-        except TelegramPermanentError as exc:
+        except (TelegramPermanentError, AIProviderPermanentError) as exc:
+            # A permanent OCR rejection still needs to replace the progress
+            # message.  Delivery failures remain retryable and never create a
+            # second message.
+            if isinstance(exc, AIProviderPermanentError):
+                try:
+                    await _edit_terminal_progress(update, current_progress_message_id)
+                except TelegramRetryableError:
+                    try:
+                        await mark_failed(
+                            update_id,
+                            lease_owner,
+                            stage="telegram_delivery",
+                            error_code="terminal_notice_retryable",
+                        )
+                    except Exception as transition_exc:
+                        logger.error(
+                            {
+                                "event": "telegram_ledger_transition_failed",
+                                "update_id": update_id,
+                                "target_status": "retryable_failed",
+                                "error_code": type(transition_exc).__name__,
+                            }
+                        )
+                    return jsonify({"status": "retry", "code": "TERMINAL_NOTICE_RETRY"}), 503
+                except Exception as notice_exc:
+                    logger.warning(
+                        {
+                            "event": "telegram_terminal_notice_failed",
+                            "update_id": update_id,
+                            "stage": "telegram_delivery",
+                            "error_code": type(notice_exc).__name__,
+                        }
+                    )
             try:
                 await mark_terminal_failed(
                     update_id,
                     lease_owner,
                     stage=stage,
-                    error_code=type(exc).__name__,
+                    error_code=getattr(exc, "error_code", type(exc).__name__),
                 )
             except Exception as transition_exc:
                 logger.error(
@@ -108,12 +159,75 @@ def register_worker_routes(app):
                     "update_id": update_id,
                     "attempt": claim.attempt_count,
                     "stage": stage,
-                    "error_code": type(exc).__name__,
+                    "error_code": getattr(exc, "error_code", type(exc).__name__),
                     "duration_ms": round((time.monotonic() - started_at) * 1000),
                 }
             )
             return jsonify({"status": "ok"}), 200
         except Exception as exc:
+            if stage == "ocr" and claim.attempt_count >= OCR_MAX_WORKER_ATTEMPTS:
+                try:
+                    await _edit_terminal_progress(update, current_progress_message_id)
+                    await mark_terminal_failed(
+                        update_id,
+                        lease_owner,
+                        stage=stage,
+                        error_code=getattr(exc, "error_code", type(exc).__name__),
+                    )
+                except TelegramRetryableError:
+                    try:
+                        await mark_failed(
+                            update_id,
+                            lease_owner,
+                            stage="telegram_delivery",
+                            error_code="terminal_notice_retryable",
+                        )
+                    except Exception:
+                        logger.error(
+                            {
+                                "event": "telegram_ledger_transition_failed",
+                                "update_id": update_id,
+                                "target_status": "retryable_failed",
+                                "error_code": "transition_error",
+                            }
+                        )
+                    return jsonify({"status": "retry", "code": "TERMINAL_NOTICE_RETRY"}), 503
+                except Exception as terminal_exc:
+                    logger.error(
+                        {
+                            "event": "telegram_terminal_notice_failed",
+                            "update_id": update_id,
+                            "stage": stage,
+                            "error_code": type(terminal_exc).__name__,
+                        }
+                    )
+                    try:
+                        await mark_terminal_failed(
+                            update_id,
+                            lease_owner,
+                            stage=stage,
+                            error_code="terminal_notice_failed",
+                        )
+                    except Exception:
+                        logger.error(
+                            {
+                                "event": "telegram_ledger_transition_failed",
+                                "update_id": update_id,
+                                "target_status": "terminal_failed",
+                                "error_code": "transition_error",
+                            }
+                        )
+                logger.info(
+                    {
+                        "event": "telegram_update_terminal_failure",
+                        "update_id": update_id,
+                        "attempt": claim.attempt_count,
+                        "stage": stage,
+                        "error_code": getattr(exc, "error_code", type(exc).__name__),
+                        "duration_ms": round((time.monotonic() - started_at) * 1000),
+                    }
+                )
+                return jsonify({"status": "ok"}), 200
             try:
                 await mark_failed(
                     update_id,
@@ -136,7 +250,7 @@ def register_worker_routes(app):
                     "update_id": update_id,
                     "attempt": claim.attempt_count,
                     "stage": stage,
-                    "error_code": type(exc).__name__,
+                    "error_code": getattr(exc, "error_code", type(exc).__name__),
                     "duration_ms": round((time.monotonic() - started_at) * 1000),
                 }
             )

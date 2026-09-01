@@ -15,7 +15,7 @@ from config import logger
 
 
 MAX_TASK_BODY_BYTES = 75_000
-TASK_DISPATCH_DEADLINE_SECONDS = 180
+TASK_DISPATCH_DEADLINE_SECONDS = 220
 
 
 class InvalidTelegramUpdate(ValueError):

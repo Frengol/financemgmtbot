@@ -1,3 +1,4 @@
+import inspect
 import os
 
 from quart import Quart
@@ -20,6 +21,17 @@ async def close_http_client():
     await close()
 
 
+async def close_ai_clients():
+    from config import gemini_client
+
+    close = getattr(getattr(gemini_client, "aio", None), "aclose", None)
+    if not callable(close):
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
+
+
 @app.before_serving
 async def startup():
     if APP_COMPONENT == "telegram-worker":
@@ -30,6 +42,7 @@ async def startup():
 async def shutdown():
     if APP_COMPONENT == "telegram-worker":
         await close_http_client()
+        await close_ai_clients()
 
 
 app.after_request(harden_response)

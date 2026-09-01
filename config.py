@@ -9,7 +9,7 @@ from pythonjsonlogger import jsonlogger
 from supabase import create_client, Client
 from openai import AsyncOpenAI
 from groq import AsyncGroq
-import google.generativeai as genai
+from google import genai
 
 logHandler = logging.StreamHandler()
 formatter = jsonlogger.JsonFormatter('%(asctime)s %(levelname)s %(message)s %(module)s')
@@ -255,10 +255,11 @@ try:
     if APP_COMPONENT == "telegram-worker" or "pytest" in sys.modules:
         groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY") or "")
         deepseek_client = AsyncOpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY") or "", base_url="https://api.deepseek.com")
-        genai.configure(api_key=os.environ.get("GEMINI_API_KEY") or "")
+        gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY") or "")
     else:
         groq_client = None
         deepseek_client = None
+        gemini_client = None
     logger.info({"event": "clients_initialized", "status": "success"})
 except Exception:
     logger.critical({"event": "init_error", "error": mascarar_segredos(traceback.format_exc())})

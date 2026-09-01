@@ -78,11 +78,8 @@ jobs:
       - name: Set public frontend release id
         run: echo "VITE_APP_RELEASE=${GITHUB_SHA::12}" >> "$GITHUB_ENV"
 
-      # Aceite documentado (16/08/2026): 2 moderadas no react-router 6.30.4
-      # (GHSA-wrjc-x8rr-h8h6, GHSA-337j-9hxr-rhxg); correção só em react-router-dom
-      # 7.18.2 (migração breaking adiada). Falha apenas em high+.
-      - name: Audit frontend runtime dependencies
-        run: npm audit --omit=dev --audit-level=high
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=low
 
       - name: Run frontend unit tests with coverage
         run: npm run test:coverage | tee coverage-summary.txt

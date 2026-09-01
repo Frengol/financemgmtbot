@@ -46,13 +46,14 @@ def _reset_security_state():
 _mock_supabase_client = MagicMock()
 _mock_groq = MagicMock()
 _mock_deepseek = MagicMock()
+_mock_gemini = MagicMock()
 
 _patches = [
     patch.dict(os.environ, ENV_VARS),
     patch("supabase.create_client", return_value=_mock_supabase_client),
     patch("groq.AsyncGroq", return_value=_mock_groq),
     patch("openai.AsyncOpenAI", return_value=_mock_deepseek),
-    patch("google.generativeai.configure"),
+    patch("google.genai.Client", return_value=_mock_gemini),
 ]
 for p in _patches:
     p.start()
@@ -83,8 +84,10 @@ security.supabase = _mock_supabase_client
 main.supabase = _mock_supabase_client
 config.groq_client = _mock_groq
 config.deepseek_client = _mock_deepseek
+config.gemini_client = _mock_gemini
 ai_service.groq_client = _mock_groq
 ai_service.deepseek_client = _mock_deepseek
+ai_service.gemini_client = _mock_gemini
 config.SECRET_TOKEN = ENV_VARS["TELEGRAM_SECRET_TOKEN"]
 
 
@@ -809,34 +812,83 @@ class TestTranscreverAudio:
 
 class TestExtrairTabelaReciboGemini:
     @pytest.mark.asyncio
-    async def test_returns_gemini_response(self):
-        with patch("google.generativeai.GenerativeModel") as mock_model_cls:
-            mock_model = MagicMock()
-            mock_model_cls.return_value = mock_model
-            with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
-                mock_thread.return_value.text = "Produto | Valor\nArroz | 10.00"
-                result = await ai_service.extrair_tabela_recibo_gemini(b"fake_image_bytes")
-
-        assert "Arroz" in result
-
-    @pytest.mark.asyncio
-    async def test_resource_exhausted_is_logged_with_ocr_provider(self):
-        class ResourceExhausted(Exception):
-            pass
-
-        with patch("google.generativeai.GenerativeModel") as mock_model_cls, patch(
-            "asyncio.to_thread", new_callable=AsyncMock, side_effect=ResourceExhausted("quota")
-        ), patch.object(ai_service.logger, "warning") as warning:
-            mock_model_cls.return_value = MagicMock()
-            with pytest.raises(ResourceExhausted):
+    async def test_unavailable_gemini_client_is_retryable(self):
+        with patch.object(ai_service, "gemini_client", None):
+            with pytest.raises(ai_service.AIProviderRetryableError) as raised:
                 await ai_service.extrair_tabela_recibo_gemini(b"fake_image_bytes")
 
-        event = warning.call_args.args[0]
-        assert event["event"] == "ai_provider_retryable_failure"
-        assert event["provider"] == "gemini"
-        assert event["stage"] == "ocr"
-        assert event["error_code"] == "ResourceExhausted"
-        assert isinstance(event["duration_ms"], int)
+        assert raised.value.error_code == "client_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_returns_gemini_response(self):
+        response = MagicMock(text="Produto | Valor\nArroz | 10.00")
+        ai_service.gemini_client.aio.models.generate_content = AsyncMock(return_value=response)
+        result = await ai_service.extrair_tabela_recibo_gemini(b"fake_image_bytes")
+
+        assert "Arroz" in result
+        request = ai_service.gemini_client.aio.models.generate_content.await_args.kwargs
+        assert request["model"] == "gemini-2.5-flash"
+        assert request["config"].thinking_config.thinking_budget == 0
+        assert request["config"].http_options.timeout == 60_000
+        assert request["config"].http_options.retry_options.attempts == 1
+
+    @pytest.mark.asyncio
+    async def test_timeout_retries_once_without_background_thread(self):
+        response = MagicMock(text="Produto | Valor\nArroz | 10.00")
+        generate = AsyncMock(side_effect=[asyncio.TimeoutError(), response])
+        ai_service.gemini_client.aio.models.generate_content = generate
+        with patch.object(ai_service, "GEMINI_INTERNAL_RETRY_DELAY_RANGE_SECONDS", (0, 0)):
+            result = await ai_service.extrair_tabela_recibo_gemini(b"fake_image_bytes")
+
+        assert "Arroz" in result
+        assert generate.await_count == 2
+        assert [call.kwargs["config"].http_options.timeout for call in generate.await_args_list] == [60_000, 45_000]
+
+    @pytest.mark.asyncio
+    async def test_permanent_gemini_error_does_not_retry(self):
+        class APIError(Exception):
+            code = 400
+
+        error = APIError("bad request")
+        ai_service.gemini_client.aio.models.generate_content = AsyncMock(side_effect=error)
+
+        with pytest.raises(ai_service.AIProviderPermanentError) as raised:
+            await ai_service.extrair_tabela_recibo_gemini(b"fake_image_bytes")
+
+        assert raised.value.error_code == "400"
+        assert ai_service.gemini_client.aio.models.generate_content.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_gemini_response_is_permanent_and_logs_update_context(self):
+        ai_service.gemini_client.aio.models.generate_content = AsyncMock(return_value=MagicMock(text=""))
+        with pytest.raises(ai_service.AIProviderPermanentError) as raised:
+            await ai_service.extrair_tabela_recibo_gemini(
+                b"fake_image_bytes",
+                source_update_id=611390390,
+                worker_attempt=2,
+            )
+
+        assert raised.value.error_code == "empty_response"
+
+    @pytest.mark.asyncio
+    async def test_retryable_gemini_failures_exhaust_internal_retry(self):
+        generate = AsyncMock(side_effect=[asyncio.TimeoutError(), asyncio.TimeoutError()])
+        ai_service.gemini_client.aio.models.generate_content = generate
+        with patch.object(ai_service, "GEMINI_INTERNAL_RETRY_DELAY_RANGE_SECONDS", (0, 0)):
+            with pytest.raises(ai_service.AIProviderRetryableError):
+                await ai_service.extrair_tabela_recibo_gemini(b"fake_image_bytes")
+
+        assert generate.await_count == 2
+
+    def test_provider_error_classification_accepts_numeric_string_codes(self):
+        class CodedError(Exception):
+            def __init__(self, code):
+                self.code = code
+
+        assert ai_service._provider_error_code(CodedError("429")) == "429"
+        assert ai_service._is_retryable_provider_error(CodedError("429")) is True
+        assert ai_service._is_retryable_provider_error(CodedError("400")) is False
+        assert ai_service._provider_error_code(ValueError("bad")) == "ValueError"
 
 
 class TestProcessarTextoComLLM:
@@ -846,7 +898,9 @@ class TestProcessarTextoComLLM:
         with patch.object(ai_service.logger, "warning") as warning:
             with pytest.raises(ValueError):
                 await ai_service.processar_texto_com_llm("teste")
-        warning.assert_not_called()
+        warning.assert_called_once()
+        assert warning.call_args.args[0]["classification"] == "permanent"
+        assert warning.call_args.args[0]["provider"] == "deepseek"
 
     @pytest.mark.asyncio
     async def test_returns_parsed_json(self):
@@ -1067,7 +1121,7 @@ class TestProcessarUpdateAssincrono:
                 await handlers.processar_update_assincrono(update)
 
         msgs = [c[1]["json"]["text"] for c in mock_http_client.post.call_args_list if "json" in c[1] and "text" in c[1].get("json", {})]
-        assert any("Falha" in m or "não reconhecida" in m for m in msgs)
+        assert not any("Falha Sistémica" in m for m in msgs)
 
     @pytest.mark.asyncio
     async def test_intent_registrar_lote_pendente(self, mock_http_client):
@@ -1117,6 +1171,48 @@ class TestProcessarUpdateAssincrono:
         ocr.assert_not_called()
         msgs = [c[1]["json"]["text"] for c in mock_http_client.post.call_args_list if "json" in c[1] and "text" in c[1].get("json", {})]
         assert any("Muitas solicitações" in m for m in msgs)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("media_key", "invalid_message"),
+        [
+            ("photo", "imagem enviada é inválida"),
+            ("voice", "áudio enviado é inválido"),
+        ],
+    )
+    async def test_invalid_media_replaces_progress_without_extra_message(
+        self,
+        mock_http_client,
+        media_key,
+        invalid_message,
+    ):
+        self._setup_supabase_idempotency()
+        update = {
+            "update_id": 1701,
+            "message": {
+                "chat": {"id": 123},
+                "from": {"id": 456},
+                media_key: [{"file_id": "media"}] if media_key == "photo" else {"file_id": "media"},
+            },
+        }
+
+        with patch("handlers.enviar_mensagem_telegram", AsyncMock(return_value={"message_id": 99})), patch(
+            "handlers.baixar_arquivo_telegram", AsyncMock(return_value=b"")
+        ), patch(
+            "handlers.extrair_tabela_recibo_gemini", AsyncMock()
+        ) as ocr, patch("handlers.processar_texto_com_llm", AsyncMock()) as llm:
+            await handlers.processar_update_assincrono(update)
+
+        ocr.assert_not_awaited()
+        llm.assert_not_awaited()
+        edit_urls = [call.args[0] for call in mock_http_client.post.call_args_list if call.args]
+        assert any("editMessageText" in url for url in edit_urls)
+        texts = [
+            call.kwargs["json"]["text"]
+            for call in mock_http_client.post.call_args_list
+            if "json" in call.kwargs and "text" in call.kwargs["json"]
+        ]
+        assert sum(invalid_message in text for text in texts) == 1
 
     @pytest.mark.asyncio
     async def test_intent_salvar_edicao_cupom(self, mock_http_client):

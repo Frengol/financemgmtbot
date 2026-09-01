@@ -1,5 +1,6 @@
 -r requirements.in
 coverage[toml]
+pip>=26.2
 pip-audit
 pytest
 pytest-asyncio

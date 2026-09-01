@@ -6,7 +6,7 @@ supabase
 openai
 groq
 python-json-logger
-google-generativeai
+google-genai==2.18.1
 google-cloud-tasks
 httplib2>=0.32.0
 pyasn1>=0.6.4

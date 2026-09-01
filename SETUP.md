@@ -389,7 +389,7 @@ gcloud tasks queues add-iam-policy-binding telegram-updates --project=financemgm
 gcloud iam service-accounts add-iam-policy-binding financemgmtbot-task-invoker@financemgmtbot.iam.gserviceaccount.com --project=financemgmtbot --member="serviceAccount:financemgmtbot-api@financemgmtbot.iam.gserviceaccount.com" --role="roles/iam.serviceAccountUser"
 ```
 
-O `cloudbuild.yaml` publica uma imagem imutavel e faz rollout primeiro de `financemgmtbot-worker` privado (`ingress=internal`, sem anonimo, concorrencia `1`, timeout `240s`) e depois de `financemgmtbot-git` publico (`concorrencia=10`, timeout `30s`). O worker aplica um budget interno de `150s`; a task usa deadline de `180s`.
+O `cloudbuild.yaml` publica uma imagem imutavel e faz rollout primeiro de `financemgmtbot-worker` privado (`ingress=internal`, sem anonimo, concorrencia `1`, timeout `240s`) e depois de `financemgmtbot-git` publico (`concorrencia=10`, timeout `30s`). O worker aplica um budget interno de `200s`; a task usa deadline de `220s`.
 
 O worker registra `media_get_file`, `media_download`, `ocr`, `stt`, `llm` e `telegram_delivery` separadamente. Para investigar uma atualização sem expor conteúdo do cupom, use somente metadados sanitizados:
 
@@ -493,7 +493,7 @@ VITE_ALLOWED_ADMIN_EMAILS=<ADMIN_EMAIL>
 
 Nao crie `SUPABASE_KEY` aqui. O frontend usa apenas `anon public`, nunca `service_role`.
 
-O gate de audit do CI roda com `--audit-level=high`. Aceite documentado (16/08/2026): 2 vulnerabilidades moderadas no react-router 6.30.4 (GHSA-wrjc-x8rr-h8h6, GHSA-337j-9hxr-rhxg); a correcao exige migracao breaking para react-router-dom 7.18.2, adiada.
+O CI executa `npm audit --audit-level=low` sobre todas as dependências do frontend e falha para qualquer vulnerabilidade conhecida, sem advisories aceitos.
 
 Agora configure os secrets do workflow de despesas recorrentes:
 
