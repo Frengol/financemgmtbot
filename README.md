@@ -22,6 +22,7 @@ O FinanceMgmtBot recebe texto, audio ou foto pelo canal conversacional, transfor
 
 - **Autoridade no backend:** operacoes financeiras passam por validacao server-side, contratos de dados e persistencia controlada antes de afetar o historico.
 - **Seguranca operacional aplicada:** autenticacao validada no servidor, auditoria, logs sanitizados e rate limits protegem as superficies publicas e as acoes administrativas.
+- **Diagnostico sem expor o cupom:** erros finais do Telegram incluem uma referencia estavel `TG-...`, pesquisavel nos logs operacionais sem usar o texto, a foto ou os itens na pesquisa.
 - **Qualidade acima do comum:** Pipeline de CI com testes, scans, verificacao de build e cobertura minima de 90% para manter a solucao confiavel conforme evolui.
 
 ## Para Quem Este Repositorio Foi Pensado

@@ -4,6 +4,7 @@ from api_responses import with_request_id
 from config import SECRET_TOKEN, logger
 from security import MAX_WEBHOOK_BODY_BYTES
 from telegram_tasks import InvalidTelegramUpdate, enqueue_telegram_update
+from telegram_correlation import bind_telegram_update
 
 from .http import _json_error, rate_limited
 
@@ -31,6 +32,9 @@ def register_webhook_routes(app):
 
         try:
             request_body = await request.get_json()
+            update_id = request_body.get("update_id") if isinstance(request_body, dict) else None
+            if isinstance(update_id, int) and not isinstance(update_id, bool):
+                bind_telegram_update(update_id)
             logger.info(with_request_id({"event": "webhook_received_raw", "module": "main"}))
             await enqueue_telegram_update(request_body)
             return jsonify({"status": "ok"}), 200

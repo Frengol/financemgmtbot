@@ -140,14 +140,24 @@ def test_manual_dependency_security_contract_avoids_automated_pr_flood():
 
     assert dev_dependencies["vite"] == "^8.1.0"
     assert dev_dependencies["@vitejs/plugin-react"] == "^6.0.3"
-    assert dev_dependencies["vitest"] == "^4.1.9"
-    assert dev_dependencies["@vitest/coverage-v8"] == "^4.1.9"
+    assert dev_dependencies["vitest"] == "4.1.11"
+    assert dev_dependencies["@vitest/coverage-v8"] == "4.1.11"
     assert dev_dependencies["postcss"] == "^8.5.26"
     assert dev_dependencies["jsdom"] == "^29.1.1"
 
     assert overrides["anymatch"]["picomatch"] == "^2.3.2"
     assert overrides["micromatch"]["picomatch"] == "^2.3.2"
     assert overrides["readdirp"]["picomatch"] == "^2.3.2"
+
+
+def test_e2e_backend_python_is_configurable_for_the_supported_runtime():
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    playwright_config = (REPO_ROOT / "frontend" / "playwright.config.ts").read_text(encoding="utf-8")
+
+    assert "E2E_PYTHON ?= $(PYTHON)" in makefile
+    assert "E2E_PYTHON=$(E2E_PYTHON) npm run test:e2e --prefix frontend" in makefile
+    assert "process.env.E2E_PYTHON || 'python'" in playwright_config
+    assert "command: `${e2ePython} main.py`" in playwright_config
 
 
 def test_python_dependencies_are_reproducible_hashed_locks():
@@ -192,12 +202,14 @@ def test_python_dependencies_are_reproducible_hashed_locks():
     assert "pip install --no-cache-dir --require-hashes -r requirements.txt" in dockerfile
     assert "pip install --require-hashes -r requirements-dev.txt" in ci_workflow
 
-    hashed_runtime_audit = "pip-audit --require-hashes --disable-pip -r requirements.txt"
-    hashed_dev_audit = "pip-audit --require-hashes --disable-pip -r requirements-dev.txt"
-    assert hashed_runtime_audit in makefile
-    assert hashed_dev_audit in makefile
-    assert hashed_runtime_audit in ci_workflow
-    assert hashed_dev_audit in ci_workflow
+    make_runtime_audit = "$(PYTHON) -m pip_audit --require-hashes --disable-pip -r requirements.txt"
+    make_dev_audit = "$(PYTHON) -m pip_audit --require-hashes --disable-pip -r requirements-dev.txt"
+    ci_runtime_audit = "pip-audit --require-hashes --disable-pip -r requirements.txt"
+    ci_dev_audit = "pip-audit --require-hashes --disable-pip -r requirements-dev.txt"
+    assert make_runtime_audit in makefile
+    assert make_dev_audit in makefile
+    assert ci_runtime_audit in ci_workflow
+    assert ci_dev_audit in ci_workflow
 
 
 def test_backend_cloud_build_contract_uses_dockerfile_image_deploy():
@@ -236,6 +248,9 @@ def test_backend_cloud_build_contract_uses_dockerfile_image_deploy():
     assert '--service-account "${_WORKER_RUNTIME_SERVICE_ACCOUNT}"' in cloudbuild
     assert '--service-account "${_API_RUNTIME_SERVICE_ACCOUNT}"' in cloudbuild
     assert 'APP_COMPONENT=telegram-worker' in cloudbuild
+    assert 'GEMINI_OCR_FALLBACK_ENABLED=${_GEMINI_OCR_FALLBACK_ENABLED}' in cloudbuild
+    assert '_GEMINI_OCR_FALLBACK_ENABLED: "true"' in cloudbuild
+    assert '_PRUNE_SECRET_VERSIONS: "false"' in cloudbuild
     assert 'APP_COMPONENT=api' in cloudbuild
     assert 'TELEGRAM_TASKS_LOCATION=${_REGION}' in cloudbuild
     assert "replace-me" not in cloudbuild

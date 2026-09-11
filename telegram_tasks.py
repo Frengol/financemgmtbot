@@ -12,6 +12,7 @@ except ImportError:  # Allows injected clients in local tests before dependencie
     tasks_v2 = None
 
 from config import logger
+from telegram_correlation import correlation_fields
 
 
 MAX_TASK_BODY_BYTES = 75_000
@@ -93,8 +94,8 @@ async def enqueue_telegram_update(update: object, *, client=None) -> EnqueueResu
     try:
         await tasks_client.create_task(request={"parent": parent, "task": task})
     except AlreadyExists:
-        logger.info({"event": "telegram_task_duplicate", "update_id": update_id})
+        logger.info({"event": "telegram_task_duplicate", "update_id": update_id, **correlation_fields(update_id)})
         return EnqueueResult(task_name=task_name, created=False, duplicate=True)
 
-    logger.info({"event": "telegram_task_enqueued", "update_id": update_id})
+    logger.info({"event": "telegram_task_enqueued", "update_id": update_id, **correlation_fields(update_id)})
     return EnqueueResult(task_name=task_name, created=True, duplicate=False)

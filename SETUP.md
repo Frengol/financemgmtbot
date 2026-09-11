@@ -95,6 +95,7 @@ Configure como variaveis normais no Cloud Run.
 | `TELEGRAM_TASKS_QUEUE` | `telegram-updates` no servico publico |
 | `TELEGRAM_WORKER_URL` | URL HTTPS do worker privado |
 | `TELEGRAM_TASK_INVOKER_SERVICE_ACCOUNT` | `financemgmtbot-task-invoker@financemgmtbot.iam.gserviceaccount.com` |
+| `GEMINI_OCR_FALLBACK_ENABLED` | `false` localmente; o contrato atual do Cloud Build publica `true` no worker |
 
 ### Secrets do GitHub Actions
 
@@ -215,6 +216,7 @@ supabase/migrations/20260410_drop_admin_web_sessions.sql
 supabase/migrations/20260411_recurring_expenses_hardening.sql
 supabase/migrations/20260412_remove_recurring_expense_description.sql
 supabase/migrations/20260815_telegram_update_reliability.sql
+supabase/migrations/20260908_telegram_ocr_fallback_recovery.sql
 ```
 
 Se o Supabase avisar que algum objeto ja existe, confira a mensagem. Muitos comandos usam `if not exists` e podem ser reexecutados, mas erros de tabela inexistente normalmente indicam que a etapa das tabelas base foi pulada.
@@ -374,7 +376,7 @@ Nao retire `Editor` da conta padrao automaticamente. Primeiro confirme que nenhu
 
 ## 14. Criar a fila pausada e preparar o worker privado
 
-Depois de aplicar `20260815_telegram_update_reliability.sql`, habilite a API e crie a fila regional ainda pausada:
+Depois de aplicar `20260815_telegram_update_reliability.sql` e `20260908_telegram_ocr_fallback_recovery.sql`, habilite a API e crie a fila regional ainda pausada:
 
 ```bash
 gcloud services enable cloudtasks.googleapis.com --project=financemgmtbot
@@ -389,15 +391,38 @@ gcloud tasks queues add-iam-policy-binding telegram-updates --project=financemgm
 gcloud iam service-accounts add-iam-policy-binding financemgmtbot-task-invoker@financemgmtbot.iam.gserviceaccount.com --project=financemgmtbot --member="serviceAccount:financemgmtbot-api@financemgmtbot.iam.gserviceaccount.com" --role="roles/iam.serviceAccountUser"
 ```
 
-O `cloudbuild.yaml` publica uma imagem imutavel e faz rollout primeiro de `financemgmtbot-worker` privado (`ingress=internal`, sem anonimo, concorrencia `1`, timeout `240s`) e depois de `financemgmtbot-git` publico (`concorrencia=10`, timeout `30s`). O worker aplica um budget interno de `200s`; a task usa deadline de `220s`.
+O `cloudbuild.yaml` publica uma imagem imutavel e faz rollout primeiro de `financemgmtbot-worker` privado (`ingress=internal`, sem anonimo, concorrencia `1`, timeout `240s`) e depois de `financemgmtbot-git` publico (`concorrencia=10`, timeout `30s`). O worker aplica budget total interno de `200s`, usa no maximo `180s` no processamento e reserva `20s` para persistencia e entrega terminal; a task usa deadline de `220s`. O lease do ledger e de `300s` para impedir sobreposicao quando uma task expira.
 
 O worker registra `media_get_file`, `media_download`, `ocr`, `stt`, `llm` e `telegram_delivery` separadamente. Para investigar uma atualização sem expor conteúdo do cupom, use somente metadados sanitizados:
 
 ```bash
-gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.location="southamerica-east1" AND (jsonPayload.update_id=611390377 OR jsonPayload.error_code="ResourceExhausted")' --project=financemgmtbot --freshness=7d --format='value(timestamp,jsonPayload.event,jsonPayload.update_id,jsonPayload.attempt,jsonPayload.stage,jsonPayload.provider,jsonPayload.error_code,jsonPayload.duration_ms)'
+gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.location="southamerica-east1" AND (jsonPayload.update_id=611390377 OR jsonPayload.error_code="ResourceExhausted")' --project=financemgmtbot --freshness=7d --format='value(timestamp,jsonPayload.event,jsonPayload.update_id,jsonPayload.worker_attempt,jsonPayload.ocr_round,jsonPayload.provider_attempt,jsonPayload.stage,jsonPayload.provider,jsonPayload.model,jsonPayload.classification,jsonPayload.error_code,jsonPayload.duration_ms)'
+```
+
+Quando uma mensagem final de erro exibir `Referência: TG-...`, pesquise diretamente o mesmo código, sem precisar compartilhar o conteúdo do cupom:
+
+```bash
+gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.location="southamerica-east1" AND jsonPayload.correlation_id="TG-0123456789ABCDEF"' --project=financemgmtbot --freshness=7d --format='value(timestamp,resource.labels.service_name,jsonPayload.event,jsonPayload.correlation_id,jsonPayload.update_id,jsonPayload.worker_attempt,jsonPayload.stage,jsonPayload.provider,jsonPayload.model,jsonPayload.error_code,jsonPayload.duration_ms)'
 ```
 
 Repetições de `media_download` ou `ResourceExhausted` para o mesmo `update_id` devem gerar alerta operacional. A criação/alteração de alertas e da fila continua sendo uma operação de infraestrutura separada e exige autorização explícita; este diagnóstico não altera recursos do Google Cloud.
+
+O OCR usa `gemini-3.5-flash` como principal e `gemini-3.5-flash-lite` como reserva. O contrato atual do Cloud Build ativa o fallback no worker de producao; o padrao local permanece `false`. Ambos usam `thinking_level="minimal"`, com deadlines de 60/45 segundos e nenhuma retry automatica do SDK. A avaliacao basica acordada faz somente uma chamada ao Flash-Lite, usando um unico cupom ficticio marcado `TESTE - SEM VALOR FISCAL`; ela nao chama o modelo principal. Antes de executar, confirme no Google AI Studio que o projeto da chave existente esta no Free Tier e possui quota; o `gcloud` do projeto Cloud Run nao confirma a modalidade de uma chave Gemini. Depois dessa confirmacao, gere localmente a imagem e exponha `GEMINI_API_KEY` apenas no processo local:
+
+```bash
+python3 -m scripts.generate_synthetic_receipt --output /tmp/financemgmtbot-synthetic-receipt.jpg
+/tmp/financemgmtbot-py311/bin/python -m scripts.evaluate_gemini_receipt_models --confirm-free-tier --image /tmp/financemgmtbot-synthetic-receipt.jpg
+```
+
+O primeiro comando usa somente Pillow do Python do sistema para criar o JPEG ficticio. O segundo usa o ambiente Python 3.11 do bot, registra somente modelo, duracao, resultado e nomes dos campos divergentes e nao imprime a resposta OCR. Essa unica leitura e um smoke test de integracao do Flash-Lite, nao uma comprovacao ampla de precisao. O Flash principal deve ser validado pelo primeiro cupom real no Telegram apos a publicacao. Se a avaliacao do Lite divergir em valores, descontos, itens ou pagamento, registre a divergencia e monitore o piloto de producao; desative a substitution do fallback se ela se repetir.
+
+Para testar a migration pendente em Postgres descartavel, sem porta publicada e apenas com dados ficticios:
+
+```bash
+POSTGRES_IMAGE=docker.io/library/postgres:<MAJOR>-bookworm ./scripts/test_telegram_ocr_migration.sh
+```
+
+Substitua `<MAJOR>` pela versao principal confirmada do Postgres de producao. O fallback local do script e PostgreSQL 15 apenas para compatibilidade basica; ele nao comprova equivalencia com uma producao cuja versao ainda nao foi consultada. O teste aplica e reaplica a migration, verifica permissoes, lease, concorrencia, limite/reset das rodadas e retomada terminal, e compara gastos, pendencias e updates concluidos antes/depois.
 
 Configure `_SUPABASE_URL`, `_FRONTEND_PUBLIC_URL` e `_FRONTEND_ALLOWED_ORIGIN` no trigger antes do primeiro build. O build falha se essas substitutions nao forem informadas.
 
@@ -411,7 +436,7 @@ gcloud builds triggers update github cloudbuild-yaml-09-04-26 --project=financem
 
 Ordem obrigatoria do rollout:
 
-1. aplicar a migration e validar as funcoes RPC como `service_role`;
+1. confirmar backup recuperavel, aplicar somente a migration pendente `20260908_telegram_ocr_fallback_recovery.sql` em uma transacao e validar as funcoes RPC v2 como `service_role`; se houver erro ou timeout, a transacao deve abortar integralmente e o rollout deve parar, sem rollback destrutivo de colunas;
 2. criar identidades e IAM;
 3. criar e pausar a fila;
 4. executar o build, que publica o worker privado e depois a API:
@@ -433,7 +458,7 @@ gcloud run services add-iam-policy-binding financemgmtbot-worker --project=finan
 gcloud tasks queues resume telegram-updates --project=financemgmtbot --location=southamerica-east1
 ```
 
-Depois do cupom sintetico de validacao, confirme uma task, uma unica pendencia, ledger `completed`, entrega `telegram_delivery_confirmed`, fila vazia e ausencia de novo `504`. Aplique `location=southamerica-east1` no filtro de Logging e confira as duas revisoes e service accounts anexadas. Nunca registre o payload do cupom nessa validacao.
+Depois do cupom sintetico de validacao, confirme uma task, uma unica mensagem de progresso, uma unica pendencia, ledger `completed`, contador de OCR zerado, entrega `telegram_delivery_confirmed`, fila vazia e ausencia de novo `504`. Em teste de indisponibilidade controlado, confirme que as tres rodadas ficam registradas, a decisao terminal precede a edicao no Telegram e o retry nao chama OCR novamente. Aplique `location=southamerica-east1` no filtro de Logging e confira as duas revisoes e service accounts anexadas. Nunca registre o payload do cupom nessa validacao.
 
 O `cloudbuild.yaml` resolve versoes numericas dos secrets, substitui integralmente os bindings com `--set-secrets` e listas separadas por servico, valida `/api/meta/runtime` e protege versoes ainda referenciadas pelas revisoes dos dois servicos antes da limpeza. Essa substituicao integral e obrigatoria na migracao do servico unificado: `--update-secrets` preservaria bindings antigos e poderia manter credenciais de OCR/LLM na API publica.
 

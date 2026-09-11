@@ -5,6 +5,11 @@ const e2eFrontendPort = Number(process.env.E2E_FRONTEND_PORT || '4173');
 const e2eBackendBaseUrl = `http://127.0.0.1:${e2eBackendPort}`;
 const e2eFrontendBaseUrl = `http://127.0.0.1:${e2eFrontendPort}`;
 const reuseExistingServer = !process.env.CI && process.env.E2E_FORCE_FRESH_SERVERS !== 'true';
+const e2ePython = process.env.E2E_PYTHON || 'python';
+
+if (!/^(?:[A-Za-z0-9_-]+|\/[A-Za-z0-9_./-]+)$/.test(e2ePython) || e2ePython.includes('..')) {
+  throw new Error('E2E_PYTHON must be a simple executable name or an absolute path.');
+}
 
 export default defineConfig({
   testDir: './e2e',
@@ -18,7 +23,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: 'python main.py',
+      command: `${e2ePython} main.py`,
       cwd: '..',
       env: {
         ...process.env,

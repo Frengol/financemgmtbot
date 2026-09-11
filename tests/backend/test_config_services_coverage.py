@@ -58,6 +58,7 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, **overrides: str):
         "SUPABASE_GASTOS_TABLE": "",
         "SUPABASE_ADMIN_EMAILS": "",
         "SUPABASE_ADMIN_USER_IDS": "",
+        "GEMINI_OCR_FALLBACK_ENABLED": "false",
     }
     merged = {**REQUIRED_ENV, **optional_defaults, **overrides}
     for key in REQUIRED_ENV:
@@ -92,8 +93,27 @@ class TestConfigCoverage:
                 sys.modules["pytest"] = pytest_module
 
         assert module.APP_COMPONENT == "telegram-worker"
+        assert module.GEMINI_OCR_FALLBACK_ENABLED is False
         assert "TELEGRAM_SECRET_TOKEN" not in module.REQUIRED_VARS
         assert "DATA_ENCRYPTION_KEY" in module.REQUIRED_VARS
+
+    def test_gemini_ocr_fallback_requires_explicit_enablement(self, monkeypatch: pytest.MonkeyPatch):
+        _set_required_env(
+            monkeypatch,
+            APP_COMPONENT="telegram-worker",
+            GEMINI_OCR_FALLBACK_ENABLED="true",
+        )
+        pytest_module = sys.modules.pop("pytest", None)
+        try:
+            with patch("supabase.create_client", return_value=MagicMock()), patch("openai.AsyncOpenAI"), patch(
+                "groq.AsyncGroq"
+            ), patch("google.genai.Client"):
+                module = _import_fresh_config("config_cov_gemini_fallback")
+        finally:
+            if pytest_module is not None:
+                sys.modules["pytest"] = pytest_module
+
+        assert module.GEMINI_OCR_FALLBACK_ENABLED is True
 
     def test_api_runtime_does_not_initialize_ai_clients(self, monkeypatch: pytest.MonkeyPatch):
         _set_required_env(
@@ -390,8 +410,10 @@ class TestAiServiceCoverage:
 
     @pytest.mark.asyncio
     async def test_extrair_tabela_recibo_rejects_empty_payload(self):
-        with pytest.raises(ValueError, match="Image payload is empty"):
+        with pytest.raises(ai_service.AIProviderPermanentError) as raised:
             await ai_service.extrair_tabela_recibo_gemini(b"")
+
+        assert raised.value.error_code == "invalid_image"
 
     @pytest.mark.asyncio
     async def test_transcrever_audio_removes_temporary_file_when_provider_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

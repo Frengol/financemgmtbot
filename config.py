@@ -10,8 +10,10 @@ from supabase import create_client, Client
 from openai import AsyncOpenAI
 from groq import AsyncGroq
 from google import genai
+from telegram_correlation import TelegramCorrelationFilter
 
 logHandler = logging.StreamHandler()
+logHandler.addFilter(TelegramCorrelationFilter())
 formatter = jsonlogger.JsonFormatter('%(asctime)s %(levelname)s %(message)s %(module)s')
 logHandler.setFormatter(formatter)
 logger = logging.getLogger(__name__)
@@ -184,6 +186,7 @@ APP_RELEASE_SHA = (os.environ.get("APP_RELEASE_SHA") or APP_COMMIT_SHA[:12]).str
 AUTH_TEST_MODE = (os.environ.get("AUTH_TEST_MODE") or "").strip().lower() == "true"
 AUTH_TEST_DATA_SOURCE = (os.environ.get("AUTH_TEST_DATA_SOURCE") or "").strip().lower()
 RECURRING_EXPENSES_CRON_SECRET = (os.environ.get("RECURRING_EXPENSES_CRON_SECRET") or "").strip()
+GEMINI_OCR_FALLBACK_ENABLED = (os.environ.get("GEMINI_OCR_FALLBACK_ENABLED") or "false").strip().lower() == "true"
 
 
 def resolve_allow_local_dev_auth():

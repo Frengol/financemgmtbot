@@ -35,6 +35,7 @@ from telegram_service import (
     remover_teclado_mensagem_telegram,
     responder_callback_telegram,
 )
+from telegram_correlation import with_error_reference
 from utils import inferir_natureza
 
 CHAT_MEDIA_RATE_LIMIT = 12
@@ -55,14 +56,28 @@ def _chat_rate_key(chat_id, user_id=None):
     return f"chat:{chat_id}:user:{user_id or 'unknown'}"
 
 
-async def _send_rate_limit_message(chat_id):
-    await enviar_mensagem_telegram(chat_id, "⚠️ Muitas solicitações em pouco tempo. Tente novamente em instantes.")
+async def _send_rate_limit_message(chat_id, source_update_id=None):
+    await enviar_mensagem_telegram(
+        chat_id,
+        with_error_reference(
+            "⚠️ Muitas solicitações em pouco tempo. Tente novamente em instantes.",
+            update_id=source_update_id,
+        ),
+    )
 
 
-async def _chat_rate_limited(scope: str, chat_id, user_id, *, limit: int, window_seconds: int):
+async def _chat_rate_limited(
+    scope: str,
+    chat_id,
+    user_id,
+    *,
+    limit: int,
+    window_seconds: int,
+    source_update_id=None,
+):
     if allow_request(scope, _chat_rate_key(chat_id, user_id), limit=limit, window_seconds=window_seconds):
         return False
-    await _send_rate_limit_message(chat_id)
+    await _send_rate_limit_message(chat_id, source_update_id)
     return True
 
 
@@ -160,8 +175,15 @@ async def processar_update_assincrono(
     progress_message_id=None,
     stage_callback=None,
     worker_attempt=None,
+    ocr_round_callback=None,
+    ocr_success_callback=None,
+    processing_deadline_monotonic=None,
 ):
     chat_id = None
+    if source_update_id is None and isinstance(update, dict):
+        candidate_update_id = update.get("update_id")
+        if isinstance(candidate_update_id, int) and not isinstance(candidate_update_id, bool):
+            source_update_id = candidate_update_id
 
     try:
         if "callback_query" in update:
@@ -184,14 +206,29 @@ async def processar_update_assincrono(
 
             item = load_pending_item(cache_id)
             if not item:
-                await editar_mensagem_telegram(chat_id, msg_id, "❌ Rascunho expirado ou já processado.")
+                await editar_mensagem_telegram(
+                    chat_id,
+                    msg_id,
+                    with_error_reference("❌ Rascunho expirado ou já processado.", update_id=source_update_id),
+                )
                 return
             if pending_item_expired(item):
                 delete_pending_item(cache_id)
-                await editar_mensagem_telegram(chat_id, msg_id, "❌ Rascunho expirado ou já processado.")
+                await editar_mensagem_telegram(
+                    chat_id,
+                    msg_id,
+                    with_error_reference("❌ Rascunho expirado ou já processado.", update_id=source_update_id),
+                )
                 return
             if not matches_pending_origin(item, chat_id, origin_user_id):
-                await editar_mensagem_telegram(chat_id, msg_id, "❌ Operação não autorizada para esta conversa.")
+                await editar_mensagem_telegram(
+                    chat_id,
+                    msg_id,
+                    with_error_reference(
+                        "❌ Operação não autorizada para esta conversa.",
+                        update_id=source_update_id,
+                    ),
+                )
                 return
 
             payload_cache = item.get("payload") if isinstance(item.get("payload"), dict) else {}
@@ -199,7 +236,14 @@ async def processar_update_assincrono(
 
             if acao == "aprovar":
                 if pending_kind != "receipt_batch":
-                    await editar_mensagem_telegram(chat_id, msg_id, "❌ Tipo de pendência inválido para aprovação.")
+                    await editar_mensagem_telegram(
+                        chat_id,
+                        msg_id,
+                        with_error_reference(
+                            "❌ Tipo de pendência inválido para aprovação.",
+                            update_id=source_update_id,
+                        ),
+                    )
                     return
                 effect_source_update_id = item.get("source_update_id")
                 if effect_source_update_id is None:
@@ -225,7 +269,14 @@ async def processar_update_assincrono(
 
             elif acao == "editar":
                 if pending_kind != "receipt_batch":
-                    await editar_mensagem_telegram(chat_id, msg_id, "❌ Tipo de pendência inválido para edição.")
+                    await editar_mensagem_telegram(
+                        chat_id,
+                        msg_id,
+                        with_error_reference(
+                            "❌ Tipo de pendência inválido para edição.",
+                            update_id=source_update_id,
+                        ),
+                    )
                     return
                 texto_edit = gerar_texto_edicao(payload_cache)
                 await editar_mensagem_telegram(chat_id, msg_id, f"📝 **MODO EDIÇÃO**\nCopie, altere as categorias/valores e envie:\n\n`{texto_edit}`")
@@ -233,7 +284,14 @@ async def processar_update_assincrono(
 
             elif acao == "confirmdel":
                 if pending_kind != "delete_confirmation":
-                    await editar_mensagem_telegram(chat_id, msg_id, "❌ Tipo de pendência inválido para exclusão.")
+                    await editar_mensagem_telegram(
+                        chat_id,
+                        msg_id,
+                        with_error_reference(
+                            "❌ Tipo de pendência inválido para exclusão.",
+                            update_id=source_update_id,
+                        ),
+                    )
                     return
                 ids = payload_cache.get("ids", [])
                 supabase.table(TRANSACTIONS_TABLE).delete().in_("id", ids).execute()
@@ -265,6 +323,7 @@ async def processar_update_assincrono(
                 origin_user_id,
                 limit=CHAT_MEDIA_RATE_LIMIT,
                 window_seconds=CHAT_MEDIA_RATE_WINDOW_SECONDS,
+                source_update_id=source_update_id,
             ):
                 return
             await enviar_acao_telegram(chat_id, "upload_photo")
@@ -285,22 +344,31 @@ async def processar_update_assincrono(
                 await _deliver_final_message(
                     chat_id,
                     progress_message_id,
-                    "⚠️ A imagem enviada é inválida ou excede o tamanho suportado.",
+                    with_error_reference(
+                        "⚠️ A imagem enviada é inválida ou excede o tamanho suportado.",
+                        update_id=source_update_id,
+                    ),
                     stage_callback=stage_callback,
                 )
                 return
             if stage_callback:
                 await stage_callback("ocr", progress_message_id)
-            tabela_md = await extrair_tabela_recibo_gemini(
+            ocr_round = await ocr_round_callback() if ocr_round_callback else None
+            ocr_result = await extrair_tabela_recibo_gemini(
                 img_bytes,
                 source_update_id=source_update_id,
                 worker_attempt=worker_attempt,
+                ocr_round=ocr_round,
+                processing_deadline_monotonic=processing_deadline_monotonic,
             )
-            texto_analise = f"Contexto: {message.get('caption', '')}\n\nNota Fiscal Extratada:\n{tabela_md}"
+            if ocr_success_callback:
+                await ocr_success_callback()
+            texto_analise = f"Contexto: {message.get('caption', '')}\n\nNota Fiscal Extratada:\n{ocr_result.text}"
             logger.info(
                 {
                     "event": "ocr_completed",
-                    "model": "gemini-2.5-flash",
+                    "model": ocr_result.model,
+                    "ocr_round": ocr_round,
                     "update_id": source_update_id,
                     "worker_attempt": worker_attempt,
                 }
@@ -312,6 +380,7 @@ async def processar_update_assincrono(
                 origin_user_id,
                 limit=CHAT_MEDIA_RATE_LIMIT,
                 window_seconds=CHAT_MEDIA_RATE_WINDOW_SECONDS,
+                source_update_id=source_update_id,
             ):
                 return
             await enviar_acao_telegram(chat_id, "record_voice")
@@ -331,7 +400,10 @@ async def processar_update_assincrono(
                 await _deliver_final_message(
                     chat_id,
                     progress_message_id,
-                    "⚠️ O áudio enviado é inválido ou excede o tamanho suportado.",
+                    with_error_reference(
+                        "⚠️ O áudio enviado é inválido ou excede o tamanho suportado.",
+                        update_id=source_update_id,
+                    ),
                     stage_callback=stage_callback,
                 )
                 return
@@ -357,6 +429,7 @@ async def processar_update_assincrono(
                 origin_user_id,
                 limit=CHAT_AI_RATE_LIMIT,
                 window_seconds=CHAT_AI_RATE_WINDOW_SECONDS,
+                source_update_id=source_update_id,
             ):
                 return
             await enviar_acao_telegram(chat_id, "typing")
@@ -371,6 +444,7 @@ async def processar_update_assincrono(
                 origin_user_id,
                 limit=CHAT_AI_RATE_LIMIT,
                 window_seconds=CHAT_AI_RATE_WINDOW_SECONDS,
+                source_update_id=source_update_id,
             ):
                 return
         if stage_callback:

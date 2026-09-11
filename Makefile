@@ -1,5 +1,8 @@
 .PHONY: test-backend test-backend-coverage test-backend-live-db-smoke test-frontend test-frontend-coverage test-frontend-e2e compile-python-locks audit-backend-deps audit-frontend-deps audit-repo-security pre-push pre-push-full install-git-hooks run-backend-local run-frontend-local run-backend-qa-auth run-frontend-qa-auth
 
+PYTHON ?= python
+E2E_PYTHON ?= $(PYTHON)
+
 BACKEND_COVERAGE_ARGS = \
 	--cov=admin_runtime \
 	--cov=ai_service \
@@ -9,7 +12,9 @@ BACKEND_COVERAGE_ARGS = \
 	--cov=domain \
 	--cov=handlers \
 	--cov=main \
+	--cov=receipt_ocr_contract \
 	--cov=security \
+	--cov=telegram_correlation \
 	--cov=telegram_service \
 	--cov=telegram_tasks \
 	--cov=telegram_update_ledger \
@@ -28,15 +33,15 @@ FRONTEND_BUILD_APP_RELEASE ?= local-build-release
 FRONTEND_BUILD_ENV = env VITE_API_BASE_URL=$(FRONTEND_BUILD_API_BASE_URL) VITE_SUPABASE_URL=$(FRONTEND_BUILD_SUPABASE_URL) VITE_SUPABASE_ANON_KEY=$(FRONTEND_BUILD_SUPABASE_ANON_KEY) VITE_APP_RELEASE=$(FRONTEND_BUILD_APP_RELEASE)
 
 test-backend:
-	pytest -q
+	$(PYTHON) -m pytest -q
 
 test-backend-coverage:
 	mkdir -p coverage/backend
-	pytest -q $(BACKEND_COVERAGE_ARGS)
-	python scripts/check_backend_coverage.py coverage/backend/coverage.xml --min-lines 90 --min-branches 90
+	$(PYTHON) -m pytest -q $(BACKEND_COVERAGE_ARGS)
+	$(PYTHON) scripts/check_backend_coverage.py coverage/backend/coverage.xml --min-lines 90 --min-branches 90
 
 test-backend-live-db-smoke:
-	LIVE_DB_SMOKE=true pytest -q tests/backend/test_live_db_smoke.py
+	LIVE_DB_SMOKE=true $(PYTHON) -m pytest -q tests/backend/test_live_db_smoke.py
 
 test-frontend:
 	npm test --prefix frontend
@@ -45,15 +50,15 @@ test-frontend-coverage:
 	npm run test:coverage --prefix frontend
 
 test-frontend-e2e:
-	npm run test:e2e --prefix frontend
+	E2E_PYTHON=$(E2E_PYTHON) npm run test:e2e --prefix frontend
 
 compile-python-locks:
 	uv pip compile requirements.in --python-version 3.11 --generate-hashes --output-file requirements.txt
 	uv pip compile requirements-dev.in --python-version 3.11 --generate-hashes --output-file requirements-dev.txt
 
 audit-backend-deps:
-	pip-audit --require-hashes --disable-pip -r requirements.txt
-	pip-audit --require-hashes --disable-pip -r requirements-dev.txt
+	$(PYTHON) -m pip_audit --require-hashes --disable-pip -r requirements.txt
+	$(PYTHON) -m pip_audit --require-hashes --disable-pip -r requirements-dev.txt
 
 audit-frontend-deps:
 	npm audit --audit-level=low --prefix frontend

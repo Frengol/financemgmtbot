@@ -8,6 +8,7 @@ import sys
 import json
 import asyncio
 import calendar
+import time
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
@@ -825,10 +826,11 @@ class TestExtrairTabelaReciboGemini:
         ai_service.gemini_client.aio.models.generate_content = AsyncMock(return_value=response)
         result = await ai_service.extrair_tabela_recibo_gemini(b"fake_image_bytes")
 
-        assert "Arroz" in result
+        assert "Arroz" in result.text
+        assert result.model == "gemini-3.5-flash"
         request = ai_service.gemini_client.aio.models.generate_content.await_args.kwargs
-        assert request["model"] == "gemini-2.5-flash"
-        assert request["config"].thinking_config.thinking_budget == 0
+        assert request["model"] == "gemini-3.5-flash"
+        assert request["config"].thinking_config.thinking_level == "MINIMAL"
         assert request["config"].http_options.timeout == 60_000
         assert request["config"].http_options.retry_options.attempts == 1
 
@@ -840,9 +842,84 @@ class TestExtrairTabelaReciboGemini:
         with patch.object(ai_service, "GEMINI_INTERNAL_RETRY_DELAY_RANGE_SECONDS", (0, 0)):
             result = await ai_service.extrair_tabela_recibo_gemini(b"fake_image_bytes")
 
-        assert "Arroz" in result
+        assert "Arroz" in result.text
         assert generate.await_count == 2
         assert [call.kwargs["config"].http_options.timeout for call in generate.await_args_list] == [60_000, 45_000]
+
+    @pytest.mark.asyncio
+    async def test_transient_primary_failure_uses_enabled_stable_lite_fallback(self):
+        class APIError(Exception):
+            code = 503
+
+        response = MagicMock(text="Produto | Valor\nArroz | 10.00")
+        generate = AsyncMock(side_effect=[APIError("unavailable"), response])
+        ai_service.gemini_client.aio.models.generate_content = generate
+
+        with patch.object(ai_service, "GEMINI_OCR_FALLBACK_ENABLED", True), patch.object(
+            ai_service, "GEMINI_INTERNAL_RETRY_DELAY_RANGE_SECONDS", (0, 0)
+        ):
+            result = await ai_service.extrair_tabela_recibo_gemini(b"fake_image_bytes")
+
+        assert result.model == "gemini-3.5-flash-lite"
+        assert [call.kwargs["model"] for call in generate.await_args_list] == [
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+        ]
+        assert [call.kwargs["config"].http_options.timeout for call in generate.await_args_list] == [60_000, 45_000]
+
+    @pytest.mark.asyncio
+    async def test_per_call_deadline_cancels_slow_provider_coroutine(self):
+        cancellations = 0
+
+        async def never_finishes(**kwargs):
+            nonlocal cancellations
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancellations += 1
+
+        ai_service.gemini_client.aio.models.generate_content = AsyncMock(side_effect=never_finishes)
+        with patch.object(ai_service, "GEMINI_OCR_TIMEOUTS_SECONDS", (0.01, 0.01)), patch.object(
+            ai_service, "GEMINI_INTERNAL_RETRY_DELAY_RANGE_SECONDS", (0, 0)
+        ), pytest.raises(ai_service.AIProviderRetryableError):
+            await ai_service.extrair_tabela_recibo_gemini(b"fake_image_bytes")
+
+        assert cancellations == 2
+
+    @pytest.mark.asyncio
+    async def test_retry_after_beyond_processing_deadline_defers_to_cloud_tasks(self):
+        class APIError(Exception):
+            code = 503
+
+            def __init__(self):
+                self.response = MagicMock(headers={"retry-after": "120"})
+
+        generate = AsyncMock(side_effect=APIError())
+        ai_service.gemini_client.aio.models.generate_content = generate
+        with patch.object(ai_service, "GEMINI_OCR_FALLBACK_ENABLED", True), pytest.raises(
+            ai_service.AIProviderRetryableError
+        ) as raised:
+            await ai_service.extrair_tabela_recibo_gemini(
+                b"fake_image_bytes",
+                processing_deadline_monotonic=time.monotonic() + 100,
+            )
+
+        assert raised.value.retry_after_seconds == 120
+        assert generate.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_insufficient_processing_budget_defers_without_starting_provider(self):
+        generate = AsyncMock()
+        ai_service.gemini_client.aio.models.generate_content = generate
+
+        with pytest.raises(ai_service.AIProviderRetryableError) as raised:
+            await ai_service.extrair_tabela_recibo_gemini(
+                b"fake_image_bytes",
+                processing_deadline_monotonic=time.monotonic() + 59,
+            )
+
+        assert raised.value.error_code == "processing_budget_exhausted"
+        generate.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_permanent_gemini_error_does_not_retry(self):
@@ -874,20 +951,69 @@ class TestExtrairTabelaReciboGemini:
     async def test_retryable_gemini_failures_exhaust_internal_retry(self):
         generate = AsyncMock(side_effect=[asyncio.TimeoutError(), asyncio.TimeoutError()])
         ai_service.gemini_client.aio.models.generate_content = generate
-        with patch.object(ai_service, "GEMINI_INTERNAL_RETRY_DELAY_RANGE_SECONDS", (0, 0)):
+        with patch.object(ai_service, "GEMINI_INTERNAL_RETRY_DELAY_RANGE_SECONDS", (0, 0)), patch.object(
+            ai_service.logger, "warning"
+        ) as warning:
             with pytest.raises(ai_service.AIProviderRetryableError):
-                await ai_service.extrair_tabela_recibo_gemini(b"fake_image_bytes")
+                await ai_service.extrair_tabela_recibo_gemini(
+                    b"fake_image_bytes",
+                    source_update_id=611390412,
+                    worker_attempt=3,
+                    ocr_round=2,
+                )
 
         assert generate.await_count == 2
+        assert warning.call_count == 2
+        assert warning.call_args.args[0]["update_id"] == 611390412
+        assert warning.call_args.args[0]["worker_attempt"] == 3
+        assert warning.call_args.args[0]["ocr_round"] == 2
 
-    def test_provider_error_classification_accepts_numeric_string_codes(self):
+    def test_retry_delay_parsing_is_sanitized_and_supports_provider_formats(self):
+        assert ai_service._parse_retry_delay(None) is None
+        assert ai_service._parse_retry_delay("  ") is None
+        assert ai_service._parse_retry_delay("1.2s") == 2
+        assert ai_service._parse_retry_delay("-4") == 0
+        assert ai_service._parse_retry_delay("inf") is None
+        assert ai_service._parse_retry_delay("not-a-delay") is None
+
+        naive_future = datetime.now(ai_service.timezone.utc).replace(tzinfo=None) + timedelta(seconds=4)
+        with patch.object(ai_service, "parsedate_to_datetime", return_value=naive_future):
+            assert ai_service._parse_retry_delay("Wed, 21 Oct 2030 07:28:00 GMT") in {3, 4}
+
+    def test_retry_delay_reads_structured_provider_details(self):
+        class DetailedError(Exception):
+            details = {
+                "error": {
+                    "details": [
+                        "ignored",
+                        {"retryDelay": "2.1s"},
+                    ]
+                }
+            }
+
+        class FlatDetailedError(Exception):
+            details = {"details": [{"retry_delay": "4"}]}
+
+        assert ai_service._provider_retry_after_seconds(DetailedError()) == 3
+        assert ai_service._provider_retry_after_seconds(FlatDetailedError()) == 4
+        assert ai_service._provider_retry_after_seconds(ValueError()) is None
+
+    @pytest.mark.parametrize("code", [408, 429, 500, 502, 503, 504, "429"])
+    def test_provider_error_classification_accepts_retryable_codes(self, code):
         class CodedError(Exception):
             def __init__(self, code):
                 self.code = code
 
-        assert ai_service._provider_error_code(CodedError("429")) == "429"
-        assert ai_service._is_retryable_provider_error(CodedError("429")) is True
-        assert ai_service._is_retryable_provider_error(CodedError("400")) is False
+        assert ai_service._provider_error_code(CodedError(code)) == str(code)
+        assert ai_service._is_retryable_provider_error(CodedError(code)) is True
+
+    @pytest.mark.parametrize("code", [400, 401, 403])
+    def test_provider_error_classification_rejects_permanent_codes(self, code):
+        class CodedError(Exception):
+            def __init__(self, code):
+                self.code = code
+
+        assert ai_service._is_retryable_provider_error(CodedError(code)) is False
         assert ai_service._provider_error_code(ValueError("bad")) == "ValueError"
 
 
@@ -1141,13 +1267,31 @@ class TestProcessarUpdateAssincrono:
 
         update = {"update_id": 1005, "message": {"chat": {"id": 123}, "photo": [{"file_id": "xyz"}]}}
 
+        reserve_round = AsyncMock(return_value=1)
+        confirm_success = AsyncMock()
         with patch("handlers.baixar_arquivo_telegram", AsyncMock(return_value=b"img")):
-            with patch("handlers.extrair_tabela_recibo_gemini", AsyncMock(return_value="Arroz 25")):
-                with patch("handlers.processar_texto_com_llm", AsyncMock(return_value=llm_response)):
-                    await handlers.processar_update_assincrono(update)
+            with patch(
+                "handlers.extrair_tabela_recibo_gemini",
+                AsyncMock(return_value=ai_service.ReceiptOCRResult(text="Arroz 25", model="gemini-3.5-flash")),
+            ) as ocr:
+                with patch("handlers.processar_texto_com_llm", AsyncMock(return_value=llm_response)), patch(
+                    "handlers.store_pending_item",
+                    return_value={"id": "pending-1005", "payload": llm_response["dados_lote"]},
+                ) as store_pending:
+                    await handlers.processar_update_assincrono(
+                        update,
+                        ocr_round_callback=reserve_round,
+                        ocr_success_callback=confirm_success,
+                        processing_deadline_monotonic=123.0,
+                    )
 
         msgs = [c[1]["json"]["text"] for c in mock_http_client.post.call_args_list if "json" in c[1] and "text" in c[1].get("json", {})]
         assert any("Resumo do Cupom" in m for m in msgs)
+        reserve_round.assert_awaited_once_with()
+        confirm_success.assert_awaited_once_with()
+        assert ocr.await_args.kwargs["ocr_round"] == 1
+        assert ocr.await_args.kwargs["processing_deadline_monotonic"] == 123.0
+        assert store_pending.call_args.kwargs["source_update_id"] == 1005
 
     @pytest.mark.asyncio
     async def test_photo_rate_limit_blocks_download_and_ocr(self, mock_http_client):
@@ -1164,7 +1308,10 @@ class TestProcessarUpdateAssincrono:
         with patch.object(handlers, "CHAT_MEDIA_RATE_LIMIT", 0, create=True), \
              patch.object(handlers, "CHAT_MEDIA_RATE_WINDOW_SECONDS", 60, create=True), \
              patch("handlers.baixar_arquivo_telegram", AsyncMock(return_value=b"img")) as baixar, \
-             patch("handlers.extrair_tabela_recibo_gemini", AsyncMock(return_value="Arroz 25")) as ocr:
+             patch(
+                 "handlers.extrair_tabela_recibo_gemini",
+                 AsyncMock(return_value=ai_service.ReceiptOCRResult(text="Arroz 25", model="gemini-3.5-flash")),
+             ) as ocr:
             await handlers.processar_update_assincrono(update)
 
         baixar.assert_not_called()
@@ -1376,6 +1523,7 @@ class TestCallbackQuery:
 
         msgs = [c[1]["json"]["text"] for c in mock_http_client.post.call_args_list if "json" in c[1] and "text" in c[1].get("json", {})]
         assert any("Cancelada" in m for m in msgs)
+        assert all("Referência: TG-" not in m for m in msgs)
 
     @pytest.mark.asyncio
     async def test_callback_confirmdel(self, mock_http_client):
