@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import math
 import os
@@ -413,3 +414,15 @@ async def processar_texto_com_llm(texto_usuario, *, source_update_id=None, worke
         raise
     texto_resposta = response.choices[0].message.content
     return json.loads(str(texto_resposta) if texto_resposta else "{}")
+
+
+async def close_ai_clients():
+    # Read at call time: the client is created in config during startup.
+    import config
+
+    close = getattr(getattr(config.gemini_client, "aio", None), "aclose", None)
+    if not callable(close):
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result

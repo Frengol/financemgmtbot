@@ -15,9 +15,11 @@ BACKEND_COVERAGE_ARGS = \
 	--cov=receipt_ocr_contract \
 	--cov=security \
 	--cov=telegram_correlation \
+	--cov=telegram_poller \
 	--cov=telegram_service \
 	--cov=telegram_tasks \
 	--cov=telegram_update_ledger \
+	--cov=telegram_update_processor \
 	--cov=utils \
 	--cov=web_app \
 	--cov-branch \

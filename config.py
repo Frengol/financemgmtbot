@@ -49,8 +49,22 @@ def load_local_env():
 load_local_env()
 
 APP_COMPONENT = (os.environ.get("APP_COMPONENT") or "api").strip().lower()
-if APP_COMPONENT not in {"api", "telegram-worker"}:
+if APP_COMPONENT not in {"api", "telegram-worker", "telegram-poller"}:
     raise RuntimeError("AppSec Fatal Error: APP_COMPONENT inválido.")
+
+# Explicit production marker for hosts without Cloud Run's K_* variables (VPS).
+APP_RUNTIME = (os.environ.get("APP_RUNTIME") or "").strip().lower()
+if APP_RUNTIME not in {"", "production"}:
+    raise RuntimeError("AppSec Fatal Error: APP_RUNTIME inválido.")
+
+# "polling": the api serves no Telegram webhook; updates are read by the telegram-poller component.
+TELEGRAM_DELIVERY_MODE = (os.environ.get("TELEGRAM_DELIVERY_MODE") or "webhook").strip().lower()
+if TELEGRAM_DELIVERY_MODE not in {"webhook", "polling"}:
+    raise RuntimeError("AppSec Fatal Error: TELEGRAM_DELIVERY_MODE inválido.")
+if APP_COMPONENT == "api" and TELEGRAM_DELIVERY_MODE == "polling" and APP_RUNTIME != "production":
+    # Polling is the VPS mode. Without the marker the host counts as local, ALLOW_LOCAL_DEV_AUTH
+    # defaults to true and a proxied request (always from loopback) would pass as the local-dev admin.
+    raise RuntimeError("AppSec Fatal Error: TELEGRAM_DELIVERY_MODE=polling exige APP_RUNTIME=production.")
 
 
 def normalize_frontend_origin(origin: str):
@@ -95,7 +109,7 @@ def resolve_frontend_allowed_origins(raw_origins: str | None, frontend_public_ur
 
 
 def managed_runtime_enabled():
-    return any(value for value in (K_SERVICE, K_REVISION, K_CONFIGURATION))
+    return APP_RUNTIME == "production" or any(value for value in (K_SERVICE, K_REVISION, K_CONFIGURATION))
 
 
 def validate_frontend_runtime_config(frontend_public_url: str, frontend_allowed_origins: frozenset[str]):
@@ -116,6 +130,29 @@ def validate_frontend_runtime_config(frontend_public_url: str, frontend_allowed_
             "reason": "missing_public_frontend_origin",
         })
         raise RuntimeError("AppSec Fatal Error: FRONTEND_ALLOWED_ORIGINS não resolve uma origem pública válida para runtime gerenciado.")
+
+
+def parse_telegram_allowed_user_ids(raw_ids: str | None):
+    normalized = (raw_ids or "").strip()
+    if not normalized:
+        return None
+
+    user_ids = set()
+    for item in normalized.split(","):
+        candidate = item.strip()
+        if not (candidate.isascii() and candidate.isdigit()) or int(candidate) <= 0:
+            raise RuntimeError("AppSec Fatal Error: TELEGRAM_ALLOWED_USER_IDS inválida.")
+        user_ids.add(int(candidate))
+    return frozenset(user_ids)
+
+
+def parse_telegram_poll_max_attempts(raw_attempts: str | None):
+    normalized = (raw_attempts or "").strip()
+    if not normalized:
+        return 8
+    if not (normalized.isascii() and normalized.isdigit()) or int(normalized) < 1:
+        raise RuntimeError("AppSec Fatal Error: TELEGRAM_POLL_MAX_ATTEMPTS inválida.")
+    return int(normalized)
 
 
 def normalize_public_url(raw_url: str | None, *, trailing_slash: bool = False):
@@ -143,6 +180,19 @@ elif APP_COMPONENT == "telegram-worker":
         "GEMINI_API_KEY",
         "DATA_ENCRYPTION_KEY",
     ]
+elif APP_COMPONENT == "telegram-poller":
+    REQUIRED_VARS = [
+        "TELEGRAM_BOT_TOKEN",
+        "SUPABASE_URL",
+        "SUPABASE_KEY",
+        "DEEPSEEK_API_KEY",
+        "GROQ_API_KEY",
+        "GEMINI_API_KEY",
+        "DATA_ENCRYPTION_KEY",
+        "TELEGRAM_ALLOWED_USER_IDS",
+    ]
+elif TELEGRAM_DELIVERY_MODE == "polling":
+    REQUIRED_VARS = ["SUPABASE_URL", "SUPABASE_KEY", "DATA_ENCRYPTION_KEY"]
 else:
     REQUIRED_VARS = [
         "TELEGRAM_SECRET_TOKEN",
@@ -163,6 +213,13 @@ for var in REQUIRED_VARS:
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 SECRET_TOKEN = os.environ.get("TELEGRAM_SECRET_TOKEN")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+TELEGRAM_ALLOWED_USER_IDS = parse_telegram_allowed_user_ids(os.environ.get("TELEGRAM_ALLOWED_USER_IDS"))
+if TELEGRAM_ALLOWED_USER_IDS is None and APP_COMPONENT == "telegram-poller":
+    # A whitespace-only value passes the presence check above but disables the filter.
+    raise RuntimeError("AppSec Fatal Error: TELEGRAM_ALLOWED_USER_IDS obrigatória no telegram-poller.")
+if TELEGRAM_ALLOWED_USER_IDS is None and APP_COMPONENT == "telegram-worker":
+    logger.warning({"event": "telegram_sender_allowlist_disabled"})
+TELEGRAM_POLL_MAX_ATTEMPTS = parse_telegram_poll_max_attempts(os.environ.get("TELEGRAM_POLL_MAX_ATTEMPTS"))
 ADMIN_EMAILS = frozenset(
     email.strip().lower()
     for email in (os.environ.get("SUPABASE_ADMIN_EMAILS") or "").split(",")
@@ -219,6 +276,17 @@ def resolve_transactions_table_name():
     return "gastos_qa"
 
 
+if (
+    APP_COMPONENT == "telegram-poller"
+    and not (os.environ.get("SUPABASE_GASTOS_TABLE") or "").strip()
+    and not managed_runtime_enabled()
+):
+    # Outside a managed runtime the table defaults to the QA one, so a forgotten APP_RUNTIME
+    # would send real expenses to gastos_qa without any error.
+    raise RuntimeError(
+        "AppSec Fatal Error: telegram-poller exige APP_RUNTIME=production ou SUPABASE_GASTOS_TABLE explícita."
+    )
+
 TRANSACTIONS_TABLE = resolve_transactions_table_name()
 
 if APP_COMPONENT == "api":
@@ -255,7 +323,7 @@ try:
         supabase = MagicMock(name="auth_test_supabase")
     else:
         supabase: Client = create_client(supa_url, supa_key)
-    if APP_COMPONENT == "telegram-worker" or "pytest" in sys.modules:
+    if APP_COMPONENT in {"telegram-worker", "telegram-poller"} or "pytest" in sys.modules:
         groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY") or "")
         deepseek_client = AsyncOpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY") or "", base_url="https://api.deepseek.com")
         gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY") or "")

@@ -1,7 +1,9 @@
 import base64
+import contextlib
 import importlib.util
 import os
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -59,6 +61,10 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch, **overrides: str):
         "SUPABASE_ADMIN_EMAILS": "",
         "SUPABASE_ADMIN_USER_IDS": "",
         "GEMINI_OCR_FALLBACK_ENABLED": "false",
+        "TELEGRAM_ALLOWED_USER_IDS": "",
+        "APP_RUNTIME": "",
+        "TELEGRAM_DELIVERY_MODE": "",
+        "TELEGRAM_POLL_MAX_ATTEMPTS": "",
     }
     merged = {**REQUIRED_ENV, **optional_defaults, **overrides}
     for key in REQUIRED_ENV:
@@ -487,3 +493,303 @@ class TestTelegramServiceCoverage:
             await telegram_service.editar_mensagem_telegram(123, 99, "oi")
 
         assert failing_client.post.await_count == 3
+
+
+def _load_fresh_config(module_name: str):
+    # Without pytest in sys.modules, config.load_local_env() reads ./.env; an empty
+    # working directory keeps these imports independent of the developer's .env.
+    pytest_module = sys.modules.pop("pytest", None)
+    try:
+        with tempfile.TemporaryDirectory() as empty_dir, contextlib.chdir(empty_dir), patch(
+            "supabase.create_client", return_value=MagicMock()
+        ), patch("openai.AsyncOpenAI"), patch("groq.AsyncGroq"), patch("google.genai.Client"):
+            return _import_fresh_config(module_name)
+    finally:
+        if pytest_module is not None:
+            sys.modules["pytest"] = pytest_module
+
+
+def _logged_events(caplog: pytest.LogCaptureFixture):
+    return [record.msg.get("event") for record in caplog.records if isinstance(record.msg, dict)]
+
+
+class TestTelegramSenderAllowlistConfig:
+    @pytest.mark.parametrize(("raw", "expected"), [(None, None), ("", None), ("   ", None)])
+    def test_absent_allowlist_disables_the_filter(self, raw, expected):
+        import config
+
+        assert config.parse_telegram_allowed_user_ids(raw) is expected
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [("123", frozenset({123})), (" 1 , 22 ", frozenset({1, 22})), ("5,5", frozenset({5}))],
+    )
+    def test_allowlist_accepts_positive_numeric_ids(self, raw, expected):
+        import config
+
+        assert config.parse_telegram_allowed_user_ids(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["abc", "12,x", "-1", "0", "1.5", "12,,34", "12,", "+5", "١٢"])
+    def test_malformed_allowlist_is_rejected_without_echoing_it(self, raw):
+        import config
+
+        with pytest.raises(RuntimeError) as error:
+            config.parse_telegram_allowed_user_ids(raw)
+
+        assert "TELEGRAM_ALLOWED_USER_IDS" in str(error.value)
+        assert raw.strip(",") not in str(error.value)
+
+    def test_worker_without_allowlist_warns_once(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+        _set_required_env(monkeypatch, APP_COMPONENT="telegram-worker")
+
+        with caplog.at_level("WARNING"):
+            module = _load_fresh_config("config_cov_worker_without_allowlist")
+
+        assert module.TELEGRAM_ALLOWED_USER_IDS is None
+        assert _logged_events(caplog).count("telegram_sender_allowlist_disabled") == 1
+
+    def test_worker_with_allowlist_parses_it_without_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        _set_required_env(monkeypatch, APP_COMPONENT="telegram-worker", TELEGRAM_ALLOWED_USER_IDS="7,8")
+
+        with caplog.at_level("WARNING"):
+            module = _load_fresh_config("config_cov_worker_with_allowlist")
+
+        assert module.TELEGRAM_ALLOWED_USER_IDS == frozenset({7, 8})
+        assert "telegram_sender_allowlist_disabled" not in _logged_events(caplog)
+
+    def test_api_without_allowlist_does_not_warn(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+        _set_required_env(monkeypatch, APP_COMPONENT="api")
+
+        with caplog.at_level("WARNING"):
+            _load_fresh_config("config_cov_api_without_allowlist")
+
+        assert "telegram_sender_allowlist_disabled" not in _logged_events(caplog)
+
+    def test_malformed_allowlist_fails_at_startup(self, monkeypatch: pytest.MonkeyPatch):
+        _set_required_env(monkeypatch, APP_COMPONENT="telegram-worker", TELEGRAM_ALLOWED_USER_IDS="12,abc")
+
+        with pytest.raises(RuntimeError, match="TELEGRAM_ALLOWED_USER_IDS"):
+            _load_fresh_config("config_cov_malformed_allowlist")
+
+
+class TestExplicitProductionRuntimeConfig:
+    @staticmethod
+    def _without_cloud_run_markers(monkeypatch: pytest.MonkeyPatch):
+        for key in ("K_SERVICE", "K_REVISION", "K_CONFIGURATION"):
+            monkeypatch.delenv(key, raising=False)
+
+    def test_production_runtime_applies_managed_defaults_without_cloud_run(self, monkeypatch: pytest.MonkeyPatch):
+        self._without_cloud_run_markers(monkeypatch)
+        _set_required_env(
+            monkeypatch,
+            APP_COMPONENT="api",
+            APP_RUNTIME=" Production ",
+            ALLOW_LOCAL_DEV_AUTH="",
+            FRONTEND_PUBLIC_URL="https://painel.example.com/",
+            FRONTEND_ALLOWED_ORIGINS="https://painel.example.com",
+        )
+
+        module = _load_fresh_config("config_cov_production_runtime")
+
+        assert module.APP_RUNTIME == "production"
+        assert module.managed_runtime_enabled() is True
+        assert module.TRANSACTIONS_TABLE == "gastos"
+        assert module.ALLOW_LOCAL_DEV_AUTH is False
+
+    def test_production_runtime_enforces_frontend_cors_configuration(self, monkeypatch: pytest.MonkeyPatch):
+        self._without_cloud_run_markers(monkeypatch)
+        _set_required_env(monkeypatch, APP_COMPONENT="api", APP_RUNTIME="production")
+
+        with pytest.raises(RuntimeError, match="FRONTEND_PUBLIC_URL"):
+            _load_fresh_config("config_cov_production_runtime_without_cors")
+
+    def test_absent_runtime_keeps_local_defaults(self, monkeypatch: pytest.MonkeyPatch):
+        self._without_cloud_run_markers(monkeypatch)
+        _set_required_env(monkeypatch, APP_COMPONENT="api", ALLOW_LOCAL_DEV_AUTH="")
+
+        module = _load_fresh_config("config_cov_unset_runtime")
+
+        assert module.APP_RUNTIME == ""
+        assert module.managed_runtime_enabled() is False
+        assert module.TRANSACTIONS_TABLE == "gastos_qa"
+        assert module.ALLOW_LOCAL_DEV_AUTH is True
+
+    def test_unknown_runtime_fails_at_startup(self, monkeypatch: pytest.MonkeyPatch):
+        _set_required_env(monkeypatch, APP_COMPONENT="api", APP_RUNTIME="prod")
+
+        with pytest.raises(RuntimeError, match="APP_RUNTIME"):
+            _load_fresh_config("config_cov_unknown_runtime")
+
+
+class TestTelegramDeliveryModeConfig:
+    WEBHOOK_ONLY_VARS = (
+        "TELEGRAM_SECRET_TOKEN",
+        "TELEGRAM_TASKS_PROJECT",
+        "TELEGRAM_TASKS_LOCATION",
+        "TELEGRAM_TASKS_QUEUE",
+        "TELEGRAM_WORKER_URL",
+        "TELEGRAM_TASK_INVOKER_SERVICE_ACCOUNT",
+    )
+
+    def _polling_api_env(self, monkeypatch: pytest.MonkeyPatch, **overrides: str):
+        _set_required_env(
+            monkeypatch,
+            **{
+                "APP_COMPONENT": "api",
+                "TELEGRAM_DELIVERY_MODE": " Polling ",
+                "APP_RUNTIME": "production",
+                "FRONTEND_PUBLIC_URL": "https://painel.example.com/",
+                "FRONTEND_ALLOWED_ORIGINS": "https://painel.example.com",
+                **overrides,
+            },
+        )
+        for key in (*self.WEBHOOK_ONLY_VARS, "TELEGRAM_BOT_TOKEN", "K_SERVICE", "K_REVISION", "K_CONFIGURATION"):
+            monkeypatch.delenv(key, raising=False)
+
+    def test_polling_api_requires_only_database_secrets(self, monkeypatch: pytest.MonkeyPatch):
+        self._polling_api_env(monkeypatch)
+
+        module = _load_fresh_config("config_cov_polling_api")
+
+        assert module.TELEGRAM_DELIVERY_MODE == "polling"
+        assert module.REQUIRED_VARS == ["SUPABASE_URL", "SUPABASE_KEY", "DATA_ENCRYPTION_KEY"]
+        masked = module.mascarar_segredos(f"{REQUIRED_ENV['SUPABASE_KEY']} {REQUIRED_ENV['DATA_ENCRYPTION_KEY']}")
+        assert REQUIRED_ENV["SUPABASE_KEY"] not in masked
+        assert REQUIRED_ENV["DATA_ENCRYPTION_KEY"] not in masked
+
+    def test_polling_api_without_production_runtime_fails_at_startup(self, monkeypatch: pytest.MonkeyPatch):
+        # Without it the VPS host would be treated as local and ALLOW_LOCAL_DEV_AUTH would default to true.
+        self._polling_api_env(monkeypatch, APP_RUNTIME="")
+
+        with pytest.raises(RuntimeError, match="APP_RUNTIME"):
+            _load_fresh_config("config_cov_polling_api_without_runtime")
+
+    def test_polling_api_inside_cloud_run_still_requires_the_explicit_marker(self, monkeypatch: pytest.MonkeyPatch):
+        self._polling_api_env(monkeypatch, APP_RUNTIME="")
+        monkeypatch.setenv("K_SERVICE", "financemgmtbot-git")
+
+        with pytest.raises(RuntimeError, match="APP_RUNTIME"):
+            _load_fresh_config("config_cov_polling_api_cloud_run_without_runtime")
+
+    def test_webhook_api_without_runtime_marker_still_starts(self, monkeypatch: pytest.MonkeyPatch):
+        _set_required_env(monkeypatch, APP_COMPONENT="api", TELEGRAM_DELIVERY_MODE="webhook", APP_RUNTIME="")
+
+        module = _load_fresh_config("config_cov_webhook_api_without_runtime")
+
+        assert module.APP_RUNTIME == ""
+        assert module.TELEGRAM_DELIVERY_MODE == "webhook"
+
+    def test_default_delivery_mode_keeps_webhook_requirements(self, monkeypatch: pytest.MonkeyPatch):
+        _set_required_env(monkeypatch, APP_COMPONENT="api")
+
+        module = _load_fresh_config("config_cov_webhook_api")
+
+        assert module.TELEGRAM_DELIVERY_MODE == "webhook"
+        assert set(self.WEBHOOK_ONLY_VARS) <= set(module.REQUIRED_VARS)
+
+    def test_webhook_api_still_fails_without_its_secret(self, monkeypatch: pytest.MonkeyPatch):
+        _set_required_env(monkeypatch, APP_COMPONENT="api", TELEGRAM_DELIVERY_MODE="webhook")
+        monkeypatch.delenv("TELEGRAM_SECRET_TOKEN", raising=False)
+
+        with pytest.raises(RuntimeError, match="TELEGRAM_SECRET_TOKEN"):
+            _load_fresh_config("config_cov_webhook_api_without_secret")
+
+    def test_unknown_delivery_mode_fails_at_startup(self, monkeypatch: pytest.MonkeyPatch):
+        _set_required_env(monkeypatch, APP_COMPONENT="api", TELEGRAM_DELIVERY_MODE="pull")
+
+        with pytest.raises(RuntimeError, match="TELEGRAM_DELIVERY_MODE"):
+            _load_fresh_config("config_cov_unknown_delivery_mode")
+
+
+class TestTelegramPollerConfig:
+    def _poller_env(self, monkeypatch: pytest.MonkeyPatch, **overrides: str):
+        _set_required_env(
+            monkeypatch,
+            **{
+                "APP_COMPONENT": "telegram-poller",
+                "TELEGRAM_ALLOWED_USER_IDS": "7",
+                "APP_RUNTIME": "production",
+                **overrides,
+            },
+        )
+        for key in (*TestTelegramDeliveryModeConfig.WEBHOOK_ONLY_VARS, "K_SERVICE", "K_REVISION", "K_CONFIGURATION"):
+            monkeypatch.delenv(key, raising=False)
+
+    def test_poller_in_production_writes_to_the_real_transactions_table(self, monkeypatch: pytest.MonkeyPatch):
+        self._poller_env(monkeypatch)
+
+        assert _load_fresh_config("config_cov_poller_production_table").TRANSACTIONS_TABLE == "gastos"
+
+    def test_poller_without_runtime_or_explicit_table_fails_instead_of_using_the_qa_table(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        self._poller_env(monkeypatch, APP_RUNTIME="", SUPABASE_GASTOS_TABLE="")
+
+        with pytest.raises(RuntimeError, match="APP_RUNTIME"):
+            _load_fresh_config("config_cov_poller_implicit_qa_table")
+
+    def test_poller_with_explicit_table_runs_without_runtime_marker(self, monkeypatch: pytest.MonkeyPatch):
+        self._poller_env(monkeypatch, APP_RUNTIME="", SUPABASE_GASTOS_TABLE="gastos_qa")
+
+        module = _load_fresh_config("config_cov_poller_explicit_qa_table")
+
+        assert module.TRANSACTIONS_TABLE == "gastos_qa"
+
+    def test_poller_requires_worker_secrets_and_allowlist_but_no_webhook_secret(self, monkeypatch: pytest.MonkeyPatch):
+        self._poller_env(monkeypatch)
+
+        with patch("supabase.create_client", return_value=MagicMock()):
+            module = _load_fresh_config("config_cov_poller")
+
+        assert module.APP_COMPONENT == "telegram-poller"
+        assert module.REQUIRED_VARS == [
+            "TELEGRAM_BOT_TOKEN",
+            "SUPABASE_URL",
+            "SUPABASE_KEY",
+            "DEEPSEEK_API_KEY",
+            "GROQ_API_KEY",
+            "GEMINI_API_KEY",
+            "DATA_ENCRYPTION_KEY",
+            "TELEGRAM_ALLOWED_USER_IDS",
+        ]
+        assert module.TELEGRAM_ALLOWED_USER_IDS == frozenset({7})
+        assert module.TELEGRAM_POLL_MAX_ATTEMPTS == 8
+
+    def test_poller_initializes_ai_clients(self, monkeypatch: pytest.MonkeyPatch):
+        self._poller_env(monkeypatch)
+        pytest_module = sys.modules.pop("pytest", None)
+        try:
+            with tempfile.TemporaryDirectory() as empty_dir, contextlib.chdir(empty_dir), patch(
+                "supabase.create_client", return_value=MagicMock()
+            ), patch("openai.AsyncOpenAI") as deepseek, patch("groq.AsyncGroq") as groq, patch(
+                "google.genai.Client"
+            ) as gemini:
+                module = _import_fresh_config("config_cov_poller_ai_clients")
+        finally:
+            if pytest_module is not None:
+                sys.modules["pytest"] = pytest_module
+
+        assert module.deepseek_client is deepseek.return_value
+        groq.assert_called_once()
+        gemini.assert_called_once()
+
+    @pytest.mark.parametrize("raw_ids", ["", "   "])
+    def test_poller_without_allowlist_fails_at_startup(self, monkeypatch: pytest.MonkeyPatch, raw_ids):
+        self._poller_env(monkeypatch, TELEGRAM_ALLOWED_USER_IDS=raw_ids)
+
+        with pytest.raises(RuntimeError, match="TELEGRAM_ALLOWED_USER_IDS"):
+            _load_fresh_config("config_cov_poller_without_allowlist")
+
+    def test_poller_max_attempts_accepts_positive_integer(self, monkeypatch: pytest.MonkeyPatch):
+        self._poller_env(monkeypatch, TELEGRAM_POLL_MAX_ATTEMPTS=" 3 ")
+
+        assert _load_fresh_config("config_cov_poller_attempts").TELEGRAM_POLL_MAX_ATTEMPTS == 3
+
+    @pytest.mark.parametrize("raw_attempts", ["0", "-1", "abc", "2.5", "٣"])
+    def test_poller_invalid_max_attempts_fails_at_startup(self, monkeypatch: pytest.MonkeyPatch, raw_attempts):
+        self._poller_env(monkeypatch, TELEGRAM_POLL_MAX_ATTEMPTS=raw_attempts)
+
+        with pytest.raises(RuntimeError, match="TELEGRAM_POLL_MAX_ATTEMPTS"):
+            _load_fresh_config("config_cov_poller_invalid_attempts")

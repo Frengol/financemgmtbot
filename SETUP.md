@@ -96,6 +96,7 @@ Configure como variaveis normais no Cloud Run.
 | `TELEGRAM_WORKER_URL` | URL HTTPS do worker privado |
 | `TELEGRAM_TASK_INVOKER_SERVICE_ACCOUNT` | `financemgmtbot-task-invoker@financemgmtbot.iam.gserviceaccount.com` |
 | `GEMINI_OCR_FALLBACK_ENABLED` | `false` localmente; o contrato atual do Cloud Build publica `true` no worker |
+| `TELEGRAM_ALLOWED_USER_IDS` | no worker privado: IDs numericos do Telegram que podem usar o bot, separados por virgula. Sem ela, o worker processa qualquer remetente e registra `telegram_sender_allowlist_disabled` na partida |
 
 ### Secrets do GitHub Actions
 
@@ -752,3 +753,54 @@ Verifique:
 - GitHub Actions secrets: `https://docs.github.com/en/actions/concepts/security/about-secrets`
 - Supabase Redirect URLs: `https://supabase.com/docs/guides/auth/redirect-urls`
 - Telegram Bot API: `https://core.telegram.org/bots/api`
+
+## 25. Modo VPS (long polling, sem webhook publico)
+
+Alternativa ao Cloud Run para um host sem entrada publica. O bot le o Telegram por long polling (`getUpdates`) e nao usa webhook, Cloud Tasks nem o worker HTTP. Tudo isso fica desligado por padrao: sem as variaveis abaixo, o modo Cloud Run continua igual.
+
+Os dois componentes usam a mesma imagem:
+
+| Componente | Comando | Papel |
+| --- | --- | --- |
+| `api` com `TELEGRAM_DELIVERY_MODE=polling` | o `CMD` do `Dockerfile` (`hypercorn main:app`) | painel, cron e observabilidade, sem a rota `POST /` do webhook |
+| `telegram-poller` | `python -m telegram_poller` | le e processa os updates, um por vez e em ordem |
+
+Variaveis de cada componente:
+
+| Variavel | `api` em polling | `telegram-poller` |
+| --- | --- | --- |
+| `APP_COMPONENT` | `api` | `telegram-poller` |
+| `APP_RUNTIME` | `production` (obrigatoria: sem ela a API nao sobe em polling) | `production` (obrigatoria, ou `SUPABASE_GASTOS_TABLE` explicita) |
+| `TELEGRAM_DELIVERY_MODE` | `polling` | nao usada |
+| `SUPABASE_URL`, `SUPABASE_KEY`, `DATA_ENCRYPTION_KEY` | obrigatorias | obrigatorias |
+| `TELEGRAM_BOT_TOKEN`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY` | nao usadas | obrigatorias |
+| `TELEGRAM_ALLOWED_USER_IDS` | nao usada | obrigatoria |
+| `TELEGRAM_POLL_MAX_ATTEMPTS` | nao usada | opcional, padrao `8` |
+| `FRONTEND_PUBLIC_URL`, `FRONTEND_ALLOWED_ORIGINS`, `SUPABASE_ADMIN_EMAILS`/`SUPABASE_ADMIN_USER_IDS`, `RECURRING_EXPENSES_CRON_SECRET`, `AUTH_TEST_MODE=false` | como no Cloud Run | nao usadas |
+| `SUPABASE_GASTOS_TABLE`, `GEMINI_OCR_FALLBACK_ENABLED` | opcionais | opcionais (`SUPABASE_GASTOS_TABLE` so e necessaria sem `APP_RUNTIME=production`) |
+| `TELEGRAM_SECRET_TOKEN`, `TELEGRAM_TASKS_*`, `TELEGRAM_WORKER_URL`, `TELEGRAM_TASK_INVOKER_SERVICE_ACCOUNT` | nao usadas | nao usadas |
+
+`APP_RUNTIME=production` aplica fora do Cloud Run os mesmos padroes que o `K_SERVICE` aplica la: tabela `gastos`, `ALLOW_LOCAL_DEV_AUTH=false` e validacao de CORS na partida. Sem ela, o host e tratado como ambiente local: `ALLOW_LOCAL_DEV_AUTH` passaria a `true` por padrao (qualquer pedido vindo de loopback, como o de um proxy reverso, entraria como admin) e os gastos iriam para `gastos_qa`. Por isso a `api` em polling e o `telegram-poller` recusam a partida sem `APP_RUNTIME=production`; o poller aceita, no lugar dela, uma `SUPABASE_GASTOS_TABLE` explicita (teste local).
+
+Comportamento do `telegram-poller`:
+
+- na partida, consulta `getWebhookInfo`; se o bot ainda tiver webhook, encerra com erro sem processar nada. Antes da troca, remova o webhook com `deleteWebhook` sem `drop_pending_updates`, para manter os updates pendentes;
+- o offset so avanca depois que o update termina. Falhas temporarias repetem o mesmo update com espera de 5 s, dobrando ate 120 s; depois de `TELEGRAM_POLL_MAX_ATTEMPTS` tentativas, o update e registrado como `telegram_update_retry_exhausted` e pulado;
+- `409 Conflict` (webhook ativo ou outro poller com o mesmo bot) e outras rejeicoes permanentes encerram o processo com codigo diferente de zero;
+- updates de remetentes fora de `TELEGRAM_ALLOWED_USER_IDS` sao descartados antes de qualquer resposta, IA ou banco;
+- com `SIGTERM`, termina o update em andamento (ate 200 s) e sai. Configure o tempo de parada do container em 210 s ou mais;
+- healthcheck: `python -m telegram_poller --check` sai `0` se o batimento em `/tmp/telegram-poller.heartbeat` tiver menos de 300 s. O `/tmp` precisa ser gravavel;
+- todos os clientes respeitam `HTTPS_PROXY`. Destinos de saida: `api.telegram.org`, `<project-ref>.supabase.co`, `api.deepseek.com`, `api.groq.com` e `generativelanguage.googleapis.com`;
+- os logs JSON saem em stderr.
+
+Teste local, opcional e sempre com um bot de teste (nunca com o bot de producao). Sem `APP_RUNTIME`, a tabela precisa ser explicita:
+
+```bash
+APP_COMPONENT=telegram-poller \
+TELEGRAM_BOT_TOKEN=<token-do-bot-de-teste> \
+TELEGRAM_ALLOWED_USER_IDS=<seu-id-numerico> \
+SUPABASE_GASTOS_TABLE=gastos_qa \
+python -m telegram_poller
+```
+
+As tabelas `webhook_idempotencia` e `cache_aprovacao` nao tem variante de QA: os updates do bot de teste tambem sao registrados nelas.

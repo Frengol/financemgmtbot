@@ -10,15 +10,21 @@ from config import TELEGRAM_API_URL, TELEGRAM_TOKEN, logger
 TELEGRAM_TEXT_LIMIT = 4096
 TELEGRAM_GET_FILE_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 TELEGRAM_MEDIA_DOWNLOAD_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
+TELEGRAM_POLL_TIMEOUT_SECONDS = 50
+# The read timeout must outlast the long poll, or every idle poll ends as a network error.
+TELEGRAM_POLL_HTTP_TIMEOUT = httpx.Timeout(TELEGRAM_POLL_TIMEOUT_SECONDS + 10.0, connect=10.0)
+TELEGRAM_ALLOWED_UPDATES = ("message", "callback_query")
 
 
 class TelegramError(RuntimeError):
-    pass
+    def __init__(self, message, *, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class TelegramRetryableError(TelegramError):
-    def __init__(self, message, *, internal_retryable=False):
-        super().__init__(message)
+    def __init__(self, message, *, internal_retryable=False, status_code=None):
+        super().__init__(message, status_code=status_code)
         self.internal_retryable = internal_retryable
 
 
@@ -64,51 +70,61 @@ def _split_message(text: str) -> list[str]:
     return chunks
 
 
-def _parse_response(response: Any) -> dict[str, Any]:
+def _response_result(response: Any) -> Any:
+    """Return the raw `result` of a successful Bot API call, or None when there is nothing to read."""
     # Unit tests from the legacy suite use a bare AsyncMock response. Real
     # production responses are always httpx.Response instances.
     if not isinstance(response, httpx.Response):
         json_method = getattr(response, "json", None)
         if not callable(json_method):
-            return {}
+            return None
         if inspect.iscoroutinefunction(json_method):
-            return {}
+            return None
         payload = json_method()
         if not isinstance(payload, dict):
-            return {}
+            return None
         status_code = getattr(response, "status_code", 200)
         status_code = status_code if isinstance(status_code, int) else 200
         error_code = payload.get("error_code")
         description = str(payload.get("description") or "")
         if status_code == 429 or error_code == 429 or status_code >= 500:
-            raise TelegramRetryableError("Telegram delivery is temporarily unavailable.")
+            raise TelegramRetryableError("Telegram delivery is temporarily unavailable.", status_code=status_code)
         if status_code >= 400 or payload.get("ok") is not True:
             if status_code == 400 and "parse" in description.lower() and "entit" in description.lower():
-                raise TelegramMarkdownError("Telegram rejected message formatting.")
-            raise TelegramPermanentError("Telegram rejected the request.")
-        return payload.get("result") if isinstance(payload.get("result"), dict) else {}
+                raise TelegramMarkdownError("Telegram rejected message formatting.", status_code=status_code)
+            raise TelegramPermanentError("Telegram rejected the request.", status_code=status_code)
+        return payload.get("result")
     try:
         payload = response.json()
     except ValueError as exc:
         if response.status_code >= 500:
-            raise TelegramRetryableError("Telegram returned an invalid server response.") from exc
-        raise TelegramPermanentError("Telegram returned an invalid response.") from exc
+            raise TelegramRetryableError(
+                "Telegram returned an invalid server response.", status_code=response.status_code
+            ) from exc
+        raise TelegramPermanentError("Telegram returned an invalid response.", status_code=response.status_code) from exc
 
     error_code = payload.get("error_code") if isinstance(payload, dict) else None
     description = str(payload.get("description") or "") if isinstance(payload, dict) else ""
     status_code = response.status_code
     if status_code == 429 or error_code == 429 or status_code >= 500:
-        raise TelegramRetryableError("Telegram delivery is temporarily unavailable.")
+        raise TelegramRetryableError("Telegram delivery is temporarily unavailable.", status_code=status_code)
     if status_code >= 400 or not isinstance(payload, dict) or payload.get("ok") is not True:
         if status_code == 400 and "message is not modified" in description.lower():
-            return {}
+            return None
         if status_code == 400 and "parse" in description.lower() and "entit" in description.lower():
-            raise TelegramMarkdownError("Telegram rejected message formatting.")
-        raise TelegramPermanentError("Telegram rejected the request.")
-    return payload.get("result") if isinstance(payload.get("result"), dict) else {}
+            raise TelegramMarkdownError("Telegram rejected message formatting.", status_code=status_code)
+        raise TelegramPermanentError("Telegram rejected the request.", status_code=status_code)
+    return payload.get("result")
 
 
-async def _request(method: str, endpoint: str, *, payload=None, params=None, timeout=None) -> dict[str, Any]:
+def _parse_response(response: Any) -> dict[str, Any]:
+    result = _response_result(response)
+    return result if isinstance(result, dict) else {}
+
+
+async def _request(
+    method: str, endpoint: str, *, payload=None, params=None, timeout=None, parser=_parse_response
+) -> Any:
     if not http_client:
         raise TelegramRetryableError("Telegram HTTP client is unavailable.")
     url = f"{TELEGRAM_API_URL}/{endpoint}"
@@ -124,7 +140,31 @@ async def _request(method: str, endpoint: str, *, payload=None, params=None, tim
     except Exception as exc:
         logger.warning({"event": "telegram_request_failed", "error_code": type(exc).__name__, "endpoint": endpoint})
         raise TelegramRetryableError("Telegram request failed temporarily.") from exc
-    return _parse_response(response)
+    return parser(response)
+
+
+async def obter_updates_telegram(offset: int | None) -> list[Any]:
+    payload: dict[str, Any] = {
+        "timeout": TELEGRAM_POLL_TIMEOUT_SECONDS,
+        # Always sent: Telegram keeps the last allowed_updates value between calls.
+        "allowed_updates": list(TELEGRAM_ALLOWED_UPDATES),
+    }
+    if offset is not None:
+        payload["offset"] = offset
+    result = await _request(
+        "post",
+        "getUpdates",
+        payload=payload,
+        timeout=TELEGRAM_POLL_HTTP_TIMEOUT,
+        parser=_response_result,
+    )
+    if not isinstance(result, list):
+        raise TelegramRetryableError("Telegram returned an invalid update batch.")
+    return result
+
+
+async def obter_info_webhook_telegram() -> dict[str, Any]:
+    return await _request("get", "getWebhookInfo")
 
 
 async def enviar_acao_telegram(chat_id, action="typing"):
