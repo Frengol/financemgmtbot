@@ -3,11 +3,23 @@ from postgrest.exceptions import APIError
 from api_responses import with_request_id
 from config import TRANSACTIONS_TABLE, logger, mascarar_segredos, supabase
 from db_repository import gravar_lote_no_banco
-from security import build_pending_preview, delete_pending_item, load_pending_item, pending_item_expired
+from security import (
+    LEGACY_PENDING_KINDS,
+    build_pending_preview,
+    delete_pending_item,
+    load_pending_item,
+    pending_item_expired,
+)
 
 from .audit import registrar_auditoria_admin
 from .auth import autenticar_admin_request
 from .common import _json_error, _json_success
+
+
+def _unsupported_kind(item):
+    # Duplicate confirmations and unknown kinds belong to the Telegram flow only.
+    kind = item.get("kind")
+    return kind is not None and kind not in LEGACY_PENDING_KINDS
 
 
 def listar_cache_admin():
@@ -27,6 +39,8 @@ def listar_cache_admin():
         items = []
         for item in getattr(response, "data", []):
             kind = item.get("kind") or ("delete_confirmation" if isinstance(item.get("payload"), dict) and isinstance(item["payload"].get("ids"), list) else "receipt_batch")
+            if kind not in LEGACY_PENDING_KINDS:
+                continue
             preview = item.get("preview_json") if isinstance(item.get("preview_json"), dict) else build_pending_preview(kind, item.get("payload"))
             items.append({
                 "id": item.get("id"),
@@ -53,6 +67,8 @@ def aprovar_cache_admin(cache_id: str):
         item = load_pending_item(cache_id)
         if not item:
             return _json_error("Pending receipt not found.", 404)
+        if _unsupported_kind(item):
+            return _json_error("Pending item cannot be handled here.", 409, code="ADMIN_PENDING_KIND_UNSUPPORTED")
         if pending_item_expired(item):
             delete_pending_item(cache_id)
             return _json_error("Pending item expired.", 410)
@@ -101,6 +117,8 @@ def rejeitar_cache_admin(cache_id: str):
         item = load_pending_item(cache_id)
         if not item:
             return _json_error("Pending receipt not found.", 404)
+        if _unsupported_kind(item):
+            return _json_error("Pending item cannot be handled here.", 409, code="ADMIN_PENDING_KIND_UNSUPPORTED")
 
         delete_pending_item(cache_id)
         registrar_auditoria_admin(actor, "reject_pending_receipt", "cache_aprovacao", cache_id)

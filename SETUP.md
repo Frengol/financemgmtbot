@@ -218,9 +218,12 @@ supabase/migrations/20260411_recurring_expenses_hardening.sql
 supabase/migrations/20260412_remove_recurring_expense_description.sql
 supabase/migrations/20260815_telegram_update_reliability.sql
 supabase/migrations/20260908_telegram_ocr_fallback_recovery.sql
+supabase/migrations/20261111_duplicate_expense_confirmation.sql
 ```
 
 Se o Supabase avisar que algum objeto ja existe, confira a mensagem. Muitos comandos usam `if not exists` e podem ser reexecutados, mas erros de tabela inexistente normalmente indicam que a etapa das tabelas base foi pulada.
+
+Em uma instalacao ja existente, aplique `20261111_duplicate_expense_confirmation.sql` antes de publicar o backend que traz o aviso de gasto repetido: esse codigo le a coluna nova em toda mensagem do Telegram e, sem a migration, nenhuma mensagem e processada.
 
 ## 7. Autorizar o admin no banco
 
@@ -804,3 +807,13 @@ python -m telegram_poller
 ```
 
 As tabelas `webhook_idempotencia` e `cache_aprovacao` nao tem variante de QA: os updates do bot de teste tambem sao registrados nelas.
+
+## 26. Testes opcionais de Postgres do aviso de gasto repetido
+
+Os testes de aplicacao/reaplicacao da migration e de corrida real da decisao rodam em um cluster Postgres temporario, ativado pela variavel `DUPLICATE_PG_BIN`. Ela deve apontar para o diretorio de binarios do PostgreSQL, que precisa conter `initdb`, `pg_ctl` e `psql`:
+
+```bash
+DUPLICATE_PG_BIN=/caminho/postgresql/bin make test-backend-coverage PYTHON=.venv/bin/python
+```
+
+Execute como usuario sem privilegios. Sem a variavel, os testes de Postgres sao pulados. O cluster usa somente socket Unix e e removido ao final.

@@ -10,20 +10,41 @@ from core_logic import (
 from db_repository import (
     aplicar_filtros_query,
     consultar_no_banco,
+    find_matching_expense,
     gravar_lote_no_banco_com_registros,
     inserir_no_banco,
     load_records_by_source_update_id,
 )
+from domain.duplicate_expense import (
+    DUPLICATE_DECISIONS,
+    DUPLICATE_EXPENSE_KIND,
+    DUPLICATE_EXPIRED_MESSAGE,
+    DUPLICATE_INVALID_MESSAGE,
+    DUPLICATE_SKIPPED_MESSAGE,
+    SAVE_ACTION,
+    SKIP_ACTION,
+    duplicate_keyboard,
+    format_duplicate_confirmation,
+    format_saved_expense,
+    parse_duplicate_payload,
+    prepare_duplicate_candidate,
+    snapshot_matched_record,
+)
 from domain.finance import normalize_receipt_payload, normalize_register_payload
 from security import (
+    LEGACY_PENDING_KINDS,
     MAX_TELEGRAM_AUDIO_BYTES,
     MAX_TELEGRAM_IMAGE_BYTES,
     allow_request,
+    clear_duplicate_snapshot,
+    decide_duplicate_expense,
     delete_pending_item,
+    duplicate_item_expired,
     load_pending_item,
     load_pending_item_by_source_update_id,
     mark_pending_summary_sent,
     matches_pending_origin,
+    matches_pending_origin_exact,
     pending_item_expired,
     store_pending_item,
 )
@@ -36,12 +57,13 @@ from telegram_service import (
     responder_callback_telegram,
 )
 from telegram_correlation import with_error_reference
-from utils import inferir_natureza
+from utils import get_brasilia_time, inferir_natureza
 
 CHAT_MEDIA_RATE_LIMIT = 12
 CHAT_MEDIA_RATE_WINDOW_SECONDS = 60
 CHAT_AI_RATE_LIMIT = 30
 CHAT_AI_RATE_WINDOW_SECONDS = 60
+DUPLICATE_ACTIONS = frozenset({SKIP_ACTION, SAVE_ACTION})
 
 
 def _normalize_dados_lote(dados_lote: object):
@@ -101,9 +123,111 @@ def _receipt_approval_keyboard(cache_id):
     }
 
 
-async def _resume_existing_effect(chat_id, source_update_id, progress_message_id, origin_user_id=None):
+async def _apply_duplicate_decision(item, decision, chat_id, *, deliver, remove_keyboard=None):
+    """Carry a persisted decision to its end; every step is safe to repeat after a failure."""
+    cache_id = item["id"]
+    if decision == "save":
+        effect_source_update_id = item.get("source_update_id")
+        parsed = parse_duplicate_payload(item.get("payload"))
+        if parsed is not None:
+            inserir_no_banco(parsed.transaction, source_update_id=effect_source_update_id, origin_chat_id=chat_id)
+        records = load_records_by_source_update_id(effect_source_update_id, chat_id)
+        if not records:
+            raise RuntimeError("Duplicate save effect is unavailable.")
+        clear_duplicate_snapshot(cache_id)
+        text = format_saved_expense(records[0])
+    else:
+        clear_duplicate_snapshot(cache_id)
+        text = DUPLICATE_EXPIRED_MESSAGE if decision == "expired" else DUPLICATE_SKIPPED_MESSAGE
+    if remove_keyboard:
+        await remove_keyboard()
+    await deliver(text)
+    logger.info({"event": "duplicate_expense_decision_applied", "decision": decision, "update_id": item.get("source_update_id")})
+
+
+async def _handle_duplicate_callback(acao, item, chat_id, msg_id, origin_user_id, source_update_id):
+    # Anything that is not exactly a duplicate action on a duplicate item bound to this
+    # chat and user is ignored: no decision, no write, no delete and no message edit.
+    if not item or acao not in DUPLICATE_ACTIONS or item.get("kind") != DUPLICATE_EXPENSE_KIND:
+        return
+    if not matches_pending_origin_exact(item, chat_id, origin_user_id):
+        return
+
+    decision = item.get("duplicate_decision")
+    if decision not in DUPLICATE_DECISIONS:
+        # Past the deadline (or without a readable one) the database stores "expired"
+        # whatever the click, so an unreadable payload must not mask the expiry.
+        if not duplicate_item_expired(item) and parse_duplicate_payload(item.get("payload")) is None:
+            await enviar_mensagem_telegram(
+                chat_id,
+                with_error_reference(DUPLICATE_INVALID_MESSAGE, update_id=source_update_id),
+            )
+            return
+        decision = decide_duplicate_expense(
+            item["id"], chat_id, origin_user_id, "save" if acao == SAVE_ACTION else "skip"
+        )
+        if decision is None:
+            raise RuntimeError("Duplicate decision was not persisted.")
+
+    await _apply_duplicate_decision(
+        item,
+        decision,
+        chat_id,
+        deliver=lambda text: enviar_mensagem_telegram(chat_id, text),
+        remove_keyboard=lambda: remover_teclado_mensagem_telegram(chat_id, msg_id),
+    )
+
+
+async def _resume_duplicate_expense(pending, chat_id, origin_user_id, progress_message_id, source_update_id, stage_callback=None):
+    if not matches_pending_origin_exact(pending, chat_id, origin_user_id):
+        return False
+
+    decision = pending.get("duplicate_decision")
+    if decision not in DUPLICATE_DECISIONS:
+        if duplicate_item_expired(pending):
+            # The database turns any decision requested after the deadline into "expired".
+            decision = decide_duplicate_expense(pending["id"], chat_id, origin_user_id, "skip")
+            if decision is None:
+                raise RuntimeError("Duplicate decision was not persisted.")
+        else:
+            parsed = parse_duplicate_payload(pending.get("payload"))
+            if parsed is None:
+                await _deliver_final_message(
+                    chat_id,
+                    progress_message_id,
+                    with_error_reference(DUPLICATE_INVALID_MESSAGE, update_id=source_update_id),
+                )
+            else:
+                await _deliver_final_message(
+                    chat_id,
+                    progress_message_id,
+                    format_duplicate_confirmation(parsed),
+                    duplicate_keyboard(pending["id"]),
+                    stage_callback,
+                )
+            logger.info({"event": "persisted_duplicate_confirmation_resumed", "update_id": source_update_id})
+            return True
+
+    await _apply_duplicate_decision(
+        pending,
+        decision,
+        chat_id,
+        deliver=lambda text: _deliver_final_message(chat_id, progress_message_id, text, stage_callback=stage_callback),
+    )
+    return True
+
+
+async def _resume_existing_effect(chat_id, source_update_id, progress_message_id, origin_user_id=None, stage_callback=None):
     if source_update_id is None:
         return False
+
+    # A duplicate marker owns this update: its decision and snapshot cleanup must run
+    # even when the financial effect already exists, so it is consulted before records.
+    pending = load_pending_item_by_source_update_id(source_update_id)
+    if pending and pending.get("kind") == DUPLICATE_EXPENSE_KIND:
+        return await _resume_duplicate_expense(
+            pending, chat_id, origin_user_id, progress_message_id, source_update_id, stage_callback
+        )
 
     persisted_records = load_records_by_source_update_id(source_update_id, chat_id)
     if persisted_records:
@@ -115,7 +239,6 @@ async def _resume_existing_effect(chat_id, source_update_id, progress_message_id
         logger.info({"event": "persisted_financial_effect_resumed", "update_id": source_update_id})
         return True
 
-    pending = load_pending_item_by_source_update_id(source_update_id)
     if not pending or pending.get("kind") != "receipt_batch" or pending_item_expired(pending):
         return False
     if not matches_pending_origin(pending, chat_id, origin_user_id):
@@ -205,6 +328,9 @@ async def processar_update_assincrono(
                 return
 
             item = load_pending_item(cache_id)
+            if acao in DUPLICATE_ACTIONS or (item and item.get("kind") not in LEGACY_PENDING_KINDS):
+                await _handle_duplicate_callback(acao, item, chat_id, msg_id, origin_user_id, source_update_id)
+                return
             if not item:
                 await editar_mensagem_telegram(
                     chat_id,
@@ -313,7 +439,13 @@ async def processar_update_assincrono(
 
         logger.info({"event": "webhook_received", "type": "photo" if "photo" in message else "voice" if "voice" in message else "text", "update_id": source_update_id})
 
-        if await _resume_existing_effect(chat_id, source_update_id, progress_message_id, origin_user_id=origin_user_id):
+        if await _resume_existing_effect(
+            chat_id,
+            source_update_id,
+            progress_message_id,
+            origin_user_id=origin_user_id,
+            stage_callback=stage_callback,
+        ):
             return
 
         if "photo" in message:
@@ -505,6 +637,38 @@ async def processar_update_assincrono(
 
         elif intencao == "registrar":
             dados_reg = _normalize_dados_registro(analise_ia.get("dados_registro", {}))
+            # The warning needs a stable effect identity and a sender to bind the answer to.
+            # Only text and voice are eligible; photos keep the previous flow regardless of the LLM route.
+            candidate = (
+                prepare_duplicate_candidate(dados_reg, fallback_date=get_brasilia_time())
+                if source_update_id is not None and origin_user_id is not None and "photo" not in message
+                else None
+            )
+            if candidate is not None:
+                matched = find_matching_expense(candidate)
+                if matched is not None:
+                    cache_record = store_pending_item(
+                        {
+                            "transaction": candidate.transaction,
+                            "matched_record": snapshot_matched_record(matched),
+                        },
+                        kind=DUPLICATE_EXPENSE_KIND,
+                        origin_chat_id=chat_id,
+                        origin_user_id=origin_user_id,
+                        source_update_id=source_update_id,
+                    )
+                    parsed = parse_duplicate_payload(cache_record.get("payload"))
+                    if parsed is None:
+                        raise RuntimeError("Duplicate confirmation payload is unavailable.")
+                    logger.info({"event": "duplicate_expense_detected", "update_id": source_update_id})
+                    await _deliver_final_message(
+                        chat_id,
+                        progress_message_id,
+                        format_duplicate_confirmation(parsed),
+                        duplicate_keyboard(cache_record["id"]),
+                        stage_callback,
+                    )
+                    return
             inserir_no_banco(dados_reg, source_update_id=source_update_id, origin_chat_id=chat_id)
             val_total = float(dados_reg.get("valor_total") or 0.0)
             parcelas = int(dados_reg.get("parcelas") or 1)

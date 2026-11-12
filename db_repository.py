@@ -1,7 +1,10 @@
 from postgrest.exceptions import APIError
 from config import TRANSACTIONS_TABLE, supabase, logger
+from domain.duplicate_expense import pick_first_match
 from domain.finance import build_installment_records, build_receipt_transaction_records, normalize_transaction_filters
 from utils import get_brasilia_time
+
+DUPLICATE_LOOKUP_PAGE_SIZE = 500
 
 
 def _payload_fields_summary(payloads):
@@ -58,6 +61,38 @@ def load_records_by_source_update_id(source_update_id, origin_chat_id=None):
     response = query.order("source_record_key").execute()
     data = getattr(response, "data", None)
     return data if isinstance(data, list) else []
+
+def find_matching_expense(candidate):
+    """First persisted expense (lowest id) matching the frozen candidate.
+
+    Date, amount and expense-only are filtered in the database; account and
+    description are compared in the domain. Any query failure propagates so the
+    caller can never mistake "could not check" for "no match".
+    """
+    record = candidate.record
+    start = 0
+    while True:
+        response = (
+            supabase
+            .table(TRANSACTIONS_TABLE)
+            .select("id, data, valor, natureza, conta, descricao")
+            .eq("data", record["data"])
+            .eq("valor", record["valor"])
+            .neq("natureza", "Receita")
+            .order("id", desc=False)
+            .range(start, start + DUPLICATE_LOOKUP_PAGE_SIZE - 1)
+            .execute()
+        )
+        page = getattr(response, "data", None)
+        if not isinstance(page, list):
+            raise RuntimeError("Duplicate expense lookup is unavailable.")
+        match = pick_first_match(candidate, page)
+        if match is not None:
+            return match
+        if len(page) < DUPLICATE_LOOKUP_PAGE_SIZE:
+            return None
+        start += DUPLICATE_LOOKUP_PAGE_SIZE
+
 
 def _with_effect_keys(registros, source_update_id, prefix, origin_chat_id=None):
     if source_update_id is None:

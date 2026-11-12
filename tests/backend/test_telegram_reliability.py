@@ -638,7 +638,7 @@ class TestFinancialEffects:
         delivery = AsyncMock()
 
         with patch.object(handlers, "load_records_by_source_update_id", return_value=records) as load_records, patch.object(
-            handlers, "load_pending_item_by_source_update_id"
+            handlers, "load_pending_item_by_source_update_id", return_value=None
         ) as load_pending, patch.object(handlers, "processar_texto_com_llm", AsyncMock()) as llm, patch.object(
             handlers, "_deliver_final_message", delivery
         ):
@@ -648,7 +648,8 @@ class TestFinancialEffects:
             )
 
         llm.assert_not_awaited()
-        load_pending.assert_not_called()
+        # A duplicate-confirmation marker is consulted first; none exists, so records resume.
+        load_pending.assert_called_once_with(701)
         load_records.assert_called_once_with(701, 1)
         assert "Mercado" in delivery.await_args.args[2]
         assert "R$ 10.00" in delivery.await_args.args[2]

@@ -6,12 +6,13 @@ import os
 import secrets
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
 from config import logger, supabase
+from domain.duplicate_expense import DUPLICATE_DECISIONS, DUPLICATE_EXPENSE_KIND
 from utils import get_brasilia_time
 
 PENDING_TTL_HOURS = 24
@@ -23,8 +24,10 @@ MAX_TELEGRAM_AUDIO_BYTES = int(os.environ.get("MAX_TELEGRAM_AUDIO_BYTES") or 12_
 _RATE_LIMIT_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
 PENDING_SELECT_FIELDS = (
     "id, kind, payload_ciphertext, payload_key_version, preview_json, created_at, expires_at, "
-    "origin_chat_id, origin_user_id, source_update_id, payload"
+    "origin_chat_id, origin_user_id, source_update_id, duplicate_decision, payload"
 )
+LEGACY_PENDING_KINDS = frozenset({"receipt_batch", "delete_confirmation"})
+DUPLICATE_CLEARED_PREVIEW = {"summary": "Confirmação concluída"}
 
 def _derive_secret(label: str):
     seed = "|".join(
@@ -102,6 +105,8 @@ def generate_pending_id():
 
 def build_pending_preview(kind: str, payload: dict[str, Any] | None):
     payload = payload if isinstance(payload, dict) else {}
+    if kind == DUPLICATE_EXPENSE_KIND:
+        return {"summary": "Confirmação pendente"}
     if kind == "delete_confirmation":
         ids = payload.get("ids") or []
         return {
@@ -152,7 +157,9 @@ def store_pending_item(
     resolved_kind = kind or detect_pending_kind(payload)
     stable_id = f"tu_{hash_text(str(source_update_id))[:20]}" if source_update_id is not None else None
     record_id = cache_id or stable_id or generate_pending_id()
-    now = get_brasilia_time()
+    # Duplicate confirmations are decided by the database against now(), so they
+    # need real instants; legacy kinds keep their historical local-time values.
+    now = datetime.now(timezone.utc) if resolved_kind == DUPLICATE_EXPENSE_KIND else get_brasilia_time()
     expires_at = now + timedelta(hours=PENDING_TTL_HOURS)
     preview = build_pending_preview(resolved_kind, payload)
     insert_payload = {
@@ -190,6 +197,8 @@ def store_pending_item(
                 "expires_at": persisted.get("expires_at"),
                 "payload": persisted.get("payload"),
                 "source_update_id": persisted.get("source_update_id"),
+                "origin_user_id": persisted.get("origin_user_id"),
+                "duplicate_decision": persisted.get("duplicate_decision"),
             }
     return {
         "id": record_id,
@@ -263,6 +272,20 @@ def pending_item_expired(item: dict[str, Any] | None):
     return expires_at <= get_brasilia_time()
 
 
+def duplicate_item_expired(item: dict[str, Any] | None):
+    """Deadline check for duplicate confirmations; a missing or unreadable deadline counts as expired."""
+    raw = item.get("expires_at") if item else None
+    if not isinstance(raw, str):
+        return True
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed <= datetime.now(timezone.utc)
+
+
 def delete_pending_item(cache_id: str):
     supabase.table("cache_aprovacao").delete().eq("id", cache_id).execute()
 
@@ -294,6 +317,56 @@ def matches_pending_origin(item: dict[str, Any] | None, chat_id: int | str | Non
     if expected_user and current_user and expected_user != current_user:
         return False
     return True
+
+
+def matches_pending_origin_exact(item: dict[str, Any] | None, chat_id: int | str | None, user_id: int | str | None):
+    """Strict binding: the stored chat and user must both exist and equal the caller's."""
+    if not item or chat_id is None or user_id is None:
+        return False
+    expected_chat = str(item.get("origin_chat_id") or "").strip()
+    expected_user = str(item.get("origin_user_id") or "").strip()
+    return bool(expected_chat) and bool(expected_user) and expected_chat == str(chat_id) and expected_user == str(user_id)
+
+
+def decide_duplicate_expense(cache_id: str, chat_id: int | str | None, user_id: int | str | None, decision: str):
+    """Atomically record the first valid decision in the database; returns the canonical one.
+
+    The database function re-checks kind, chat, user and deadline, and a decision
+    requested after the deadline is stored as ``expired``.
+    """
+    if decision not in ("save", "skip"):
+        raise ValueError("Unsupported duplicate decision.")
+    if chat_id is None or user_id is None:
+        return None
+    response = supabase.rpc(
+        "decide_duplicate_expense",
+        {"p_id": cache_id, "p_chat_id": str(chat_id), "p_user_id": str(user_id), "p_decision": decision},
+    ).execute()
+    data = getattr(response, "data", None)
+    if isinstance(data, list):
+        data = data[0] if len(data) == 1 else None
+    return data if data in DUPLICATE_DECISIONS else None
+
+
+def clear_duplicate_snapshot(cache_id: str):
+    """Drop the encrypted snapshot of a decided duplicate confirmation, keeping the marker row."""
+    response = (
+        supabase
+        .table("cache_aprovacao")
+        .update(
+            {
+                "payload_ciphertext": None,
+                "payload": {},
+                "preview_json": DUPLICATE_CLEARED_PREVIEW,
+            }
+        )
+        .eq("id", cache_id)
+        .eq("kind", DUPLICATE_EXPENSE_KIND)
+        .not_.is_("duplicate_decision", "null")
+        .execute()
+    )
+    if not getattr(response, "data", None):
+        raise RuntimeError("Duplicate confirmation snapshot was not cleared.")
 
 
 def allow_request(scope: str, key: str, *, limit: int, window_seconds: int):
