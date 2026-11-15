@@ -1,5 +1,6 @@
 import calendar
 import html
+import math
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
@@ -296,6 +297,36 @@ def normalize_register_payload(transaction: Any):
         "metodo_pagamento": clean_text(transaction.get("metodo_pagamento"), 120, "Outros") or "Outros",
         "conta": clean_text(transaction.get("conta"), 120, "Nao Informada") or "Nao Informada",
     }
+
+
+REGISTER_AMOUNT_REQUIRED_MESSAGE = (
+    "⚠️ Nada foi salvo: não entendi um valor válido. "
+    "Envie de novo informando um valor maior que zero (ex.: 25,50)."
+)
+
+
+def register_amount_for_persistence(value: Any) -> float | None:
+    """Return the single-installment value that would be stored, or None when it is not a positive amount."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        amount = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(amount):
+        return None
+    # Same formula as build_installment_records for a single installment.
+    persisted = float(f"{amount:.2f}")
+    return persisted if persisted > 0 else None
+
+
+def single_register_missing_amount(transaction: Any) -> bool:
+    """True when a single-installment register payload has no positive amount; installment plans are out of scope."""
+    if not isinstance(transaction, dict):
+        return True
+    if max(1, _safe_int(transaction.get("parcelas"), 1)) != 1:
+        return False
+    return register_amount_for_persistence(transaction.get("valor_total")) is None
 
 
 def aggregate_receipt_items(receipt: dict[str, Any] | None):

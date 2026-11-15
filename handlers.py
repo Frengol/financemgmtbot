@@ -30,7 +30,12 @@ from domain.duplicate_expense import (
     prepare_duplicate_candidate,
     snapshot_matched_record,
 )
-from domain.finance import normalize_receipt_payload, normalize_register_payload
+from domain.finance import (
+    REGISTER_AMOUNT_REQUIRED_MESSAGE,
+    normalize_receipt_payload,
+    normalize_register_payload,
+    single_register_missing_amount,
+)
 from security import (
     LEGACY_PENDING_KINDS,
     MAX_TELEGRAM_AUDIO_BYTES,
@@ -636,7 +641,18 @@ async def processar_update_assincrono(
             )
 
         elif intencao == "registrar":
-            dados_reg = _normalize_dados_registro(analise_ia.get("dados_registro", {}))
+            raw_dados_registro = analise_ia.get("dados_registro", {})
+            # Photos and receipts keep their own flow; text and voice need a positive amount before any lookup or write.
+            if "photo" not in message and single_register_missing_amount(raw_dados_registro):
+                logger.info({"event": "register_rejected_invalid_amount", "update_id": source_update_id})
+                await _deliver_final_message(
+                    chat_id,
+                    progress_message_id,
+                    REGISTER_AMOUNT_REQUIRED_MESSAGE,
+                    stage_callback=stage_callback,
+                )
+                return
+            dados_reg = _normalize_dados_registro(raw_dados_registro)
             # The warning needs a stable effect identity and a sender to bind the answer to.
             # Only text and voice are eligible; photos keep the previous flow regardless of the LLM route.
             candidate = (

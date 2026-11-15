@@ -766,3 +766,163 @@ class TestPhotoStaysOutsideDuplicateFlow:
         assert env.world.lookups == 0
         assert env.world.inserts == 1
         assert not env.world.pending
+
+
+REJECTED_AMOUNTS = [
+    "__absent__", None, "", "abc", "12,50", True, False,
+    float("nan"), float("inf"), float("-inf"), 0, 0.0, -5, 0.004,
+]
+
+
+def _rejected_dados(value):
+    dados = _dados()
+    if value == "__absent__":
+        del dados["valor_total"]
+    else:
+        dados["valor_total"] = value
+    return dados
+
+
+class TestRejectsMissingAmount:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("make_update", [text_update, voice_update])
+    @pytest.mark.parametrize("value", REJECTED_AMOUNTS, ids=repr)
+    async def test_invalid_amount_is_refused_before_lookup_pending_or_insert(self, env, make_update, value):
+        env.world.seed_expense()
+        env.llm.return_value = {"intencao": "registrar", "dados_registro": _rejected_dados(value)}
+        await env.run(make_update())
+        assert env.world.inserts == 0
+        assert env.world.lookups == 0
+        assert env.world.store_calls == 0
+        assert env.world.pending == {}
+        final = (env.edited_texts() or env.sent_texts())[-1]
+        assert "Nada foi salvo" in final and "maior que zero" in final
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("dados", [None, "x", [], {}])
+    async def test_non_dict_or_empty_payload_is_refused(self, env, dados):
+        env.llm.return_value = {"intencao": "registrar", "dados_registro": dados}
+        await env.run(text_update())
+        assert env.world.inserts == 0 and env.world.lookups == 0
+        assert "Nada foi salvo" in env.sent_texts()[0]
+
+    @pytest.mark.asyncio
+    async def test_missing_payload_key_is_refused(self, env):
+        env.llm.return_value = {"intencao": "registrar"}
+        await env.run(text_update())
+        assert env.world.inserts == 0
+        assert "Nada foi salvo" in env.sent_texts()[0]
+
+    @pytest.mark.asyncio
+    async def test_voice_refusal_edits_progress_message(self, env):
+        env.llm.return_value = {"intencao": "registrar", "dados_registro": _rejected_dados(0)}
+        await env.run(voice_update(), progress_message_id=33)
+        edited = [c for c in env.edit.await_args_list if c.args[1] == 33]
+        assert "Nada foi salvo" in edited[-1].args[2]
+        assert env.world.inserts == 0
+
+    @pytest.mark.asyncio
+    async def test_income_with_zero_amount_is_refused_too(self, env):
+        env.llm.return_value = {"intencao": "registrar", "dados_registro": _dados(categoria="Salário", valor_total=0)}
+        await env.run(text_update())
+        assert env.world.inserts == 0
+        assert "Nada foi salvo" in env.sent_texts()[0]
+
+    @pytest.mark.asyncio
+    async def test_refusal_does_not_leak_received_value_or_payload(self, env):
+        env.llm.return_value = {"intencao": "registrar", "dados_registro": _dados(valor_total="abc-secret", descricao="Padaria Secreta")}
+        await env.run(text_update())
+        text = env.sent_texts()[0]
+        assert "abc-secret" not in text and "Padaria Secreta" not in text
+
+    @pytest.mark.asyncio
+    async def test_refusal_logs_no_amount_or_payload(self, env):
+        env.llm.return_value = {"intencao": "registrar", "dados_registro": _dados(valor_total="abc-secret")}
+        with patch.object(handlers, "logger") as log:
+            await env.run(text_update())
+        logged = " ".join(str(c) for c in log.info.call_args_list + log.error.call_args_list + log.warning.call_args_list)
+        assert "register_rejected_invalid_amount" in logged
+        assert "abc-secret" not in logged
+
+    @pytest.mark.asyncio
+    async def test_refusal_keeps_historical_zero_rows_untouched(self, env):
+        env.world.seed_expense(valor=0.0, descricao="Historico zero")
+        env.world.seed_expense(valor=0.0, descricao="Outro zero", data="2026-10-01")
+        before = [dict(r) for r in env.world.expenses]
+        env.llm.return_value = {"intencao": "registrar", "dados_registro": _rejected_dados(0)}
+        await env.run(text_update())
+        assert env.world.expenses == before
+        handlers.delete_pending_item.assert_not_called()
+
+
+class TestPositiveAmountsStillSave:
+    @pytest.mark.asyncio
+    async def test_amount_text_mentioning_delete_words_is_saved(self, env):
+        update = text_update()
+        update["message"]["text"] = "paguei 25,50 pelo serviço de apagar registros antigos"
+        env.llm.return_value = {
+            "intencao": "registrar",
+            "dados_registro": _dados(valor_total=25.5, descricao="Serviço de apagar registros antigos"),
+        }
+        await env.run(update)
+        assert env.world.inserts == 1
+        assert "Salvo!" in env.sent_texts()[0]
+        assert env.world.expenses[0]["valor"] == 25.5
+
+    @pytest.mark.asyncio
+    async def test_half_cent_boundary_is_saved_and_below_is_refused(self, env):
+        env.llm.return_value = {"intencao": "registrar", "dados_registro": _dados(valor_total=0.005)}
+        await env.run(text_update(update_id=701))
+        assert env.world.inserts == 1
+        assert env.world.expenses[0]["valor"] == 0.01
+        env.llm.return_value = {"intencao": "registrar", "dados_registro": _dados(valor_total=0.004)}
+        await env.run(text_update(update_id=702))
+        assert env.world.inserts == 1
+
+    @pytest.mark.asyncio
+    async def test_numeric_string_amount_is_saved(self, env):
+        env.llm.return_value = {"intencao": "registrar", "dados_registro": _dados(valor_total="25.50")}
+        await env.run(text_update())
+        assert env.world.inserts == 1
+
+    @pytest.mark.asyncio
+    async def test_positive_repeat_still_asks_save_or_skip(self, env):
+        env.world.seed_expense()
+        await env.run(text_update())
+        assert env.world.inserts == 0
+        assert _keyboard_ids(env.send.await_args_list[0]) == ["dupskip_tu_700", "dupsave_tu_700"]
+
+    @pytest.mark.asyncio
+    async def test_positive_repeat_save_and_skip_decisions_still_work(self, env):
+        env.world.seed_expense()
+        await env.run(text_update())
+        await env.run(callback_update("dupsave_tu_700"))
+        assert env.world.count_saved() == 1
+
+    @pytest.mark.asyncio
+    async def test_positive_repeat_skip_saves_nothing(self, env):
+        env.world.seed_expense()
+        await env.run(text_update())
+        await env.run(callback_update("dupskip_tu_700"))
+        assert env.world.count_saved() == 0
+
+
+class TestRefusalScope:
+    @pytest.mark.asyncio
+    async def test_installment_plan_with_zero_keeps_current_flow(self, env):
+        env.llm.return_value = {"intencao": "registrar", "dados_registro": _dados(valor_total=0, parcelas=3)}
+        await env.run(text_update())
+        assert env.world.inserts == 1
+
+    @pytest.mark.asyncio
+    async def test_photo_routed_as_registrar_with_zero_keeps_current_flow(self, env):
+        env.llm.return_value = {"intencao": "registrar", "dados_registro": _dados(valor_total=0)}
+        update = {
+            "update_id": 700,
+            "message": {"chat": {"id": CHAT}, "from": {"id": USER}, "photo": [{"file_id": "synthetic-photo"}]},
+        }
+        ocr = MagicMock(text="synthetic receipt", model="synthetic-ocr")
+        with patch.object(handlers, "extrair_tabela_recibo_gemini", AsyncMock(return_value=ocr)):
+            await env.run(update, progress_message_id=33)
+        assert env.world.inserts == 1
+        assert not any("Nada foi salvo" in t for t in env.edited_texts() + env.sent_texts())

@@ -615,6 +615,20 @@ class TestConsultarNoBanco:
         assert total == pytest.approx(150.0)
         assert count == 2
 
+    def test_historical_zero_value_rows_stay_queryable(self):
+        query = MagicMock()
+        query.gte.return_value = query
+        resp = MagicMock()
+        resp.data = [{"valor": 0.0, "descricao": "Historico"}, {"valor": 10.0, "descricao": "B"}]
+        query.execute.return_value = resp
+        table = MagicMock()
+        table.select.return_value = query
+        with patch.object(config.supabase, "table", return_value=table):
+            total, count = db_repository.consultar_no_banco({})
+        query.gte.assert_any_call("valor", 0)
+        assert count == 2
+        assert total == pytest.approx(10.0)
+
 
 # ============================================================
 # 5. FILTER QUERY BUILDER

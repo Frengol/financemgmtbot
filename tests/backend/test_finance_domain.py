@@ -3,6 +3,7 @@ from datetime import datetime
 import pytest
 
 from domain.finance import (
+    REGISTER_AMOUNT_REQUIRED_MESSAGE,
     DomainValidationError,
     aggregate_receipt_items,
     build_installment_records,
@@ -16,6 +17,8 @@ from domain.finance import (
     normalize_register_payload,
     normalize_transaction_filters,
     normalize_transaction_payload,
+    register_amount_for_persistence,
+    single_register_missing_amount,
 )
 
 
@@ -336,3 +339,60 @@ class TestFinanceDomainFiltersAndRecurring:
         assert build_recurring_transaction_for_reference(base, "2026-02-05") is None
         assert build_recurring_transaction_for_reference({**base, "mes_inicio": "2026-01-01", "mes_fim": "invalid"}, "2026-02-05") is None
         assert build_recurring_transaction_for_reference({**base, "mes_inicio": "2026-01-01", "mes_fim": "2026-01-01"}, "2026-02-05") is None
+
+
+INVALID_REGISTER_AMOUNTS = [
+    None, True, False, "", "abc", "12,50", [], {},
+    float("nan"), float("inf"), float("-inf"), 10**400,
+    0, 0.0, -0.0, -5, -0.001, 0.004, 0.0049,
+]
+
+
+class TestRegisterAmountForPersistence:
+    @pytest.mark.parametrize("value", INVALID_REGISTER_AMOUNTS)
+    def test_invalid_or_non_positive_amounts_are_rejected(self, value):
+        assert register_amount_for_persistence(value) is None
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [(25.5, 25.5), ("25.50", 25.5), (0.005, 0.01), (0.01, 0.01), (0.125, 0.12), (10, 10.0)],
+    )
+    def test_valid_amounts_return_persisted_value(self, value, expected):
+        assert register_amount_for_persistence(value) == expected
+
+    @pytest.mark.parametrize(
+        "value",
+        [0, 0.0, -0.0, -5, -0.001, 0.004, 0.0049, 25.5, "25.50", 0.005, 0.01, 0.125, 10, 1e-9],
+    )
+    def test_consistent_with_installment_persistence(self, value):
+        record = build_installment_records({"valor_total": value, "parcelas": 1}, fallback_date=datetime(2026, 1, 1))[0]
+        assert (register_amount_for_persistence(value) is not None) == (record["valor"] > 0)
+
+
+class TestSingleRegisterMissingAmount:
+    def test_non_dict_is_missing(self):
+        assert single_register_missing_amount(None) is True
+        assert single_register_missing_amount("x") is True
+        assert single_register_missing_amount([]) is True
+
+    @pytest.mark.parametrize("parcelas", [1, 0, "abc", "1", None, -2])
+    def test_single_installment_with_invalid_amount_is_missing(self, parcelas):
+        assert single_register_missing_amount({"valor_total": 0, "parcelas": parcelas}) is True
+
+    def test_absent_keys_are_missing(self):
+        assert single_register_missing_amount({}) is True
+        assert single_register_missing_amount({"parcelas": 1}) is True
+
+    def test_installment_plans_are_out_of_scope(self):
+        assert single_register_missing_amount({"valor_total": 0, "parcelas": 3}) is False
+
+    def test_valid_amount_is_not_missing(self):
+        assert single_register_missing_amount({"valor_total": 25.5, "parcelas": 1}) is False
+        assert single_register_missing_amount({"valor_total": "25.50"}) is False
+
+    def test_message_demands_amount_and_says_nothing_was_saved(self):
+        assert "Nada foi salvo" in REGISTER_AMOUNT_REQUIRED_MESSAGE
+        assert "maior que zero" in REGISTER_AMOUNT_REQUIRED_MESSAGE
+
+    def test_normalization_still_clamps_negative_to_zero(self):
+        assert normalize_register_payload({"valor_total": -1})["valor_total"] == 0.0
