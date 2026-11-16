@@ -5,6 +5,8 @@ from domain.finance import build_installment_records, build_receipt_transaction_
 from utils import get_brasilia_time
 
 DUPLICATE_LOOKUP_PAGE_SIZE = 500
+DELETE_BATCH_SIZE = 200
+DELETE_CANDIDATE_FIELDS = "id, data, valor, natureza, categoria, descricao, metodo_pagamento, conta"
 
 
 def _payload_fields_summary(payloads):
@@ -45,6 +47,93 @@ def consultar_no_banco(filtros):
     query = supabase.table(TRANSACTIONS_TABLE).select("valor, descricao")
     resposta = aplicar_filtros_query(query, filtros).execute()
     return sum(item["valor"] for item in resposta.data), len(resposta.data)
+
+
+def _escape_like(value):
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _aplicar_filtros_exclusao(query_obj, filters):
+    query_obj = query_obj.gte("valor", 0)
+    if filters.valor_exato is not None:
+        query_obj = query_obj.eq("valor", filters.valor_exato)
+    if filters.data:
+        query_obj = query_obj.eq("data", filters.data)
+    if filters.date_from:
+        query_obj = query_obj.gte("data", filters.date_from)
+    if filters.date_to:
+        query_obj = query_obj.lte("data", filters.date_to)
+    if filters.natureza:
+        query_obj = query_obj.eq("natureza", filters.natureza)
+    if filters.categoria:
+        query_obj = query_obj.eq("categoria", filters.categoria)
+    if filters.conta:
+        query_obj = query_obj.eq("conta", filters.conta)
+    if filters.metodo_pagamento:
+        if "*" in filters.metodo_pagamento:
+            # PostgREST treats `*` as `%` in ilike; the normalizer refuses it, never widen here.
+            raise ValueError("metodo_pagamento with '*' is not searchable")
+        query_obj = query_obj.ilike("metodo_pagamento", f"%{_escape_like(filters.metodo_pagamento)}%")
+    if filters.tipo_transacao == "saida":
+        query_obj = query_obj.neq("natureza", "Receita")
+    elif filters.tipo_transacao == "entrada":
+        query_obj = query_obj.eq("natureza", "Receita")
+    return query_obj
+
+
+def _valid_record_id(value):
+    return (isinstance(value, int) and not isinstance(value, bool)) or (isinstance(value, str) and bool(value))
+
+
+def _id_sort_key(value):
+    return (0, value, "") if isinstance(value, int) else (1, 0, value)
+
+
+def buscar_candidatos_exclusao(filters):
+    """Every record matching the deletion filters, unique and ordered by id.
+
+    Pages through the whole result (stable `order id` + `range`) so the API row limit
+    can never hide candidates: the preview count and the frozen ids stay faithful.
+    Any failure or malformed page propagates; "could not check" is never "no match".
+    """
+    found = {}
+    start = 0
+    while True:
+        query = supabase.table(TRANSACTIONS_TABLE).select(DELETE_CANDIDATE_FIELDS)
+        response = (
+            _aplicar_filtros_exclusao(query, filters)
+            .order("id", desc=False)
+            .range(start, start + DUPLICATE_LOOKUP_PAGE_SIZE - 1)
+            .execute()
+        )
+        page = getattr(response, "data", None)
+        if not isinstance(page, list):
+            raise RuntimeError("Deletion candidate lookup is unavailable.")
+        for row in page:
+            if not isinstance(row, dict) or not _valid_record_id(row.get("id")):
+                raise RuntimeError("Deletion candidate lookup returned an unreadable record.")
+            found.setdefault(row["id"], row)
+        if len(page) < DUPLICATE_LOOKUP_PAGE_SIZE:
+            return [found[record_id] for record_id in sorted(found, key=_id_sort_key)]
+        start += DUPLICATE_LOOKUP_PAGE_SIZE
+
+
+def normalizar_ids_exclusao(ids):
+    """The frozen ids as a list, or None when they are empty or not usable ids."""
+    if not isinstance(ids, list) or not ids or not all(_valid_record_id(i) for i in ids):
+        return None
+    return ids
+
+
+def apagar_registros_por_ids(ids):
+    """Delete exactly these ids (in bounded batches to keep request URLs short)."""
+    valid_ids = normalizar_ids_exclusao(ids)
+    if valid_ids is None:
+        raise ValueError("Deletion requires a non-empty list of record ids.")
+    for index in range(0, len(valid_ids), DELETE_BATCH_SIZE):
+        batch = valid_ids[index:index + DELETE_BATCH_SIZE]
+        supabase.table(TRANSACTIONS_TABLE).delete().in_("id", batch).execute()
+    return len(valid_ids)
 
 
 def load_records_by_source_update_id(source_update_id, origin_chat_id=None):

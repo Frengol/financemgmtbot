@@ -1,6 +1,7 @@
 from collections import defaultdict
 from typing import Dict, Any, List
 from config import logger
+from domain.duplicate_expense import escape_markdown
 from domain.finance import aggregate_receipt_items
 
 def _format_currency(value):
@@ -108,3 +109,91 @@ def formatar_relatorio_exclusao(registros: List[Dict[str, Any]]):
             
     msg += "\n🛑 **Tem a certeza absoluta que deseja APAGAR isto permanentemente?**"
     return msg
+
+DELETE_PREVIEW_SAMPLE = 10
+TELEGRAM_MESSAGE_LIMIT = 4096
+_PREVIEW_FIELD_MAX = 200
+_ABBREVIATED_MARK = " … (abreviado)"
+
+
+def _clip(value, limit, default):
+    """Full text when it fits; an exceptionally long field is cut and explicitly marked as abbreviated."""
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return default, False
+    if len(text) <= limit:
+        return text, False
+    return text[:limit].rstrip(), True
+
+
+def _field(value, limit, default):
+    text, abbreviated = _clip(value, limit, default)
+    return escape_markdown(text) + (_ABBREVIATED_MARK if abbreviated else "")
+
+
+def _delete_filter_lines(filters):
+    if filters.data:
+        period = f"📅 Data: {filters.data}"
+    elif filters.date_from and filters.date_from[5:] == "01-01" and filters.date_to[5:] == "12-31":
+        period = f"📅 Período: ano {filters.date_from[:4]}"
+    elif filters.date_from:
+        period = f"📅 Período: {filters.date_from[5:7]}/{filters.date_from[:4]}"
+    else:
+        period = "📅 sem filtro de data"
+    rows = [
+        (f"💰 Valor: R$ {filters.valor_exato:.2f}" if filters.valor_exato is not None else "💰 sem filtro de valor"),
+        period,
+        (f"🏦 Conta: {escape_markdown(filters.conta)}" if filters.conta else "🏦 sem filtro de conta"),
+        (f"📂 Categoria: {escape_markdown(filters.categoria)}" if filters.categoria else "📂 sem filtro de categoria"),
+        (f"💳 Pagamento (contém): {escape_markdown(filters.metodo_pagamento)}" if filters.metodo_pagamento else "💳 sem filtro de pagamento"),
+        (f"📊 Natureza: {escape_markdown(filters.natureza)}" if filters.natureza else "📊 sem filtro de natureza"),
+        (
+            "↕️ Tipo: " + ("despesas" if filters.tipo_transacao == "saida" else "receitas")
+            if filters.tipo_transacao
+            else "↕️ sem filtro de tipo"
+        ),
+    ]
+    return [f"▫️ {row}" for row in rows]
+
+
+def _delete_record_lines(registro):
+    descricao = _field(registro.get("descricao"), _PREVIEW_FIELD_MAX, "Sem descrição")
+    categoria = _field(registro.get("categoria"), _PREVIEW_FIELD_MAX, "Sem categoria")
+    conta = _field(registro.get("conta"), _PREVIEW_FIELD_MAX, "Sem conta")
+    pagamento = _field(registro.get("metodo_pagamento"), _PREVIEW_FIELD_MAX, "Sem pagamento")
+    data = _field(registro.get("data"), 10, "Sem data")
+    return f"▪️ {data} | {_format_currency(registro.get('valor'))} | {descricao}\n   {categoria} · {conta} · {pagamento}\n"
+
+
+def formatar_previa_exclusao(filters, registros: List[Dict[str, Any]]):
+    """Confirmation text for a deletion: applied filters, faithful total and a bounded sample.
+
+    The count is always the full set; only the detail is a sample, and the text says so.
+    The sample shrinks if needed so the message always fits a Telegram message.
+    """
+    total = len(registros)
+    if total == 0:
+        return "❌ Nenhum registro encontrado com esses critérios para exclusão."
+
+    plural = "registro" if total == 1 else "registros"
+    head = (
+        "⚠️ **ATENÇÃO: EXCLUSÃO DE DADOS**\n"
+        f"Encontrei {total} {plural} para apagar.\n\n"
+        "🔎 **Filtros aplicados:**\n" + "\n".join(_delete_filter_lines(filters)) + "\n\n"
+    )
+
+    def build(shown):
+        body = "📝 **Registros:**\n" + "".join(_delete_record_lines(r) for r in registros[:shown])
+        if shown < total:
+            body += f"\n(amostra de {shown} de {total}; e mais {total - shown} não exibidos)\n"
+            confirm = f"\n🛑 Confirmar apaga os {total} registros, inclusive os não exibidos. Isso é permanente."
+        else:
+            confirm = f"\n🛑 Confirmar apaga {'o' if total == 1 else 'os'} {total} {plural}. Isso é permanente."
+        return head + body + confirm
+
+    shown = min(DELETE_PREVIEW_SAMPLE, total)
+    text = build(shown)
+    while len(text) > TELEGRAM_MESSAGE_LIMIT and shown > 0:
+        shown -= 1
+        text = build(shown)
+    return text

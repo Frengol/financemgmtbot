@@ -1,19 +1,21 @@
 from ai_service import extrair_tabela_recibo_gemini, processar_texto_com_llm, transcrever_audio
-from config import TRANSACTIONS_TABLE, logger, supabase
+from config import logger, supabase
 from core_logic import (
     aplicar_map_reduce,
-    formatar_relatorio_exclusao,
+    formatar_previa_exclusao,
     formatar_resumo_registros_salvos,
     gerar_mensagem_resumo,
     gerar_texto_edicao,
 )
 from db_repository import (
-    aplicar_filtros_query,
+    apagar_registros_por_ids,
+    buscar_candidatos_exclusao,
     consultar_no_banco,
     find_matching_expense,
     gravar_lote_no_banco_com_registros,
     inserir_no_banco,
     load_records_by_source_update_id,
+    normalizar_ids_exclusao,
 )
 from domain.duplicate_expense import (
     DUPLICATE_DECISIONS,
@@ -32,6 +34,8 @@ from domain.duplicate_expense import (
 )
 from domain.finance import (
     REGISTER_AMOUNT_REQUIRED_MESSAGE,
+    DeleteRefusal,
+    normalize_delete_request,
     normalize_receipt_payload,
     normalize_register_payload,
     single_register_missing_amount,
@@ -69,6 +73,21 @@ CHAT_MEDIA_RATE_WINDOW_SECONDS = 60
 CHAT_AI_RATE_LIMIT = 30
 CHAT_AI_RATE_WINDOW_SECONDS = 60
 DUPLICATE_ACTIONS = frozenset({SKIP_ACTION, SAVE_ACTION})
+DELETE_IDENTIFY_HINT = "o valor exato, a data, a categoria, a conta ou o método de pagamento"
+DELETE_REFUSAL_MESSAGES = {
+    "pedido_incompleto": f"⚠️ Não consegui identificar qual registro apagar. Diga novamente {DELETE_IDENTIFY_HINT} do que deseja excluir.",
+    "sem_criterio": f"⚠️ **Operação Recusada.**\nNão posso apagar a base inteira sem filtros! Diga-me {DELETE_IDENTIFY_HINT} da transação que deseja excluir.",
+    "data_invalida": "⚠️ Não entendi a data informada. Diga o dia completo (dia, mês e ano) do registro que deseja excluir.",
+    "mes_sem_ano": "⚠️ Você citou o mês sem o ano. Diga o mês e o ano do registro que deseja excluir.",
+    "periodo_invalido": "⚠️ Não entendi o período informado. Diga o mês e o ano (ou só o ano) do registro que deseja excluir.",
+    "periodo_conflitante": "⚠️ O dia e o mês/ano informados não combinam. Diga novamente a data do registro que deseja excluir.",
+    "valor_invalido": "⚠️ Não entendi o valor informado. Diga o valor exato do registro que deseja excluir.",
+    "categoria_invalida": "⚠️ Não reconheci a categoria informada. Diga uma categoria válida do registro que deseja excluir.",
+    "natureza_invalida": "⚠️ Não reconheci a natureza informada. Use Essencial, Lazer, Receita ou Outros.",
+    "tipo_invalido": "⚠️ Não entendi se é despesa ou receita. Diga qual dos dois deseja excluir.",
+    "campo_invalido": "⚠️ Não entendi a conta ou o método de pagamento informado. Diga novamente.",
+}
+DELETE_REFUSAL_FALLBACK = DELETE_REFUSAL_MESSAGES["pedido_incompleto"]
 
 
 def _normalize_dados_lote(dados_lote: object):
@@ -265,35 +284,39 @@ async def _resume_existing_effect(chat_id, source_update_id, progress_message_id
 
 
 async def iniciar_fluxo_exclusao(chat_id, filtros_exclusao, origin_user_id=None):
-    filtros_validos = {k: v for k, v in filtros_exclusao.items() if v}
-    if not filtros_validos:
-        await enviar_mensagem_telegram(chat_id, "⚠️ **Operação Recusada.**\nNão posso apagar a base inteira sem filtros! Diga-me o valor exato, a data, a categoria ou o método de pagamento da transação que deseja excluir.")
+    filters = normalize_delete_request(filtros_exclusao)
+    if isinstance(filters, DeleteRefusal):
+        await enviar_mensagem_telegram(chat_id, DELETE_REFUSAL_MESSAGES.get(filters.reason, DELETE_REFUSAL_FALLBACK))
         return
 
-    query_select = supabase.table(TRANSACTIONS_TABLE).select("id, data, valor, natureza, categoria, descricao, metodo_pagamento, conta")
-    resposta = aplicar_filtros_query(query_select, filtros_exclusao).execute()
-
-    registros = resposta.data
-    if not isinstance(registros, list) or not registros:
+    registros = buscar_candidatos_exclusao(filters)
+    if not registros:
         await enviar_mensagem_telegram(chat_id, "🔎 Não encontrei nenhum gasto com essas características para apagar.")
         return
 
-    ids_para_apagar = [r.get("id") for r in registros if isinstance(r, dict) and "id" in r]
+    if filters.escopo == "um" and len(registros) > 1:
+        await enviar_mensagem_telegram(
+            chat_id,
+            f"🔎 Encontrei {len(registros)} registros com essas características, e você pediu para apagar um só. "
+            "Informe outro critério (data, valor, conta, categoria ou método de pagamento) para eu identificar qual. "
+            "Nada foi apagado.",
+        )
+        return
+
     cache_record = store_pending_item(
-        {"ids": ids_para_apagar},
+        {"ids": [r["id"] for r in registros]},
         kind="delete_confirmation",
         origin_chat_id=chat_id,
         origin_user_id=origin_user_id,
     )
 
-    msg_alerta = formatar_relatorio_exclusao(registros)
     teclado = {
         "inline_keyboard": [
             [{"text": "✅ Sim, Apagar", "callback_data": f"confirmdel_{cache_record['id']}"}],
             [{"text": "❌ Cancelar", "callback_data": f"cancelar_{cache_record['id']}"}],
         ]
     }
-    await enviar_mensagem_telegram(chat_id, msg_alerta, teclado)
+    await enviar_mensagem_telegram(chat_id, formatar_previa_exclusao(filters, registros), teclado)
 
 
 async def processar_update_assincrono(
@@ -424,8 +447,18 @@ async def processar_update_assincrono(
                         ),
                     )
                     return
-                ids = payload_cache.get("ids", [])
-                supabase.table(TRANSACTIONS_TABLE).delete().in_("id", ids).execute()
+                ids = normalizar_ids_exclusao(payload_cache.get("ids"))
+                if ids is None:
+                    await editar_mensagem_telegram(
+                        chat_id,
+                        msg_id,
+                        with_error_reference(
+                            "❌ Pendência de exclusão inválida. Nada foi apagado.",
+                            update_id=source_update_id,
+                        ),
+                    )
+                    return
+                apagar_registros_por_ids(ids)
                 await editar_mensagem_telegram(chat_id, msg_id, f"🗑️ **Exclusão Efetuada!** ({len(ids)} registros apagados).")
                 delete_pending_item(cache_id)
 

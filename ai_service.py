@@ -326,8 +326,18 @@ async def processar_texto_com_llm(texto_usuario, *, source_update_id=None, worke
     2. "registrar_lote_pendente" (uma lista de itens via cupom fiscal, requer aprovação).
     3. "salvar_edicao_cupom" (se o texto do usuário iniciar com "--CUPOM_EDIT--", salva direto).
     4. "consultar" (saber quanto gastou, buscar histórico por natureza ou categoria). NÃO deduza mês ou ano a menos que explicitamente pedido.
-    5. "excluir" (apagar dados incorretos ou em massa). Se o usuário pedir para apagar, tente preencher `filtros_exclusao` com o MÁXIMO de detalhes que ele der.
+    5. "excluir" (apagar dados incorretos ou em massa). Se o usuário pedir para apagar, tente preencher `filtros_exclusao` com o MÁXIMO de detalhes que ele der, seguindo <regras_de_exclusao>.
     </diretriz_de_intencao>
+
+    <regras_de_exclusao>
+    - Preencha em `filtros_exclusao` SOMENTE o que o usuário disse. Não preencha data/mes/ano se o usuário não citar período: a regra de data de hoje NÃO vale para exclusão.
+    - "data" (YYYY-MM-DD) é um dia exato; calcule-o com o CONTEXTO TEMPORAL INJETADO ("hoje", "ontem", "dia 15"). Use "mes" e "ano" apenas para um mês ou um ano inteiros.
+    - "valor_exato": preencha quando o usuário citar um valor, inclusive 0. Deixe null se ele não citar valor.
+    - "tipo_transacao": "saida" para gastos/despesas, "entrada" para ganhos/receitas, null se não ficar claro. Ele só restringe a busca e sozinho não identifica um registro.
+    - "escopo": "um" quando o usuário fala de um único registro; "varios" SOMENTE se ele pedir claramente para apagar mais de um. Na dúvida, use "um".
+    - "pedido_incompleto": true se o usuário pedir para apagar mas não der informação suficiente para identificar o registro (por exemplo "apague aquele gasto", "apague tudo", "exclua"); caso contrário, false. Nunca herde filtros de mensagens anteriores.
+    - Fragmento isolado de correção ou seleção, como "só o de hoje", "esse mesmo" ou "o de ontem", mesmo sem o verbo excluir, é intenção "excluir" com "pedido_incompleto": true, para o sistema pedir a identificação de novo. Não registre, não consulte e não use mensagens anteriores para completar o pedido.
+    </regras_de_exclusao>
 
     <regras_de_categoria_estrita_anti_alucinacao>
     Você está PROIBIDO de inventar categorias. Use EXATAMENTE UMA destas:
@@ -347,7 +357,7 @@ async def processar_texto_com_llm(texto_usuario, *, source_update_id=None, worke
     - Apelidos de banco: "roxinho" = Nubank, "laranjinha" = Itaú.
     - Siglas de mercado: "SH" = Shampoo, "ESP" = Esponja.
     - Transcrições de áudio como "piques", "pics" ou "pis" SIGNIFICAM o método de pagamento "Pix".
-    - Cronologia: Se o usuário citar datas retroativas ("ontem", "anteontem", "dia 15"), CALCULE a data exata (YYYY-MM-DD) usando o CONTEXTO TEMPORAL INJETADO. Se omitido, use a data de hoje.
+    - Cronologia: Se o usuário citar datas retroativas ("ontem", "anteontem", "dia 15"), CALCULE a data exata (YYYY-MM-DD) usando o CONTEXTO TEMPORAL INJETADO. Em `dados_registro`, se o usuário omitir a data, use a data de hoje; essa regra não se aplica a `filtros_exclusao`.
     </regras_de_contexto_negocio>
     
     <regra_de_fluxo_de_caixa>
@@ -384,8 +394,12 @@ async def processar_texto_com_llm(texto_usuario, *, source_update_id=None, worke
       }},
       
       "filtros_exclusao": {{
+         "data": "YYYY-MM-DD" (somente se o usuário citar um dia),
          "mes": "MM", "ano": "YYYY", "natureza": "...", "categoria": "...", "conta": "...",
-         "valor_exato": float, "metodo_pagamento": "..."
+         "valor_exato": float, "metodo_pagamento": "...",
+         "tipo_transacao": "entrada" | "saida" | null,
+         "escopo": "um" | "varios",
+         "pedido_incompleto": true | false
       }}
     }}
     </formato_de_saida>

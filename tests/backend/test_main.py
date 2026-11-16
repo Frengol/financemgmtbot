@@ -1090,17 +1090,12 @@ class TestIniciarFluxoExclusao:
 
     @pytest.mark.asyncio
     async def test_no_records_found(self, mock_http_client):
-        mock_table = MagicMock()
-        config.supabase.table = MagicMock(return_value=mock_table)
-        mock_resp = MagicMock()
-        mock_resp.data = []
-
-        with patch.object(handlers, "aplicar_filtros_query", return_value=mock_resp):
-            mock_resp.execute.return_value = mock_resp
+        with patch.object(handlers, "buscar_candidatos_exclusao", return_value=[]):
             await handlers.iniciar_fluxo_exclusao(123, {"categoria": "Mercado"})
 
         call_payload = mock_http_client.post.call_args[1]["json"]
         assert "Não encontrei" in call_payload["text"]
+        assert "reply_markup" not in call_payload
 
     @pytest.mark.asyncio
     async def test_valid_flow_shows_confirmation(self, mock_http_client):
@@ -1111,20 +1106,16 @@ class TestIniciarFluxoExclusao:
             {"id": 1, "data": "2026-03-15", "valor": 50.0, "natureza": "Essencial", "categoria": "Mercado",
              "descricao": "Arroz", "metodo_pagamento": "Pix", "conta": "Nubank"}
         ]
-        mock_resp_select = MagicMock()
-        mock_resp_select.data = records
+        mock_table.insert.return_value.execute.return_value = MagicMock()
 
-        mock_resp_cache = MagicMock()
-        mock_table.insert.return_value.execute.return_value = mock_resp_cache
-
-        with patch.object(handlers, "aplicar_filtros_query", return_value=mock_resp_select):
-            mock_resp_select.execute.return_value = mock_resp_select
+        with patch.object(handlers, "buscar_candidatos_exclusao", return_value=records):
             await handlers.iniciar_fluxo_exclusao(123, {"valor_exato": 50.0})
 
         # Should have cached and sent confirmation keyboard
         assert mock_http_client.post.call_count >= 1
         call_payload = mock_http_client.post.call_args[1]["json"]
-        assert "APAGAR" in call_payload["text"]
+        assert "EXCLUSÃO DE DADOS" in call_payload["text"]
+        assert "R$ 50.00" in call_payload["text"]
         assert "reply_markup" in call_payload
 
 

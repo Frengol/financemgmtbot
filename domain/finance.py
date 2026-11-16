@@ -1,9 +1,10 @@
 import calendar
 import html
 import math
+import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 
@@ -493,6 +494,203 @@ def normalize_transaction_filters(filters: dict[str, Any] | None):
         tipo_transacao=transaction_type,
         date_from=date_from,
         date_to=date_to,
+    )
+
+
+DELETE_NATURES = VALID_FILTER_NATURES | {"Outros"}
+DELETE_SCOPES = {"um", "varios"}
+DELETE_TEXT_MAX_LENGTH = 120
+DELETE_YEAR_RANGE = (2000, 2100)
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+_DIGITS = re.compile(r"\d{1,4}")
+_CANONICAL_CATEGORIES = {normalize_lookup(category): category for _, category in CATEGORY_NATURE_MAP.values()}
+
+
+@dataclass(frozen=True)
+class DeleteFilters:
+    """Filtros já validados de um pedido de exclusão; o dia é exato e o período, inclusivo."""
+
+    valor_exato: float | None = None
+    data: str | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    categoria: str | None = None
+    natureza: str | None = None
+    conta: str | None = None
+    metodo_pagamento: str | None = None
+    tipo_transacao: str | None = None
+    escopo: str = "um"
+
+
+@dataclass(frozen=True)
+class DeleteRefusal:
+    """Pedido de exclusão que o backend não executa; `reason` é um código estável."""
+
+    reason: str
+
+
+_UNSET = object()
+
+
+def _informed(value: Any):
+    """None and blank text mean "not informed"; everything else, including 0, was informed."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return _UNSET
+    return value
+
+
+def _delete_amount(value: Any):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        if not re.fullmatch(r"\s*\d+(\.\d+)?\s*", value):
+            return None
+        value = value.strip()
+    elif not isinstance(value, (int, float)):
+        return None
+    amount = float(value)
+    return amount if math.isfinite(amount) and amount >= 0 else None
+
+
+def _delete_number(value: Any, minimum: int, maximum: int):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not _DIGITS.fullmatch(text):
+            return None
+        number = int(text)
+    elif isinstance(value, int):
+        number = value
+    else:
+        return None
+    return number if minimum <= number <= maximum else None
+
+
+def _delete_text(value: Any):
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text if len(text) <= DELETE_TEXT_MAX_LENGTH else None
+
+
+def _delete_period(raw: dict[str, Any]):
+    """Returns (data, date_from, date_to) or a refusal reason; never invents a period."""
+    raw_day = _informed(raw.get("data"))
+    raw_month = _informed(raw.get("mes"))
+    raw_year = _informed(raw.get("ano"))
+
+    day = None
+    if raw_day is not _UNSET:
+        if not isinstance(raw_day, str) or not _ISO_DAY.fullmatch(raw_day.strip()):
+            return "data_invalida"
+        try:
+            day = date.fromisoformat(raw_day.strip())
+        except ValueError:
+            return "data_invalida"
+
+    month = year = None
+    if raw_month is not _UNSET:
+        month = _delete_number(raw_month, 1, 12)
+        if month is None:
+            return "periodo_invalido"
+    if raw_year is not _UNSET:
+        year = _delete_number(raw_year, DELETE_YEAR_RANGE[0], DELETE_YEAR_RANGE[1])
+        if year is None:
+            return "periodo_invalido"
+    if month is not None and year is None:
+        return "mes_sem_ano"
+
+    if day is not None:
+        if (month is not None and month != day.month) or (year is not None and year != day.year):
+            return "periodo_conflitante"
+        return day.isoformat(), None, None
+    if month is not None:
+        last_day = calendar.monthrange(year, month)[1]
+        return None, f"{year}-{month:02d}-01", f"{year}-{month:02d}-{last_day:02d}"
+    if year is not None:
+        return None, f"{year}-01-01", f"{year}-12-31"
+    return None, None, None
+
+
+def normalize_delete_request(raw: Any):
+    """Strict, deterministic normalizer for deletion requests only.
+
+    Every informed field must normalize; one that does not is refused instead of
+    dropped, because a dropped filter would widen what gets deleted. A request needs
+    at least one identifying criterion: `tipo_transacao` only narrows the search.
+
+    `metodo_pagamento` containing `*` is refused: it is searched with ilike, where
+    PostgREST treats `*` as an alias of `%`, and escaping it is not safe because the
+    server may convert it anyway. `conta` is matched by equality, so `*` is fine there.
+    """
+    if not isinstance(raw, dict):
+        return DeleteRefusal("sem_criterio")
+    if raw.get("pedido_incompleto") is True:
+        return DeleteRefusal("pedido_incompleto")
+
+    amount = None
+    raw_amount = _informed(raw.get("valor_exato"))
+    if raw_amount is not _UNSET:
+        amount = _delete_amount(raw_amount)
+        if amount is None:
+            return DeleteRefusal("valor_invalido")
+
+    period = _delete_period(raw)
+    if isinstance(period, str):
+        return DeleteRefusal(period)
+    day, date_from, date_to = period
+
+    category = None
+    raw_category = _informed(raw.get("categoria"))
+    if raw_category is not _UNSET:
+        category = _CANONICAL_CATEGORIES.get(normalize_lookup(raw_category)) if isinstance(raw_category, str) else None
+        if category is None:
+            return DeleteRefusal("categoria_invalida")
+
+    nature = None
+    raw_nature = _informed(raw.get("natureza"))
+    if raw_nature is not _UNSET:
+        nature = str(raw_nature).strip().title() if isinstance(raw_nature, str) else None
+        if nature not in DELETE_NATURES:
+            return DeleteRefusal("natureza_invalida")
+
+    texts = {}
+    for field in ("conta", "metodo_pagamento"):
+        raw_text = _informed(raw.get(field))
+        if raw_text is _UNSET:
+            texts[field] = None
+            continue
+        texts[field] = _delete_text(raw_text)
+        if texts[field] is None or (field == "metodo_pagamento" and "*" in texts[field]):
+            return DeleteRefusal("campo_invalido")
+
+    transaction_type = None
+    raw_type = _informed(raw.get("tipo_transacao"))
+    if raw_type is not _UNSET:
+        if raw_type not in {"entrada", "saida"}:
+            return DeleteRefusal("tipo_invalido")
+        transaction_type = raw_type
+
+    raw_scope = raw.get("escopo")
+    scope = raw_scope.strip().lower() if isinstance(raw_scope, str) else ""
+    scope = scope if scope in DELETE_SCOPES else "um"
+
+    identifying = (amount, day, date_from, category, nature, texts["conta"], texts["metodo_pagamento"])
+    if all(value is None for value in identifying):
+        return DeleteRefusal("sem_criterio")
+
+    return DeleteFilters(
+        valor_exato=amount,
+        data=day,
+        date_from=date_from,
+        date_to=date_to,
+        categoria=category,
+        natureza=nature,
+        conta=texts["conta"],
+        metodo_pagamento=texts["metodo_pagamento"],
+        tipo_transacao=transaction_type,
+        escopo=scope,
     )
 
 
