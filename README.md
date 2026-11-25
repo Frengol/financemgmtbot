@@ -23,6 +23,10 @@ O FinanceMgmtBot recebe texto, audio ou foto pelo canal conversacional, transfor
 
 Quando uma despesa enviada por texto ou audio e identica a outra ja salva (mesmo dia, valor, conta e descricao, ignorando caixa, acentos e espacos), o bot mostra as duas lado a lado e pergunta antes de gravar: "Ja registrei — nao salvar" ou "E outro — salvar". So vale a primeira resposta, dada no chat e pelo remetente originais; sem resposta em 24 horas, nada e salvo. A regra e deliberadamente conservadora: nao trata valores aproximados, dias proximos nem descricoes apenas parecidas, e receitas, parcelados, fotos, lotes e recorrencias seguem o fluxo normal. O registro anterior nunca e alterado.
 
+## Corrigir Categorias Do Cupom
+
+No resumo de um cupom pendente, o botao **Editar categorias** abre a lista paginada dos itens, cada um com numero de posicao (que distingue itens de mesmo nome), valor liquido e categoria. Ao escolher um item e uma categoria, so a categoria daquele item muda: nomes, valores, descontos, conta e pagamento ficam como estavam, e o resumo volta reagrupado pelas regras atuais (o desconto global continua no maior grupo). Cada correcao e gravada cifrada no rascunho antes de aparecer, sem renovar o prazo de 24 horas, e nada vai para os gastos ate a aprovacao. Aprovar salva exatamente a versao exibida; um botao de um resumo anterior apenas mostra o resumo atual e pede nova confirmacao. Voltar nunca cancela, cancelar nada salva, e depois de iniciada a aprovacao (no Telegram ou no painel) o rascunho nao aceita mais edicao. Se a aprovacao comecar e nao terminar, qualquer botao do rascunho oferece **Concluir aprovacao**, que termina o salvamento sem duplicar nada. O botao **Editar** textual continua disponivel.
+
 ## Engenharia E Seguranca
 
 - **Autoridade no backend:** operacoes financeiras passam por validacao server-side, contratos de dados e persistencia controlada antes de afetar o historico.

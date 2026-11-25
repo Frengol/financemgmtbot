@@ -2,7 +2,7 @@ from collections import defaultdict
 from typing import Dict, Any, List
 from config import logger
 from domain.duplicate_expense import escape_markdown
-from domain.finance import aggregate_receipt_items
+from domain.finance import aggregate_receipt_items, normalize_receipt_payload
 
 def _format_currency(value):
     try:
@@ -42,6 +42,34 @@ def gerar_mensagem_resumo(cache_id, dados_lote, grupos, total_final, desc_global
         
     msg += f"*\nTotal Líquido Validado: R$ {total_final:,.2f}*"
     return msg
+
+def gerar_resumo_cupom(cache_id, payload):
+    """Summary of a stored receipt; works on a normalized copy so the stored payload is never mutated."""
+    dados_lote = normalize_receipt_payload(payload)
+    grupos, total_final, desc_global = aplicar_map_reduce(dados_lote)
+    return gerar_mensagem_resumo(cache_id, dados_lote, grupos, total_final, desc_global)
+
+def gerar_lista_itens_cupom(linhas, pagina, paginas, total_itens):
+    msg = f"🏷️ **Editar categorias** — {total_itens} itens (página {pagina + 1}/{paginas})\nEscolha o item para corrigir:\n\n"
+    for linha in linhas:
+        msg += f"#{linha.position} {escape_markdown(linha.name)} — {_format_currency(linha.net_value)} — {escape_markdown(linha.category)}\n"
+    return msg
+
+def gerar_tela_item_cupom(linha):
+    return (
+        f"🏷️ **Item #{linha.position}**\n"
+        f"📝 {escape_markdown(linha.name)}\n"
+        f"💰 Líquido: {_format_currency(linha.net_value)}\n"
+        f"📂 Categoria: {escape_markdown(linha.category)}\n"
+        f"📊 Natureza: {escape_markdown(linha.nature)} (definida pela categoria)"
+    )
+
+def gerar_seletor_categoria(linha):
+    return (
+        f"🏷️ **Item #{linha.position}** — {escape_markdown(linha.name)}\n"
+        f"Categoria atual: {escape_markdown(linha.category)} · {escape_markdown(linha.nature)}\n\n"
+        "Escolha a nova categoria (a natureza acompanha a categoria):"
+    )
 
 def formatar_resumo_registros_salvos(registros: List[Dict[str, Any]]):
     if not registros:

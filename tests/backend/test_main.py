@@ -1459,7 +1459,15 @@ class TestCallbackQuery:
 
         mock_table_cache = MagicMock()
         mock_resp_cache = MagicMock()
-        mock_resp_cache.data = [{"payload": cache_data}]
+        mock_resp_cache.data = [{
+            "id": "CACHE",
+            "payload": cache_data,
+            "origin_chat_id": "123",
+            "origin_user_id": "77",
+            "source_update_id": 1999,
+            "payload_revision": 0,
+            "approval_claimed_revision": 0 if acao == "aprovar" else None,
+        }]
         mock_table_cache.select.return_value.eq.return_value.execute.return_value = mock_resp_cache
         mock_table_cache.delete.return_value.eq.return_value.execute.return_value = MagicMock()
 
@@ -1476,7 +1484,16 @@ class TestCallbackQuery:
                 return mock_table_gastos
             return MagicMock()
 
+        rpc_results = {
+            "claim_receipt_approval": [{"claim_status": "claimed", "claim_revision": 0}],
+            "discard_receipt_pending": "discarded",
+        }
+
+        def rpc_switch(name, params):
+            return MagicMock(execute=MagicMock(return_value=MagicMock(data=rpc_results[name])))
+
         config.supabase.table = MagicMock(side_effect=table_switch)
+        config.supabase.rpc = MagicMock(side_effect=rpc_switch)
         return mock_table_gastos, mock_table_cache
 
     @pytest.mark.asyncio
@@ -1490,7 +1507,7 @@ class TestCallbackQuery:
         update = {
             "update_id": 2001,
             "callback_query": {
-                "id": "cb1", "data": "aprovar_CACHE1",
+                "id": "cb1", "from": {"id": 77}, "data": "aprovar_CACHE1",
                 "message": {"chat": {"id": 123}, "message_id": 456},
             },
         }
@@ -1520,7 +1537,7 @@ class TestCallbackQuery:
         update = {
             "update_id": 2002,
             "callback_query": {
-                "id": "cb2", "data": "cancelar_CACHE2",
+                "id": "cb2", "from": {"id": 77}, "data": "cancelar_CACHE2",
                 "message": {"chat": {"id": 123}, "message_id": 456},
             },
         }
@@ -1558,7 +1575,7 @@ class TestCallbackQuery:
         update = {
             "update_id": 2004,
             "callback_query": {
-                "id": "cb4", "data": "editar_CACHE4",
+                "id": "cb4", "from": {"id": 77}, "data": "editar_CACHE4",
                 "message": {"chat": {"id": 123}, "message_id": 500},
             },
         }

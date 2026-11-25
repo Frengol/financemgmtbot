@@ -219,11 +219,14 @@ supabase/migrations/20260412_remove_recurring_expense_description.sql
 supabase/migrations/20260815_telegram_update_reliability.sql
 supabase/migrations/20260908_telegram_ocr_fallback_recovery.sql
 supabase/migrations/20261111_duplicate_expense_confirmation.sql
+supabase/migrations/20261124_receipt_category_edit.sql
 ```
 
 Se o Supabase avisar que algum objeto ja existe, confira a mensagem. Muitos comandos usam `if not exists` e podem ser reexecutados, mas erros de tabela inexistente normalmente indicam que a etapa das tabelas base foi pulada.
 
 Em uma instalacao ja existente, aplique `20261111_duplicate_expense_confirmation.sql` antes de publicar o backend que traz o aviso de gasto repetido: esse codigo le a coluna nova em toda mensagem do Telegram e, sem a migration, nenhuma mensagem e processada.
+
+Da mesma forma, aplique `20261124_receipt_category_edit.sql` antes de publicar o backend com a edicao de categorias do cupom: o runtime passa a ler `payload_revision` e `approval_claimed_revision` em toda pendencia e a aprovar cupons pelos RPCs novos. A migration e aditiva e reaplicavel; as pendencias existentes ficam na revisao 0, sem aprovacao iniciada.
 
 ## 7. Autorizar o admin no banco
 
@@ -808,9 +811,9 @@ python -m telegram_poller
 
 As tabelas `webhook_idempotencia` e `cache_aprovacao` nao tem variante de QA: os updates do bot de teste tambem sao registrados nelas.
 
-## 26. Testes opcionais de Postgres do aviso de gasto repetido
+## 26. Testes opcionais de Postgres do aviso de gasto repetido e da edicao de categorias
 
-Os testes de aplicacao/reaplicacao da migration e de corrida real da decisao rodam em um cluster Postgres temporario, ativado pela variavel `DUPLICATE_PG_BIN`. Ela deve apontar para o diretorio de binarios do PostgreSQL, que precisa conter `initdb`, `pg_ctl` e `psql`:
+Os testes de aplicacao/reaplicacao das migrations, permissoes, CAS de revisao e corridas reais (decisao do aviso; edicao, trava de aprovacao e descarte do cupom) rodam em um cluster Postgres temporario, ativado pela variavel `DUPLICATE_PG_BIN`. Ela deve apontar para o diretorio de binarios do PostgreSQL, que precisa conter `initdb`, `pg_ctl` e `psql`:
 
 ```bash
 DUPLICATE_PG_BIN=/caminho/postgresql/bin make test-backend-coverage PYTHON=.venv/bin/python

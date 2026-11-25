@@ -1,4 +1,5 @@
 import calendar
+import copy
 import html
 import math
 import re
@@ -369,6 +370,79 @@ def aggregate_receipt_items(receipt: dict[str, Any] | None):
 
     total = sum(group["valor"] for group in groups.values())
     return ReceiptAggregation(groups, total, global_discount, discount_neutralized)
+
+
+def _receipt_item_categories():
+    seen: dict[str, str] = {}
+    for nature, category in CATEGORY_NATURE_MAP.values():
+        if nature != "Receita" and category not in seen:
+            seen[category] = nature
+    return tuple(seen.items())
+
+
+# Expense categories offered when correcting a receipt item: canonical, without income
+# or duplicated aliases. The order is part of the callback contract (index travels in it).
+RECEIPT_ITEM_CATEGORIES = _receipt_item_categories()
+RECEIPT_EDIT_PAGE_SIZE = 8
+
+
+@dataclass(frozen=True)
+class ReceiptItemRow:
+    position: int
+    name: str
+    net_value: float
+    category: str
+    nature: str
+
+
+def receipt_item_rows(receipt: Any):
+    """Items of a pending receipt with their stable 1-based position; None when the payload is unusable."""
+    if not isinstance(receipt, dict):
+        return None
+    items = receipt.get("itens")
+    if not isinstance(items, list) or not items or not all(isinstance(item, dict) for item in items):
+        return None
+    rows = []
+    for position, item in enumerate(items, start=1):
+        nature, category = infer_transaction_nature(item.get("categoria"))
+        net_value = max(0.0, _safe_float(item.get("valor_bruto")) - _safe_float(item.get("desconto_item")))
+        rows.append(ReceiptItemRow(position, clean_text(item.get("nome"), 120, "Item") or "Item", net_value, category, nature))
+    return tuple(rows)
+
+
+def paginate_receipt_rows(rows: tuple[ReceiptItemRow, ...], page: int, size: int = RECEIPT_EDIT_PAGE_SIZE):
+    """Returns (rows of the page, clamped page, number of pages)."""
+    pages = max(1, math.ceil(len(rows) / size))
+    page = min(max(page, 0), pages - 1)
+    return rows[page * size:(page + 1) * size], page, pages
+
+
+def _strict_int(value: Any):
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def set_receipt_item_category(receipt: Any, position: Any, category_index: Any):
+    """Copy of the raw receipt where only ``itens[position-1]["categoria"]`` changes.
+
+    Returns None when the item already has that effective category (nothing to write).
+    Every other field (names, gross values, discounts, account, payment) stays as stored.
+    """
+    rows = receipt_item_rows(receipt)
+    if rows is None:
+        raise DomainValidationError("Receipt payload is invalid.")
+    position = _strict_int(position)
+    if position is None or not 1 <= position <= len(rows):
+        raise DomainValidationError("Receipt item position is invalid.")
+    category_index = _strict_int(category_index)
+    if category_index is None or not 0 <= category_index < len(RECEIPT_ITEM_CATEGORIES):
+        raise DomainValidationError("Receipt item category is invalid.")
+
+    category = RECEIPT_ITEM_CATEGORIES[category_index][0]
+    if rows[position - 1].category == category:
+        return None
+    updated = copy.deepcopy(receipt)
+    updated["itens"][position - 1]["categoria"] = category
+    return updated
 
 
 def build_receipt_transaction_records(receipt: dict[str, Any] | None, reference_date: str):

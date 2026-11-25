@@ -12,6 +12,15 @@ from admin_runtime import approvals as admin_approvals
 from admin_runtime import auth as admin_auth
 from admin_runtime import transactions as admin_transactions
 
+CLAIMED_RECEIPT = {
+    "id": "cache-1",
+    "kind": "receipt_batch",
+    "payload": {"itens": []},
+    "source_update_id": 701,
+    "payload_revision": 0,
+    "approval_claimed_revision": 0,
+}
+
 
 class TestAdminApiHelperCoverage:
     def test_field_summary_and_user_lookup_helpers(self):
@@ -458,8 +467,8 @@ class TestAdminApiHelperCoverage:
 
         async with main.app.test_request_context("/api/admin/cache-aprovacao/cache-1/approve", method="POST"):
             with patch.object(admin_approvals, "autenticar_admin_request", return_value=(actor, None)), \
-                 patch.object(admin_approvals, "load_pending_item", return_value={"id": "cache-1", "kind": "receipt_batch", "payload": {"itens": []}}), \
-                 patch.object(admin_approvals, "pending_item_expired", return_value=False), \
+                 patch.object(admin_approvals, "load_pending_item", return_value=CLAIMED_RECEIPT), \
+                 patch.object(admin_approvals, "claim_receipt_approval_admin", return_value=("claimed", 0)), \
                  patch.object(admin_approvals, "gravar_lote_no_banco", return_value=(3, 45.5)), \
                  patch.object(admin_approvals, "delete_pending_item") as delete_pending, \
                  patch.object(admin_approvals, "registrar_auditoria_admin") as registrar:
@@ -480,8 +489,8 @@ class TestAdminApiHelperCoverage:
 
         async with main.app.test_request_context("/api/admin/cache-aprovacao/cache-1/approve", method="POST"):
             with patch.object(admin_approvals, "autenticar_admin_request", return_value=(actor, None)), \
-                 patch.object(admin_approvals, "load_pending_item", return_value={"id": "cache-1", "kind": "receipt_batch", "payload": {"itens": []}}), \
-                 patch.object(admin_approvals, "pending_item_expired", return_value=False), \
+                 patch.object(admin_approvals, "load_pending_item", return_value=CLAIMED_RECEIPT), \
+                 patch.object(admin_approvals, "claim_receipt_approval_admin", return_value=("claimed", 0)), \
                  patch.object(admin_approvals, "gravar_lote_no_banco", side_effect=RuntimeError("boom")):
                 approve_unexpected = admin_approvals.aprovar_cache_admin("cache-1")
         assert approve_unexpected.status_code == 503

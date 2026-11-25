@@ -24,8 +24,11 @@ MAX_TELEGRAM_AUDIO_BYTES = int(os.environ.get("MAX_TELEGRAM_AUDIO_BYTES") or 12_
 _RATE_LIMIT_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
 PENDING_SELECT_FIELDS = (
     "id, kind, payload_ciphertext, payload_key_version, preview_json, created_at, expires_at, "
-    "origin_chat_id, origin_user_id, source_update_id, duplicate_decision, payload"
+    "origin_chat_id, origin_user_id, source_update_id, duplicate_decision, payload, "
+    "payload_revision, approval_claimed_revision"
 )
+RECEIPT_CLAIM_STATUSES = frozenset({"claimed", "already_claimed", "stale", "expired", "unavailable"})
+RECEIPT_DISCARD_STATUSES = frozenset({"discarded", "claimed", "unavailable"})
 LEGACY_PENDING_KINDS = frozenset({"receipt_batch", "delete_confirmation"})
 DUPLICATE_CLEARED_PREVIEW = {"summary": "Confirmação concluída"}
 
@@ -199,6 +202,7 @@ def store_pending_item(
                 "source_update_id": persisted.get("source_update_id"),
                 "origin_user_id": persisted.get("origin_user_id"),
                 "duplicate_decision": persisted.get("duplicate_decision"),
+                "payload_revision": persisted.get("payload_revision"),
             }
     return {
         "id": record_id,
@@ -367,6 +371,124 @@ def clear_duplicate_snapshot(cache_id: str):
     )
     if not getattr(response, "data", None):
         raise RuntimeError("Duplicate confirmation snapshot was not cleared.")
+
+
+def _non_negative_int(value: Any):
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def pending_revision(item: dict[str, Any] | None):
+    """Stored payload revision of a pending receipt; None when absent or malformed."""
+    return _non_negative_int(item.get("payload_revision")) if isinstance(item, dict) else None
+
+
+def receipt_pending_expired_strict(item: dict[str, Any] | None):
+    """Deadline check for receipt edits and claims; a missing or unreadable deadline counts as expired."""
+    raw = item.get("expires_at") if isinstance(item, dict) else None
+    if not isinstance(raw, str) or not raw:
+        return True
+    try:
+        expires_at = _parse_timestamp(raw)
+    except ValueError:
+        return True
+    return expires_at <= get_brasilia_time()
+
+
+def _receipt_rpc_clock():
+    # Receipt deadlines are stored with the Brasilia wall clock (see store_pending_item),
+    # so the database compares them with the same clock instead of its own now().
+    return get_brasilia_time().isoformat()
+
+
+def _single_rpc_value(data: Any):
+    if isinstance(data, list):
+        return data[0] if len(data) == 1 else None
+    return data
+
+
+def edit_receipt_pending(
+    cache_id: str,
+    chat_id: int | str | None,
+    user_id: int | str | None,
+    expected_revision: int,
+    payload: dict[str, Any],
+):
+    """Atomically replace the encrypted payload of a bound, open receipt at ``expected_revision``.
+
+    The database re-checks kind, chat, user, deadline, revision and that no approval
+    started, and never renews the deadline. Returns the new revision or None.
+    """
+    if chat_id is None or user_id is None or _non_negative_int(expected_revision) is None:
+        return None
+    response = supabase.rpc(
+        "edit_receipt_pending",
+        {
+            "p_id": cache_id,
+            "p_chat_id": str(chat_id),
+            "p_user_id": str(user_id),
+            "p_expected_revision": expected_revision,
+            "p_ciphertext": encrypt_pending_payload(payload),
+            "p_preview": build_pending_preview("receipt_batch", payload),
+            "p_now": _receipt_rpc_clock(),
+        },
+    ).execute()
+    revision = _non_negative_int(_single_rpc_value(getattr(response, "data", None)))
+    return revision if revision else None
+
+
+def _parse_claim(data: Any):
+    row = _single_rpc_value(data)
+    if not isinstance(row, dict) or row.get("claim_status") not in RECEIPT_CLAIM_STATUSES:
+        return "unavailable", None
+    status = row["claim_status"]
+    if status in ("expired", "unavailable"):
+        return status, None
+    revision = _non_negative_int(row.get("claim_revision"))
+    return (status, revision) if revision is not None else ("unavailable", None)
+
+
+def claim_receipt_approval(cache_id: str, chat_id: int | str | None, user_id: int | str | None, revision: int):
+    """Lock the approval of a bound receipt at ``revision``; returns (status, revision)."""
+    if chat_id is None or user_id is None or _non_negative_int(revision) is None:
+        return "unavailable", None
+    response = supabase.rpc(
+        "claim_receipt_approval",
+        {
+            "p_id": cache_id,
+            "p_chat_id": str(chat_id),
+            "p_user_id": str(user_id),
+            "p_revision": revision,
+            "p_now": _receipt_rpc_clock(),
+        },
+    ).execute()
+    return _parse_claim(getattr(response, "data", None))
+
+
+def claim_receipt_approval_admin(cache_id: str):
+    """Lock the approval of the current revision for the authenticated admin panel."""
+    response = supabase.rpc("claim_receipt_approval_admin", {"p_id": cache_id, "p_now": _receipt_rpc_clock()}).execute()
+    return _parse_claim(getattr(response, "data", None))
+
+
+def _parse_discard(data: Any):
+    status = _single_rpc_value(data)
+    return status if status in RECEIPT_DISCARD_STATUSES else "unavailable"
+
+
+def discard_receipt_pending(cache_id: str, chat_id: int | str | None, user_id: int | str | None):
+    """Delete a bound receipt unless its approval started: discarded, claimed or unavailable."""
+    if chat_id is None or user_id is None:
+        return "unavailable"
+    response = supabase.rpc(
+        "discard_receipt_pending",
+        {"p_id": cache_id, "p_chat_id": str(chat_id), "p_user_id": str(user_id)},
+    ).execute()
+    return _parse_discard(getattr(response, "data", None))
+
+
+def discard_receipt_pending_admin(cache_id: str):
+    response = supabase.rpc("discard_receipt_pending_admin", {"p_id": cache_id}).execute()
+    return _parse_discard(getattr(response, "data", None))
 
 
 def allow_request(scope: str, key: str, *, limit: int, window_seconds: int):

@@ -440,8 +440,18 @@ class TestAdminRoutes:
                 "itens": [{"nome": "Cafe", "valor_bruto": 12, "desconto_item": 0}],
             },
             "payload_ciphertext": None,
+            "source_update_id": 702,
+            "payload_revision": 0,
+            "approval_claimed_revision": 0,
         }])
         mock_cache.delete.return_value.eq.return_value.execute.return_value = MagicMock()
+        rpc_results = {
+            "claim_receipt_approval_admin": [{"claim_status": "claimed", "claim_revision": 0}],
+            "discard_receipt_pending_admin": "discarded",
+        }
+
+        def rpc_switch(name, params):
+            return MagicMock(execute=MagicMock(return_value=MagicMock(data=rpc_results[name])))
         mock_audit = MagicMock()
         mock_audit.insert.return_value.execute.return_value = MagicMock()
 
@@ -458,7 +468,7 @@ class TestAdminRoutes:
             with self._authorized_admin() as headers, \
                  patch.object(admin_transactions, "supabase", MagicMock(table=MagicMock(side_effect=table_switch))), \
                  patch.object(admin_approvals, "supabase", MagicMock(table=MagicMock(side_effect=table_switch))), \
-                 patch.object(security, "supabase", MagicMock(table=MagicMock(side_effect=table_switch))):
+                 patch.object(security, "supabase", MagicMock(table=MagicMock(side_effect=table_switch), rpc=MagicMock(side_effect=rpc_switch))):
                 create_resp = await client.post(
                     "/api/admin/gastos",
                     headers=headers,

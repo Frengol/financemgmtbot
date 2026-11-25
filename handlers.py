@@ -1,10 +1,17 @@
+import re
+from dataclasses import dataclass
+
 from ai_service import extrair_tabela_recibo_gemini, processar_texto_com_llm, transcrever_audio
 from config import logger, supabase
 from core_logic import (
     aplicar_map_reduce,
     formatar_previa_exclusao,
     formatar_resumo_registros_salvos,
+    gerar_lista_itens_cupom,
     gerar_mensagem_resumo,
+    gerar_resumo_cupom,
+    gerar_seletor_categoria,
+    gerar_tela_item_cupom,
     gerar_texto_edicao,
 )
 from db_repository import (
@@ -33,11 +40,17 @@ from domain.duplicate_expense import (
     snapshot_matched_record,
 )
 from domain.finance import (
+    RECEIPT_EDIT_PAGE_SIZE,
+    RECEIPT_ITEM_CATEGORIES,
     REGISTER_AMOUNT_REQUIRED_MESSAGE,
     DeleteRefusal,
+    DomainValidationError,
     normalize_delete_request,
     normalize_receipt_payload,
     normalize_register_payload,
+    paginate_receipt_rows,
+    receipt_item_rows,
+    set_receipt_item_category,
     single_register_missing_amount,
 )
 from security import (
@@ -45,16 +58,21 @@ from security import (
     MAX_TELEGRAM_AUDIO_BYTES,
     MAX_TELEGRAM_IMAGE_BYTES,
     allow_request,
+    claim_receipt_approval,
     clear_duplicate_snapshot,
     decide_duplicate_expense,
     delete_pending_item,
+    discard_receipt_pending,
     duplicate_item_expired,
+    edit_receipt_pending,
     load_pending_item,
     load_pending_item_by_source_update_id,
     mark_pending_summary_sent,
     matches_pending_origin,
     matches_pending_origin_exact,
     pending_item_expired,
+    pending_revision,
+    receipt_pending_expired_strict,
     store_pending_item,
 )
 from telegram_service import (
@@ -135,16 +153,300 @@ async def _deliver_final_message(chat_id, progress_message_id, text, reply_marku
     return await enviar_mensagem_telegram(chat_id, text, reply_markup)
 
 
-def _receipt_approval_keyboard(cache_id):
+# Receipt category editor callbacks: "<action>:<number>[:<category>]:<cache id>".
+# ":" never appears in legacy callbacks ("<action>_<id>") nor in pending ids, so these
+# are parsed before the legacy split. The number is a revision (ca, ce), a page (cl) or
+# an item position (ci, cs, cc); cv ignores it. Telegram caps callback_data at 64 bytes.
+RECEIPT_CALLBACK_MAX_BYTES = 64
+_RECEIPT_CALLBACK = re.compile(
+    r"(ce|cl|ci|cs|cc|cv|ca):(0|[1-9][0-9]{0,8})(?::(0|[1-9][0-9]?))?:([A-Za-z0-9_-]{1,64})"
+)
+RECEIPT_UNAVAILABLE_MESSAGE = "❌ Este rascunho não está mais disponível para edição."
+RECEIPT_GONE_MESSAGE = "❌ Rascunho expirado ou já processado."
+RECEIPT_APPROVAL_STARTED_MESSAGE = (
+    "⏳ A aprovação deste rascunho já foi iniciada e ainda não terminou; ele não pode mais ser alterado. "
+    "Toque em Concluir aprovação para terminar."
+)
+RECEIPT_ALREADY_APPROVED_MESSAGE = "✅ Este cupom já foi aprovado."
+RECEIPT_NOT_PENDING_MESSAGE = "ℹ️ Este rascunho não está mais pendente: ele já foi aprovado, cancelado ou expirou."
+RECEIPT_STALE_MESSAGE = "⚠️ O rascunho mudou desde aquela tela. Confira o resumo atual e aprove novamente."
+
+
+@dataclass(frozen=True)
+class ReceiptCallback:
+    action: str
+    number: int
+    category: int | None
+    cache_id: str
+
+
+def _receipt_callback(action, number, cache_id, category=None):
+    middle = f"{number}" if category is None else f"{number}:{category}"
+    return f"{action}:{middle}:{cache_id}"
+
+
+def _parse_receipt_callback(data):
+    if not isinstance(data, str) or len(data.encode("utf-8")) > RECEIPT_CALLBACK_MAX_BYTES:
+        return None
+    match = _RECEIPT_CALLBACK.fullmatch(data)
+    if not match:
+        return None
+    action, number, category, cache_id = match.groups()
+    if (action == "cc") != (category is not None):
+        return None
+    return ReceiptCallback(action, int(number), int(category) if category is not None else None, cache_id)
+
+
+def _receipt_approval_keyboard(cache_id, revision=0):
     return {
         "inline_keyboard": [
-            [{"text": "✅ Aprovar", "callback_data": f"aprovar_{cache_id}"}],
+            [{"text": "✅ Aprovar", "callback_data": _receipt_callback("ca", revision, cache_id)}],
+            [{"text": "🏷️ Editar categorias", "callback_data": _receipt_callback("ce", revision, cache_id)}],
             [
                 {"text": "✏️ Editar", "callback_data": f"editar_{cache_id}"},
                 {"text": "❌ Cancelar", "callback_data": f"cancelar_{cache_id}"},
             ],
         ]
     }
+
+
+def _receipt_finish_approval_keyboard(cache_id, revision=None):
+    # The claim RPC answers "already_claimed" with the locked revision whatever revision the button carries.
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ Concluir aprovação", "callback_data": _receipt_callback("ca", revision or 0, cache_id)}],
+        ]
+    }
+
+
+async def _explain_receipt_blocked(chat_id, msg_id, item, message):
+    """Edit the message with why the draft cannot change; a started approval offers to finish it."""
+    keyboard = None
+    if message == RECEIPT_APPROVAL_STARTED_MESSAGE:
+        revision = item.get("approval_claimed_revision")
+        keyboard = _receipt_finish_approval_keyboard(item["id"], revision if revision is not None else pending_revision(item))
+    await editar_mensagem_telegram(chat_id, msg_id, message, keyboard)
+
+
+def _button_label(text, limit=40):
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _receipt_list_screen(cache_id, rows, page):
+    page_rows, page, pages = paginate_receipt_rows(rows, page)
+    keyboard = [
+        [{"text": _button_label(f"#{row.position} {row.name}"), "callback_data": _receipt_callback("ci", row.position, cache_id)}]
+        for row in page_rows
+    ]
+    navigation = []
+    if page > 0:
+        navigation.append({"text": "◀️ Anteriores", "callback_data": _receipt_callback("cl", page - 1, cache_id)})
+    if page < pages - 1:
+        navigation.append({"text": "Próximos ▶️", "callback_data": _receipt_callback("cl", page + 1, cache_id)})
+    if navigation:
+        keyboard.append(navigation)
+    keyboard.append([{"text": "↩️ Voltar ao resumo", "callback_data": _receipt_callback("cv", 0, cache_id)}])
+    return gerar_lista_itens_cupom(page_rows, page, pages, len(rows)), {"inline_keyboard": keyboard}
+
+
+def _receipt_item_screen(cache_id, row):
+    keyboard = [
+        [{"text": "🏷️ Alterar categoria", "callback_data": _receipt_callback("cs", row.position, cache_id)}],
+        [{"text": "⬅️ Voltar à lista", "callback_data": _receipt_callback("cl", (row.position - 1) // RECEIPT_EDIT_PAGE_SIZE, cache_id)}],
+        [{"text": "↩️ Voltar ao resumo", "callback_data": _receipt_callback("cv", 0, cache_id)}],
+    ]
+    return gerar_tela_item_cupom(row), {"inline_keyboard": keyboard}
+
+
+def _receipt_category_screen(cache_id, row):
+    options = []
+    for index, (category, nature) in enumerate(RECEIPT_ITEM_CATEGORIES):
+        mark = "✓ " if category == row.category else ""
+        options.append({
+            "text": f"{mark}{category} · {nature}",
+            "callback_data": _receipt_callback("cc", row.position, cache_id, index),
+        })
+    keyboard = [options[index:index + 2] for index in range(0, len(options), 2)]
+    keyboard.append([{"text": "⬅️ Voltar ao item", "callback_data": _receipt_callback("ci", row.position, cache_id)}])
+    return gerar_seletor_categoria(row), {"inline_keyboard": keyboard}
+
+
+def _receipt_editable_rows(item):
+    """Rows of a receipt that can still be edited, or the message explaining why not."""
+    if item.get("approval_claimed_revision") is not None:
+        return None, RECEIPT_APPROVAL_STARTED_MESSAGE
+    # Approval needs the source update identity, so a draft without it is not offered for correction.
+    if item.get("source_update_id") is None:
+        return None, RECEIPT_UNAVAILABLE_MESSAGE
+    if receipt_pending_expired_strict(item) or pending_revision(item) is None:
+        return None, RECEIPT_UNAVAILABLE_MESSAGE
+    rows = receipt_item_rows(item.get("payload"))
+    if rows is None:
+        return None, RECEIPT_UNAVAILABLE_MESSAGE
+    return rows, None
+
+
+async def _show_receipt_summary(chat_id, msg_id, cache_id, payload, revision, prefix=""):
+    text = gerar_resumo_cupom(cache_id, payload)
+    await editar_mensagem_telegram(chat_id, msg_id, f"{prefix}\n\n{text}" if prefix else text, _receipt_approval_keyboard(cache_id, revision))
+
+
+async def _change_receipt_item_category(item, callback, rows, chat_id, msg_id, origin_user_id, source_update_id):
+    cache_id = item["id"]
+    try:
+        updated = set_receipt_item_category(item.get("payload"), callback.number, callback.category)
+    except DomainValidationError:
+        text, keyboard = _receipt_list_screen(cache_id, rows, 0)
+        await editar_mensagem_telegram(chat_id, msg_id, text, keyboard)
+        return
+
+    revision = pending_revision(item)
+    payload = item.get("payload")
+    if updated is not None:
+        # The correction is persisted before anything is shown. A lost race (another
+        # edit) is retried once on the reloaded version, since the choice is absolute.
+        new_revision = edit_receipt_pending(cache_id, chat_id, origin_user_id, revision, updated)
+        if new_revision is None:
+            item = load_pending_item(cache_id)
+            if not item:
+                await editar_mensagem_telegram(chat_id, msg_id, RECEIPT_UNAVAILABLE_MESSAGE)
+                return
+            _, error = _receipt_editable_rows(item)
+            if error:
+                await _explain_receipt_blocked(chat_id, msg_id, item, error)
+                return
+            revision = pending_revision(item)
+            payload = item.get("payload")
+            updated = set_receipt_item_category(payload, callback.number, callback.category)
+            if updated is not None:
+                new_revision = edit_receipt_pending(cache_id, chat_id, origin_user_id, revision, updated)
+                if new_revision is None:
+                    await editar_mensagem_telegram(chat_id, msg_id, RECEIPT_UNAVAILABLE_MESSAGE)
+                    return
+        if updated is not None:
+            payload, revision = updated, new_revision
+            logger.info({
+                "event": "receipt_item_category_changed",
+                "cache_id": cache_id,
+                "revision": revision,
+                "update_id": source_update_id,
+            })
+
+    category, nature = RECEIPT_ITEM_CATEGORIES[callback.category]
+    prefix = f"✅ Item #{callback.number}: {category} ({nature})."
+    await _show_receipt_summary(chat_id, msg_id, cache_id, payload, revision, prefix)
+
+
+async def _approve_receipt(item, revision, chat_id, msg_id, origin_user_id, source_update_id, stage_callback, progress_message_id):
+    """Approve exactly the revision the owner saw; an outdated button only shows the current summary."""
+    cache_id = item["id"]
+    if item.get("source_update_id") is None or not isinstance(item.get("payload"), dict):
+        await editar_mensagem_telegram(chat_id, msg_id, RECEIPT_UNAVAILABLE_MESSAGE)
+        return
+
+    status, locked_revision = claim_receipt_approval(cache_id, chat_id, origin_user_id, revision)
+    if status == "stale":
+        current = load_pending_item(cache_id)
+        if not current or pending_revision(current) is None or receipt_item_rows(current.get("payload")) is None:
+            await editar_mensagem_telegram(chat_id, msg_id, RECEIPT_UNAVAILABLE_MESSAGE)
+            return
+        await _show_receipt_summary(
+            chat_id, msg_id, cache_id, current["payload"], pending_revision(current), RECEIPT_STALE_MESSAGE
+        )
+        logger.info({"event": "receipt_approval_stale", "cache_id": cache_id, "update_id": source_update_id})
+        return
+    if status == "expired":
+        await editar_mensagem_telegram(chat_id, msg_id, with_error_reference(RECEIPT_GONE_MESSAGE, update_id=source_update_id))
+        return
+    if status not in ("claimed", "already_claimed"):
+        await editar_mensagem_telegram(chat_id, msg_id, RECEIPT_UNAVAILABLE_MESSAGE)
+        return
+
+    item = load_pending_item(cache_id)
+    if not item:
+        # A locked approval is only removed when it finishes, so another delivery (or the panel) approved it.
+        await remover_teclado_mensagem_telegram(chat_id, msg_id)
+        await enviar_mensagem_telegram(chat_id, RECEIPT_ALREADY_APPROVED_MESSAGE)
+        return
+    payload_cache = item.get("payload")
+    if (
+        pending_revision(item) != locked_revision
+        or item.get("approval_claimed_revision") != locked_revision
+        or not isinstance(payload_cache, dict)
+    ):
+        raise RuntimeError("Claimed receipt revision is unavailable.")
+
+    _, _, registros_salvos = gravar_lote_no_banco_com_registros(
+        payload_cache,
+        source_update_id=item["source_update_id"],
+        origin_chat_id=chat_id,
+    )
+    if stage_callback:
+        await stage_callback("approval_persisted", progress_message_id)
+        await stage_callback("telegram_delivery", progress_message_id)
+    await remover_teclado_mensagem_telegram(chat_id, msg_id)
+    if stage_callback:
+        await stage_callback("approval_keyboard_removed", progress_message_id)
+        await stage_callback("telegram_delivery", progress_message_id)
+    if not payload_cache.get("_approval_summary_sent"):
+        await enviar_mensagem_telegram(chat_id, formatar_resumo_registros_salvos(registros_salvos))
+        mark_pending_summary_sent(cache_id, payload_cache)
+        if stage_callback:
+            await stage_callback("approval_summary_sent", progress_message_id)
+    delete_pending_item(cache_id)
+    logger.info({"event": "receipt_approved", "cache_id": cache_id, "revision": locked_revision, "update_id": source_update_id})
+
+
+async def _discard_receipt_or_explain(item, chat_id, msg_id, origin_user_id):
+    status = discard_receipt_pending(item["id"], chat_id, origin_user_id)
+    if status == "discarded":
+        return True
+    await _explain_receipt_blocked(
+        chat_id,
+        msg_id,
+        item,
+        RECEIPT_APPROVAL_STARTED_MESSAGE if status == "claimed" else RECEIPT_UNAVAILABLE_MESSAGE,
+    )
+    return False
+
+
+async def _handle_receipt_edit_callback(callback, chat_id, msg_id, origin_user_id, source_update_id, stage_callback, progress_message_id):
+    cache_id = callback.cache_id
+    item = load_pending_item(cache_id)
+    if not item:
+        # The row is deleted on approval, cancel and expiry alike, so a missing draft cannot say which.
+        message = RECEIPT_NOT_PENDING_MESSAGE if callback.action == "ca" else RECEIPT_UNAVAILABLE_MESSAGE
+        await editar_mensagem_telegram(chat_id, msg_id, message)
+        return
+    # Anything not bound to exactly this chat and sender is ignored without touching the message.
+    if item.get("kind") != "receipt_batch" or not matches_pending_origin_exact(item, chat_id, origin_user_id):
+        return
+
+    if callback.action == "ca":
+        await _approve_receipt(item, callback.number, chat_id, msg_id, origin_user_id, source_update_id, stage_callback, progress_message_id)
+        return
+
+    rows, error = _receipt_editable_rows(item)
+    if error:
+        await _explain_receipt_blocked(chat_id, msg_id, item, error)
+        return
+
+    if callback.action == "cv":
+        await _show_receipt_summary(chat_id, msg_id, cache_id, item["payload"], pending_revision(item))
+        return
+    if callback.action == "cc":
+        await _change_receipt_item_category(item, callback, rows, chat_id, msg_id, origin_user_id, source_update_id)
+        return
+
+    row = rows[callback.number - 1] if 1 <= callback.number <= len(rows) else None
+    if callback.action == "ci" and row:
+        text, keyboard = _receipt_item_screen(cache_id, row)
+    elif callback.action == "cs" and row:
+        text, keyboard = _receipt_category_screen(cache_id, row)
+    else:
+        page = callback.number if callback.action == "cl" else 0
+        text, keyboard = _receipt_list_screen(cache_id, rows, page)
+    await editar_mensagem_telegram(chat_id, msg_id, text, keyboard)
 
 
 async def _apply_duplicate_decision(item, decision, chat_id, *, deliver, remove_keyboard=None):
@@ -270,14 +572,12 @@ async def _resume_existing_effect(chat_id, source_update_id, progress_message_id
     payload = pending.get("payload")
     if not isinstance(payload, dict):
         return False
-    dados_lote = _normalize_dados_lote(payload)
-    grupos, total_final, desc_global = aplicar_map_reduce(dados_lote)
-    texto_resumo = gerar_mensagem_resumo(pending["id"], dados_lote, grupos, total_final, desc_global)
+    # The stored payload already carries every persisted category correction.
     await _deliver_final_message(
         chat_id,
         progress_message_id,
-        texto_resumo,
-        _receipt_approval_keyboard(pending["id"]),
+        gerar_resumo_cupom(pending["id"], payload),
+        _receipt_approval_keyboard(pending["id"], pending_revision(pending) or 0),
     )
     logger.info({"event": "persisted_pending_effect_resumed", "update_id": source_update_id})
     return True
@@ -344,6 +644,21 @@ async def processar_update_assincrono(
             acao_bruta = cb["data"]
             origin_user_id = cb.get("from", {}).get("id")
 
+            if isinstance(acao_bruta, str) and ":" in acao_bruta:
+                await responder_callback_telegram(cb["id"])
+                receipt_callback = _parse_receipt_callback(acao_bruta)
+                if receipt_callback is not None:
+                    await _handle_receipt_edit_callback(
+                        receipt_callback,
+                        chat_id,
+                        msg_id,
+                        origin_user_id,
+                        source_update_id,
+                        stage_callback,
+                        progress_message_id,
+                    )
+                return
+
             if "_" in acao_bruta:
                 acao, cache_id = acao_bruta.split("_", 1)
             else:
@@ -366,8 +681,27 @@ async def processar_update_assincrono(
                     with_error_reference("❌ Rascunho expirado ou já processado.", update_id=source_update_id),
                 )
                 return
-            if pending_item_expired(item):
-                delete_pending_item(cache_id)
+            approval_started = item.get("kind") == "receipt_batch" and item.get("approval_claimed_revision") is not None
+            # An approval that already started is finished by its own retry, even past the deadline.
+            if pending_item_expired(item) and not approval_started:
+                if item.get("kind") == "receipt_batch":
+                    # The snapshot may be outdated: the atomic discard is bound to the origin
+                    # and refuses to delete a draft whose approval was claimed after the read.
+                    if not matches_pending_origin(item, chat_id, origin_user_id):
+                        await editar_mensagem_telegram(
+                            chat_id,
+                            msg_id,
+                            with_error_reference(
+                                "❌ Operação não autorizada para esta conversa.",
+                                update_id=source_update_id,
+                            ),
+                        )
+                        return
+                    if discard_receipt_pending(cache_id, chat_id, origin_user_id) == "claimed":
+                        await _explain_receipt_blocked(chat_id, msg_id, item, RECEIPT_APPROVAL_STARTED_MESSAGE)
+                        return
+                else:
+                    delete_pending_item(cache_id)
                 await editar_mensagem_telegram(
                     chat_id,
                     msg_id,
@@ -399,27 +733,10 @@ async def processar_update_assincrono(
                         ),
                     )
                     return
-                effect_source_update_id = item.get("source_update_id")
-                if effect_source_update_id is None:
-                    effect_source_update_id = source_update_id
-                _, _, registros_salvos = gravar_lote_no_banco_com_registros(
-                    payload_cache,
-                    source_update_id=effect_source_update_id,
-                    origin_chat_id=chat_id,
+                # Summaries sent before the category editor carry this button; it stands for revision 0.
+                await _approve_receipt(
+                    item, 0, chat_id, msg_id, origin_user_id, source_update_id, stage_callback, progress_message_id
                 )
-                if stage_callback:
-                    await stage_callback("approval_persisted", progress_message_id)
-                    await stage_callback("telegram_delivery", progress_message_id)
-                await remover_teclado_mensagem_telegram(chat_id, msg_id)
-                if stage_callback:
-                    await stage_callback("approval_keyboard_removed", progress_message_id)
-                    await stage_callback("telegram_delivery", progress_message_id)
-                if not payload_cache.get("_approval_summary_sent"):
-                    await enviar_mensagem_telegram(chat_id, formatar_resumo_registros_salvos(registros_salvos))
-                    mark_pending_summary_sent(cache_id, payload_cache)
-                    if stage_callback:
-                        await stage_callback("approval_summary_sent", progress_message_id)
-                delete_pending_item(cache_id)
 
             elif acao == "editar":
                 if pending_kind != "receipt_batch":
@@ -432,9 +749,12 @@ async def processar_update_assincrono(
                         ),
                     )
                     return
+                # The draft is discarded first, atomically, so the text edit can never
+                # run alongside an approval that already started.
+                if not await _discard_receipt_or_explain(item, chat_id, msg_id, origin_user_id):
+                    return
                 texto_edit = gerar_texto_edicao(payload_cache)
                 await editar_mensagem_telegram(chat_id, msg_id, f"📝 **MODO EDIÇÃO**\nCopie, altere as categorias/valores e envie:\n\n`{texto_edit}`")
-                delete_pending_item(cache_id)
 
             elif acao == "confirmdel":
                 if pending_kind != "delete_confirmation":
@@ -463,6 +783,11 @@ async def processar_update_assincrono(
                 delete_pending_item(cache_id)
 
             elif acao == "cancelar":
+                if pending_kind == "receipt_batch":
+                    if not await _discard_receipt_or_explain(item, chat_id, msg_id, origin_user_id):
+                        return
+                    await editar_mensagem_telegram(chat_id, msg_id, "❌ **Operação Cancelada.** A base de dados não foi alterada.")
+                    return
                 await editar_mensagem_telegram(chat_id, msg_id, "❌ **Operação Cancelada.** A base de dados não foi alterada.")
                 delete_pending_item(cache_id)
 
@@ -656,7 +981,7 @@ async def processar_update_assincrono(
 
             grupos, total_final, desc_global = aplicar_map_reduce(dados_lote)
             texto_resumo = gerar_mensagem_resumo(cache_record["id"], dados_lote, grupos, total_final, desc_global)
-            teclado = _receipt_approval_keyboard(cache_record["id"])
+            teclado = _receipt_approval_keyboard(cache_record["id"], pending_revision(cache_record) or 0)
             await _deliver_final_message(chat_id, progress_message_id, texto_resumo, teclado, stage_callback)
 
         elif intencao == "salvar_edicao_cupom":

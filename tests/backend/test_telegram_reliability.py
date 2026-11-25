@@ -623,7 +623,7 @@ class TestFinancialEffects:
         llm.assert_not_awaited()
         assert "Mercado" in delivery.await_args.args[2]
         assert "R$ 10.00" in delivery.await_args.args[2]
-        assert delivery.await_args.args[3]["inline_keyboard"][0][0]["callback_data"] == "aprovar_pending-1"
+        assert delivery.await_args.args[3]["inline_keyboard"][0][0]["callback_data"] == "ca:0:pending-1"
 
     @pytest.mark.asyncio
     async def test_replay_resumes_persisted_financial_records_before_calling_ai(self):
@@ -859,6 +859,8 @@ class TestFinancialEffects:
             "kind": "receipt_batch",
             "payload": {"itens": [], "metodo_pagamento": "Pix", "conta": "Conta"},
             "source_update_id": 701,
+            "payload_revision": 0,
+            "approval_claimed_revision": 0,
         }
         saved = MagicMock(return_value=(0, 0.0, []))
 
@@ -866,7 +868,8 @@ class TestFinancialEffects:
             handlers, "load_pending_item", return_value=pending
         ), patch.object(handlers, "pending_item_expired", return_value=False), patch.object(
             handlers, "matches_pending_origin", return_value=True
-        ), patch.object(handlers, "gravar_lote_no_banco_com_registros", saved), patch.object(
+        ), patch.object(handlers, "claim_receipt_approval", return_value=("claimed", 0)), patch.object(
+            handlers, "gravar_lote_no_banco_com_registros", saved), patch.object(
             handlers, "remover_teclado_mensagem_telegram", AsyncMock()
         ) as remove_keyboard, patch.object(handlers, "enviar_mensagem_telegram", AsyncMock()) as send_summary, patch.object(
             handlers, "editar_mensagem_telegram", AsyncMock()
@@ -896,13 +899,16 @@ class TestFinancialEffects:
             "kind": "receipt_batch",
             "payload": {"itens": [], "metodo_pagamento": "Pix", "conta": "Conta"},
             "source_update_id": 701,
+            "payload_revision": 0,
+            "approval_claimed_revision": 0,
         }
         delete_pending = MagicMock()
         with patch.object(handlers, "responder_callback_telegram", AsyncMock()), patch.object(
             handlers, "load_pending_item", return_value=pending
         ), patch.object(handlers, "pending_item_expired", return_value=False), patch.object(
             handlers, "matches_pending_origin", return_value=True
-        ), patch.object(handlers, "gravar_lote_no_banco_com_registros", return_value=(1, 10.0, [])), patch.object(
+        ), patch.object(handlers, "claim_receipt_approval", return_value=("claimed", 0)), patch.object(
+            handlers, "gravar_lote_no_banco_com_registros", return_value=(1, 10.0, [])), patch.object(
             handlers, "remover_teclado_mensagem_telegram", AsyncMock()
         ), patch.object(
             handlers, "enviar_mensagem_telegram", AsyncMock(side_effect=RuntimeError("telegram unavailable"))
@@ -934,12 +940,15 @@ class TestFinancialEffects:
                 "_approval_summary_sent": True,
             },
             "source_update_id": 701,
+            "payload_revision": 0,
+            "approval_claimed_revision": 0,
         }
         with patch.object(handlers, "responder_callback_telegram", AsyncMock()), patch.object(
             handlers, "load_pending_item", return_value=pending
         ), patch.object(handlers, "pending_item_expired", return_value=False), patch.object(
             handlers, "matches_pending_origin", return_value=True
-        ), patch.object(handlers, "gravar_lote_no_banco_com_registros", return_value=(1, 10.0, [])), patch.object(
+        ), patch.object(handlers, "claim_receipt_approval", return_value=("claimed", 0)), patch.object(
+            handlers, "gravar_lote_no_banco_com_registros", return_value=(1, 10.0, [])), patch.object(
             handlers, "remover_teclado_mensagem_telegram", AsyncMock()
         ), patch.object(handlers, "enviar_mensagem_telegram", AsyncMock()) as send_summary, patch.object(
             handlers, "delete_pending_item"
@@ -965,13 +974,15 @@ class TestFinancialEffects:
             "kind": "receipt_batch",
             "payload": {"itens": []},
             "source_update_id": 701,
+            "payload_revision": 0,
+            "approval_claimed_revision": 0,
         }
         saved = MagicMock(return_value=(1, 10.0))
 
         async with main.app.test_request_context("/api/admin/cache-aprovacao/pending-1/approve", method="POST"):
             with patch.object(admin_approvals, "autenticar_admin_request", return_value=({"id": "admin"}, None)), patch.object(
                 admin_approvals, "load_pending_item", return_value=pending
-            ), patch.object(admin_approvals, "pending_item_expired", return_value=False), patch.object(
+            ), patch.object(admin_approvals, "claim_receipt_approval_admin", return_value=("claimed", 0)), patch.object(
                 admin_approvals, "gravar_lote_no_banco", saved
             ), patch.object(admin_approvals, "delete_pending_item"), patch.object(
                 admin_approvals, "registrar_auditoria_admin"
